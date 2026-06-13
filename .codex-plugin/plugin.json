@@ -1,0 +1,35 @@
+{
+  "name": "medical-codes-mcp-server",
+  "version": "0.1.0",
+  "description": "Decode, search, validate, and crosswalk US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II — over a bundled offline index.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/medical-codes-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/medical-codes-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "icd-10-cm",
+    "icd-10-pcs",
+    "hcpcs",
+    "medical-codes",
+    "medical-coding",
+    "healthcare"
+  ],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "medical-codes-mcp-server",
+    "shortDescription": "Decode, search, validate, and crosswalk US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II — over a bundled offline index.",
+    "longDescription": "Decode, search, validate, and crosswalk US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II — over a bundled offline index via MCP. STDIO or Streamable HTTP.",
+    "developerName": "cyanheads",
+    "category": "research",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/cyanheads/medical-codes-mcp-server",
+    "defaultPrompt": []
+  }
+}

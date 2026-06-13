@@ -1,0 +1,92 @@
+# =============================================================================
+# OPERATING SYSTEM FILES
+# =============================================================================
+.DS_Store
+Thumbs.db
+
+# =============================================================================
+# IDE AND EDITOR FILES
+# =============================================================================
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+.history/
+
+# =============================================================================
+# NODE.JS & PACKAGE MANAGERS
+# =============================================================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# =============================================================================
+# TYPESCRIPT & BUILD
+# =============================================================================
+dist/
+*.tsbuildinfo
+.tsbuildinfo
+.tsbuildinfo.scripts
+*.js.map
+*.d.ts.map
+*.tgz
+
+# =============================================================================
+# TESTING & COVERAGE
+# =============================================================================
+coverage/
+!coverage/coverage-final.json
+
+# =============================================================================
+# LOGS & DATABASES
+# =============================================================================
+*.log
+*.sqlite
+*.sqlite3
+logs/
+
+# =============================================================================
+# CACHE & TEMPORARY FILES
+# =============================================================================
+.cache/
+.parcel-cache/
+
+# =============================================================================
+# ENVIRONMENT & CONFIGURATION
+# =============================================================================
+.env
+.env.local
+.env.*.local
+.wrangler
+worker-configuration.d.ts
+
+# =============================================================================
+# APPLICATION SPECIFIC
+# =============================================================================
+.storage/
+repomix-output*
+# The bundled SQLite index is the package's core artifact — track and ship it.
+# Ignore everything else under data/ (scratch DBs, source extracts).
+data/*
+!data/medical-codes.db
+# Federal source files the build script ingests (extracted ZIPs / order files /
+# tabular XML). The build input, re-downloadable from the .gov URLs — never
+# committed; only the baked data/medical-codes.db ships.
+.sources/
+# Generated test fixture DB (built on demand by tests/helpers/index-fixture.ts).
+tests/fixtures/*.db
+docs/api/
+docs/devdocs.md
+.mcp.json
+.claude/
+.agents/
+.mcpregistry_github_token
+.mcpregistry_registry_token
+
+# Internal design brief (catalog frontmatter) — local only, not for public repo
+docs/idea.md
