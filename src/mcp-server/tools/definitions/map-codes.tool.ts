@@ -27,6 +27,11 @@ const DIRECTIONS = [
   'rxcui_to_brands',
 ] as const satisfies readonly MapDirection[];
 
+const NO_MAPPING_EXAMPLES: Partial<Record<MapDirection, string>> = {
+  parents: 'e.g. a top-level code has no parent',
+  children: 'e.g. a leaf code has no children',
+};
+
 export const mapCodesTool = tool('medcode_map_codes', {
   title: 'medical-codes-mcp-server',
   description:
@@ -137,9 +142,10 @@ export const mapCodesTool = tool('medcode_map_codes', {
       );
     }
     if (result.hits.length === 0) {
+      const example = NO_MAPPING_EXAMPLES[input.direction];
       throw ctx.fail(
         'no_mapping',
-        `"${input.from.trim()}" resolved but has no ${input.direction} (e.g. a top-level code has no parent).`,
+        `"${input.from.trim()}" resolved but has no ${input.direction}${example ? ` (${example})` : ''}.`,
         { ...ctx.recoveryFor('no_mapping') },
       );
     }

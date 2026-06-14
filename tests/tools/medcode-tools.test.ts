@@ -160,6 +160,22 @@ describe('medcode_map_codes', () => {
       mapCodesTool.handler(mapCodesTool.input.parse({ from: 'E11', direction: 'parents' }), ctx),
     );
     expect(err.data?.reason).toBe('no_mapping');
+    expect(err.message).toContain('has no parents');
+    expect(err.message).toContain('top-level code has no parent');
+  });
+
+  it('uses a children-specific no_mapping example for leaf codes', async () => {
+    const ctx = createMockContext({ errors: mapCodesTool.errors });
+    const err = await caught(() =>
+      mapCodesTool.handler(
+        mapCodesTool.input.parse({ from: 'J0120', direction: 'children', system: 'HCPCS' }),
+        ctx,
+      ),
+    );
+    expect(err.data?.reason).toBe('no_mapping');
+    expect(err.message).toContain('has no children');
+    expect(err.message).toContain('leaf code has no children');
+    expect(err.message).not.toContain('top-level code has no parent');
   });
 });
 
