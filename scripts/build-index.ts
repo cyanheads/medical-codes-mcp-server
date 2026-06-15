@@ -35,6 +35,7 @@ import { fileURLToPath } from 'node:url';
 
 import { createDbWriter, type DbWriter } from './_db-writer.ts';
 import {
+  hcpcsSectionRows,
   parseHcpcsAnweb,
   parseIcd10cmOrder,
   parseIcd10pcsAxes,
@@ -126,6 +127,11 @@ function ingestHcpcs(w: DbWriter, dir: string, year: string): boolean {
   const rows = parseHcpcsAnweb(readFileSync(file, 'utf-8'));
   w.begin();
   for (const r of rows) w.addCode(r);
+  // Materialize the single-letter range buckets (e.g. J0120 → bucket "J") as
+  // browsable category headers. The ANWEB file carries no row for the buckets,
+  // so without these the HCPCS hierarchy top level is unreachable — see
+  // `hcpcsSectionRows`. Seeded from the first letters actually present.
+  for (const b of hcpcsSectionRows(rows.map((r) => r.code.charAt(0)))) w.addCode(b);
   w.commit();
   w.writeMeta({
     system: 'HCPCS',

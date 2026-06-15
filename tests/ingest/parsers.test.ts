@@ -9,6 +9,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  hcpcsSectionRows,
   parseHcpcsAnweb,
   parseIcd10cmOrder,
   parseIcd10pcsAxes,
@@ -277,5 +278,30 @@ describe('parseRxNorm', () => {
     expect(res.rels).toEqual([
       { rxcui: '161', rel: 'has_ingredient', target: '1191', targetType: 'RXCUI' },
     ]);
+  });
+});
+
+describe('hcpcsSectionRows', () => {
+  it('emits one parentless header per distinct present letter, deduped and sorted', () => {
+    const rows = hcpcsSectionRows(['J', 'J', 'E', 'A']);
+    expect(rows.map((r) => r.code)).toEqual(['A', 'E', 'J']);
+    expect(rows.find((r) => r.code === 'J')).toMatchObject({
+      system: 'HCPCS',
+      code: 'J',
+      parent: null,
+      header: true,
+      billable: false,
+      chapter: 'J',
+      longDesc: 'Drugs administered other than oral method',
+    });
+  });
+
+  it('falls back to a generic label for an unmapped letter so it is still browsable', () => {
+    const [row] = hcpcsSectionRows(['Z']);
+    expect(row?.longDesc).toBe('HCPCS Level II section Z');
+  });
+
+  it('returns nothing when no letters are present', () => {
+    expect(hcpcsSectionRows([])).toEqual([]);
   });
 });

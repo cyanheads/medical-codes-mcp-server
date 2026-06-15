@@ -124,6 +124,44 @@ export function hcpcsParent(code: string): string | null {
 }
 
 /**
+ * Human-readable label for each HCPCS Level II single-letter range bucket. The
+ * federal ANWEB source file lists individual codes but carries no row for the
+ * letter ranges themselves, so the bucket rows the index materializes (parallel
+ * to ICD-10-CM 3-char categories) are labeled from this map. Descriptions follow
+ * the CMS HCPCS Level II section groupings. A letter absent here falls back to a
+ * generic label in {@link hcpcsBucketLabel} so a range CMS introduces later is
+ * still browsable rather than a dead branch.
+ */
+export const HCPCS_SECTION_LABELS: Record<string, string> = {
+  A: 'Transportation services and medical & surgical supplies',
+  B: 'Enteral and parenteral therapy',
+  C: 'Outpatient prospective payment system (OPPS) temporary codes',
+  E: 'Durable medical equipment (DME)',
+  G: 'Procedures and professional services (temporary)',
+  H: 'Behavioral health and substance abuse treatment services',
+  J: 'Drugs administered other than oral method',
+  K: 'Durable medical equipment (temporary)',
+  L: 'Orthotic and prosthetic procedures and devices',
+  M: 'Other medical services',
+  P: 'Pathology and laboratory services',
+  Q: 'Temporary codes',
+  R: 'Diagnostic radiology services',
+  S: 'Temporary national codes (non-Medicare)',
+  T: 'National codes for state Medicaid agencies',
+  U: 'Coronavirus diagnostic and laboratory tests',
+  V: 'Vision and hearing services',
+};
+
+/**
+ * Label a HCPCS letter-range bucket from {@link HCPCS_SECTION_LABELS}, falling
+ * back to a generic section label for an unmapped letter so a range CMS adds in
+ * a future quarterly revision is still materialized as a browsable header.
+ */
+export function hcpcsBucketLabel(letter: string): string {
+  return HCPCS_SECTION_LABELS[letter] ?? `HCPCS Level II section ${letter}`;
+}
+
+/**
  * ICD-10-CM chapter label from the first character + leading digits of the
  * category. The 3-char category prefix (letter + 2 digits) is a coarse but
  * stable chapter bucket the order file doesn't carry explicitly; using the

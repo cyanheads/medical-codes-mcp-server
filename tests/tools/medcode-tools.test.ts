@@ -154,12 +154,35 @@ describe('medcode_map_codes', () => {
     expect(err.message).toMatch(/RxNorm/i);
   });
 
-  it('throws no_mapping for a root with no parent', async () => {
+  it('throws no_mapping with a parents-specific example for a root', async () => {
     const ctx = createMockContext({ errors: mapCodesTool.errors });
     const err = await caught(() =>
       mapCodesTool.handler(mapCodesTool.input.parse({ from: 'E11', direction: 'parents' }), ctx),
     );
     expect(err.data?.reason).toBe('no_mapping');
+    expect(err.message).toContain('has no parents');
+    expect(err.message).toContain('a top-level code has no parent');
+  });
+
+  it('throws no_mapping with a children-specific example for a leaf (not the parents wording)', async () => {
+    const ctx = createMockContext({ errors: mapCodesTool.errors });
+    const err = await caught(() =>
+      mapCodesTool.handler(mapCodesTool.input.parse({ from: 'J0120', direction: 'children' }), ctx),
+    );
+    expect(err.data?.reason).toBe('no_mapping');
+    expect(err.message).toContain('has no children');
+    expect(err.message).toContain('a leaf code has no children');
+    expect(err.message).not.toContain('top-level code has no parent');
+  });
+
+  it('maps a HCPCS code to its seeded letter-bucket parent', async () => {
+    const ctx = createMockContext();
+    const out = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: 'J0120', direction: 'parents' }),
+      ctx,
+    );
+    expect(out.resolvedSystem).toBe('HCPCS');
+    expect(out.hits[0]?.value).toBe('J');
   });
 });
 
@@ -193,5 +216,26 @@ describe('medcode_browse_hierarchy', () => {
       ),
     );
     expect(err.data?.reason).toBe('unknown_node');
+  });
+
+  it('returns HCPCS letter buckets at the top level (no node)', async () => {
+    const ctx = createMockContext();
+    const out = await browseHierarchyTool.handler(
+      browseHierarchyTool.input.parse({ system: 'HCPCS' }),
+      ctx,
+    );
+    expect(out.kind).toBe('codes');
+    expect(out.codes.map((c) => c.code)).toContain('J');
+    expect(getEnrichment(ctx)?.shown).toBeGreaterThan(0);
+  });
+
+  it('returns the codes under a HCPCS bucket node', async () => {
+    const ctx = createMockContext();
+    const out = await browseHierarchyTool.handler(
+      browseHierarchyTool.input.parse({ system: 'HCPCS', node: 'J' }),
+      ctx,
+    );
+    expect(out.kind).toBe('codes');
+    expect(out.codes.map((c) => c.code)).toContain('J0120');
   });
 });

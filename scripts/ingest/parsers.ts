@@ -18,7 +18,12 @@
  * @module scripts/ingest/parsers
  */
 
-import { hcpcsParent, icd10cmChapterLetter, icd10cmParent } from '@/services/code-index/schema.js';
+import {
+  hcpcsBucketLabel,
+  hcpcsParent,
+  icd10cmChapterLetter,
+  icd10cmParent,
+} from '@/services/code-index/schema.js';
 import type { CodeInput } from '../_db-writer.ts';
 
 /** Slice a fixed-width field by 1-based inclusive [start, end] (CMS doc convention). */
@@ -227,6 +232,37 @@ export function parseHcpcsAnweb(text: string, asOf = todayYyyymmdd()): CodeInput
     });
   }
   return rows;
+}
+
+/**
+ * Synthesize the HCPCS Level II letter-range bucket rows. HCPCS codes carry a
+ * single-letter parent (`J0120` → `J`), but the federal ANWEB file has no row
+ * for the bucket itself — so without these synthesized headers the top of the
+ * HCPCS hierarchy is unreachable (`browse` with no node finds no `parent IS
+ * NULL` rows, and `node="J"` 404s). Emit one header per distinct first letter
+ * present: `code` = the letter, `parent` = null (a top-level root), `header` =
+ * true, `billable` = false, labeled via {@link hcpcsBucketLabel}. Pass the first
+ * characters of the parsed code set so only buckets that have children are
+ * seeded. Parallels the ICD-10-CM 3-char categories, keeping `browse`,
+ * `map_codes parents/children`, and the `parent IS NULL` root query consistent.
+ */
+export function hcpcsSectionRows(presentLetters: Iterable<string>): CodeInput[] {
+  const letters = [...new Set(presentLetters)].sort();
+  return letters.map((letter) => {
+    const label = hcpcsBucketLabel(letter);
+    return {
+      system: 'HCPCS',
+      code: letter,
+      shortDesc: label,
+      longDesc: label,
+      billable: false,
+      header: true,
+      chapter: letter,
+      parent: null,
+      effective: null,
+      terminated: null,
+    };
+  });
 }
 
 /** A parsed RxNorm prescribable bundle: code rows + relationship + NDC edges. */

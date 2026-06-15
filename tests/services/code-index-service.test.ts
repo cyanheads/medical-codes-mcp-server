@@ -118,6 +118,18 @@ describe('mapCode', () => {
     const r = svc.mapCode('E11', 'parents');
     expect(r.kind === 'ok' && r.hits).toEqual([]);
   });
+  it('maps a HCPCS code to its seeded letter-bucket parent', () => {
+    const r = svc.mapCode('J0120', 'parents');
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') {
+      expect(r.resolvedSystem).toBe('HCPCS');
+      expect(r.hits[0]?.value).toBe('J');
+    }
+  });
+  it('returns ok-empty for a HCPCS leaf with no children', () => {
+    const r = svc.mapCode('J0120', 'children');
+    expect(r.kind === 'ok' && r.hits).toEqual([]);
+  });
 });
 
 describe('browse', () => {
@@ -130,6 +142,20 @@ describe('browse', () => {
     const r = svc.browse('ICD10PCS', undefined, 50);
     expect(r.kind).toBe('axes');
     if (r.kind === 'axes') expect(r.axes.some((a) => a.position === 1)).toBe(true);
+  });
+  it('lists HCPCS top-level letter buckets (no node)', () => {
+    const r = svc.browse('HCPCS', undefined, 50);
+    expect(r.kind).toBe('codes');
+    if (r.kind === 'codes') {
+      const bucket = r.codes.find((c) => c.code === 'J');
+      expect(bucket?.header).toBe(true);
+      expect(bucket?.description).toBe('Drugs administered other than oral method');
+    }
+  });
+  it('lists the codes under a HCPCS letter bucket (node)', () => {
+    const r = svc.browse('HCPCS', 'J', 50);
+    expect(r.kind).toBe('codes');
+    if (r.kind === 'codes') expect(r.codes.map((c) => c.code)).toContain('J0120');
   });
 });
 

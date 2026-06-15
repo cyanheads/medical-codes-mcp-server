@@ -129,8 +129,10 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
     ctx.enrich({ truncated: result.codes.length >= limit, shown: result.codes.length, cap: limit });
     if (result.codes.length === 0) {
       ctx.enrich.notice(
-        `No children under "${input.node ?? '(top level)'}" in ${input.system}. ` +
-          'Omit `node` for the top level, or browse a parent category.',
+        input.node
+          ? `No children under "${input.node}" in ${input.system} — it may be a leaf code. ` +
+              'Omit `node` to list the top level, or browse a parent category.'
+          : `${input.system} has no top-level entries to browse in this release.`,
       );
     }
     ctx.log.info('Browsed hierarchy', { node: input.node ?? null, count: result.codes.length });

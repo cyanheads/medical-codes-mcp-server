@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { hcpcsParent, icd10cmChapterLetter, icd10cmParent } from '@/services/code-index/schema.js';
 import type { SystemId } from '@/services/code-index/types.js';
 import { type CodeInput, createDbWriter } from './_db-writer.js';
+import { hcpcsSectionRows } from './ingest/parsers.ts';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -210,6 +211,10 @@ function main(): void {
       terminated: h.terminated,
     });
   }
+  // Seed the HCPCS letter-range bucket headers exactly as the real build does
+  // (scripts/build-index.ts), so hierarchy tests exercise top-level HCPCS browse
+  // and browse-by-bucket against the same shape the shipped index carries.
+  for (const b of hcpcsSectionRows(HCPCS.map((h) => h.code.charAt(0)))) w.addCode(b);
 
   w.commit();
 
