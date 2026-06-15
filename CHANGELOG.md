@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.2](changelog/0.1.x/0.1.2.md) — 2026-06-15
+
+Add public hosted endpoint at medical-codes.caseyjhand.com/mcp and Install in Claude Desktop badge.
+
 ## [0.1.1](changelog/0.1.x/0.1.1.md) — 2026-06-14
 
 Scope the README title to the published npm name, @cyanheads/medical-codes-mcp-server.
