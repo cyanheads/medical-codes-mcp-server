@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/medical-codes-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/medical-codes-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/medical-codes-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/medical-codes-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -301,13 +301,13 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Building the bundled index
 
-The bundled `data/medical-codes.db` is committed and shipped — you only rebuild it when refreshing to a new federal release:
+The bundled `data/medical-codes.db` is committed and shipped — you only rebuild it when refreshing to a new federal release. The script never downloads: extract the canonical `.gov` source files (ICD-10-CM/PCS order files, HCPCS `ANWEB.txt` — URLs in the script header) into a directory, then point the script at it:
 
 ```sh
-bun run scripts/build-index.ts
+bun run scripts/build-index.ts --from-dir <dir-with-source-files> --fy 2026
 ```
 
-The script downloads the canonical `.gov` source files, parses them (ICD-10-CM/PCS order files, HCPCS `ANWEB.txt`), and emits the single `.db` file. It runs at build time only — the server never downloads anything.
+It parses the source files and emits the single `.db` file. It runs at build time only — the server never downloads anything.
 
 ### Docker
 
