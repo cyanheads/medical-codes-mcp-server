@@ -27,6 +27,17 @@ const DIRECTIONS = [
   'rxcui_to_brands',
 ] as const satisfies readonly MapDirection[];
 
+/**
+ * Direction-specific example for the `no_mapping` "resolved but has no <dir>"
+ * message. Only `parents` and `children` reach that branch — the drug directions
+ * resolve to `source_not_found`, never ok-with-empty-hits — so a direction with
+ * no entry here simply omits the parenthetical rather than asserting a wrong one.
+ */
+const NO_EDGE_EXAMPLE: Partial<Record<MapDirection, string>> = {
+  parents: 'a top-level code has no parent',
+  children: 'a leaf code has no children',
+};
+
 export const mapCodesTool = tool('medcode_map_codes', {
   title: 'medical-codes-mcp-server',
   description:
@@ -137,9 +148,10 @@ export const mapCodesTool = tool('medcode_map_codes', {
       );
     }
     if (result.hits.length === 0) {
+      const example = NO_EDGE_EXAMPLE[input.direction];
       throw ctx.fail(
         'no_mapping',
-        `"${input.from.trim()}" resolved but has no ${input.direction} (e.g. a top-level code has no parent).`,
+        `"${input.from.trim()}" resolved but has no ${input.direction}${example ? ` (e.g. ${example})` : ''}.`,
         { ...ctx.recoveryFor('no_mapping') },
       );
     }
