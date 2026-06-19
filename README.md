@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/medical-codes-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/medical-codes-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/medical-codes-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/medical-codes-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -106,7 +106,7 @@ Validate whether a code is safe to submit, before a claim goes out.
 
 Crosswalk a code across systems and within a hierarchy.
 
-- Hierarchy directions (available now): `parents` and `children` walk a code's prefix hierarchy (ICD-10-CM / HCPCS; ICD-10-PCS codes have no prefix parent)
+- Hierarchy directions (available now): `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full path (ICD-10-CM / HCPCS; ICD-10-PCS codes have no prefix parent)
 - Drug directions (`name_to_rxcui`, `ndc_to_rxcui`, `rxcui_to_ndc`, `rxcui_to_ingredients`, `rxcui_to_brands`) are RxNorm-backed and return `direction_unavailable` until RxNorm is bundled in a later release
 - Every result carries `source` provenance (which system or edge answered) so a chained call uses the right identifier
 
@@ -118,7 +118,7 @@ Orient in an unfamiliar system or enumerate a category's specific codes, without
 
 - With no `node`: top-level entries (ICD-10-CM categories, HCPCS range buckets, or ICD-10-PCS first-axis values)
 - With a `node`: its immediate children
-- ICD-10-CM and HCPCS use a prefix hierarchy (a shorter code is the parent of a longer one); ICD-10-PCS is axis-based — each of the 7 characters is an independent axis, so browsing returns valid next-position axis values, not prefix children
+- ICD-10-CM and HCPCS use a prefix hierarchy (a shorter code is the parent of a longer one); ICD-10-PCS is axis-based — only the top-level Section axis is browsable; positions 2–7 are context-dependent on the preceding axis path and aren't enumerable from a flat partial code
 
 ## Features
 

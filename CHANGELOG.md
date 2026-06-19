@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-06-19
+
+map_codes returns ok-empty with a notice for a resolvable code with no edge (no_mapping reserved for an unresolvable source); check_code names RxNorm as unbundled for out-of-scope numeric codes; PCS browse and depth-1 hierarchy walking documented accurately.
+
 ## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-06-15
 
 Fix unreachable HCPCS hierarchy by seeding letter-range bucket rows, and make the map_codes no_mapping example match the requested direction.
