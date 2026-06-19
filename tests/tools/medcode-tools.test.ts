@@ -129,6 +129,16 @@ describe('medcode_check_code', () => {
     );
     expect(err.data?.reason).toBe('unknown_code');
   });
+
+  it('names RxNorm as unbundled (not "No RXNORM code matches") for a numeric out-of-scope code', async () => {
+    const ctx = createMockContext({ errors: checkCodeTool.errors });
+    const err = await caught(() =>
+      checkCodeTool.handler(checkCodeTool.input.parse({ code: '99213' }), ctx),
+    );
+    expect(err.data?.reason).toBe('unknown_code');
+    expect(err.message).toMatch(/not bundled/i);
+    expect(err.message).not.toMatch(/No RXNORM code matches/i);
+  });
 });
 
 describe('medcode_map_codes', () => {
@@ -154,25 +164,50 @@ describe('medcode_map_codes', () => {
     expect(err.message).toMatch(/RxNorm/i);
   });
 
-  it('throws no_mapping with a parents-specific example for a root', async () => {
-    const ctx = createMockContext({ errors: mapCodesTool.errors });
-    const err = await caught(() =>
-      mapCodesTool.handler(mapCodesTool.input.parse({ from: 'E11', direction: 'parents' }), ctx),
+  it('returns ok-empty with a notice for a top-level code with no parent', async () => {
+    const ctx = createMockContext();
+    const out = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: 'E11', direction: 'parents' }),
+      ctx,
     );
-    expect(err.data?.reason).toBe('no_mapping');
-    expect(err.message).toContain('has no parents');
-    expect(err.message).toContain('a top-level code has no parent');
+    expect(out.hits).toEqual([]);
+    expect(out.resolvedSystem).toBe('ICD10CM');
+    const notice = getEnrichment(ctx)?.notice;
+    expect(notice).toMatch(/no parent/i);
+    expect(notice).toContain('top-level');
   });
 
-  it('throws no_mapping with a children-specific example for a leaf (not the parents wording)', async () => {
+  it('returns ok-empty with a PCS-specific notice for an ICD-10-PCS code with no parent', async () => {
+    const ctx = createMockContext();
+    const out = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: '0DTJ4ZZ', direction: 'parents' }),
+      ctx,
+    );
+    expect(out.hits).toEqual([]);
+    expect(out.resolvedSystem).toBe('ICD10PCS');
+    expect(getEnrichment(ctx)?.notice).toMatch(/axis-based and have no prefix parent/i);
+  });
+
+  it('returns ok-empty with a notice for a leaf with no children (not the parents wording)', async () => {
+    const ctx = createMockContext();
+    const out = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: 'J0120', direction: 'children' }),
+      ctx,
+    );
+    expect(out.hits).toEqual([]);
+    expect(out.resolvedSystem).toBe('HCPCS');
+    const notice = getEnrichment(ctx)?.notice;
+    expect(notice).toMatch(/no children/i);
+    expect(notice).not.toMatch(/no parent/i);
+  });
+
+  it('still throws no_mapping when the source does not resolve to any bundled code', async () => {
     const ctx = createMockContext({ errors: mapCodesTool.errors });
     const err = await caught(() =>
-      mapCodesTool.handler(mapCodesTool.input.parse({ from: 'J0120', direction: 'children' }), ctx),
+      mapCodesTool.handler(mapCodesTool.input.parse({ from: 'Z9999', direction: 'parents' }), ctx),
     );
     expect(err.data?.reason).toBe('no_mapping');
-    expect(err.message).toContain('has no children');
-    expect(err.message).toContain('a leaf code has no children');
-    expect(err.message).not.toContain('top-level code has no parent');
+    expect(err.message).toContain('No bundled code matches');
   });
 
   it('maps a HCPCS code to its seeded letter-bucket parent', async () => {
@@ -237,5 +272,27 @@ describe('medcode_browse_hierarchy', () => {
     );
     expect(out.kind).toBe('codes');
     expect(out.codes.map((c) => c.code)).toContain('J0120');
+  });
+
+  it('returns empty axes plus a context-dependent notice for a partial ICD-10-PCS node', async () => {
+    const ctx = createMockContext();
+    const out = await browseHierarchyTool.handler(
+      browseHierarchyTool.input.parse({ system: 'ICD10PCS', node: '0D' }),
+      ctx,
+    );
+    expect(out.kind).toBe('axes');
+    expect(out.axes).toEqual([]);
+    expect(getEnrichment(ctx)?.notice).toMatch(/context-dependent|not enumerable/i);
+  });
+
+  it('names RxNorm as not bundled when browsing the RXNORM system', async () => {
+    const ctx = createMockContext();
+    const out = await browseHierarchyTool.handler(
+      browseHierarchyTool.input.parse({ system: 'RXNORM' }),
+      ctx,
+    );
+    expect(out.kind).toBe('codes');
+    expect(out.codes).toEqual([]);
+    expect(getEnrichment(ctx)?.notice).toMatch(/not bundled/i);
   });
 });

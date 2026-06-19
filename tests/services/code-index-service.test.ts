@@ -102,6 +102,15 @@ describe('checkCode', () => {
     const r = svc.checkCode('99999');
     expect(r.kind === 'resolved' && r.result.status).toBe('unknown');
   });
+  it('names RxNorm as unbundled for a numeric out-of-scope code, not a per-system not-found', () => {
+    const r = svc.checkCode('99213');
+    expect(r.kind).toBe('resolved');
+    if (r.kind === 'resolved') {
+      expect(r.result.status).toBe('unknown');
+      expect(r.result.whyNot).toMatch(/not bundled/i);
+      expect(r.result.whyNot).not.toMatch(/No RXNORM code matches/i);
+    }
+  });
 });
 
 describe('mapCode', () => {

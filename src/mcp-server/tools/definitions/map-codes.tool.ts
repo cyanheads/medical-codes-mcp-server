@@ -27,21 +27,10 @@ const DIRECTIONS = [
   'rxcui_to_brands',
 ] as const satisfies readonly MapDirection[];
 
-/**
- * Direction-specific example for the `no_mapping` "resolved but has no <dir>"
- * message. Only `parents` and `children` reach that branch — the drug directions
- * resolve to `source_not_found`, never ok-with-empty-hits — so a direction with
- * no entry here simply omits the parenthetical rather than asserting a wrong one.
- */
-const NO_EDGE_EXAMPLE: Partial<Record<MapDirection, string>> = {
-  parents: 'a top-level code has no parent',
-  children: 'a leaf code has no children',
-};
-
 export const mapCodesTool = tool('medcode_map_codes', {
   title: 'medical-codes-mcp-server',
   description:
-    "Crosswalk a US medical code or drug across systems and within a hierarchy. Hierarchy directions (available now): `parents` and `children` walk a code's prefix hierarchy (ICD-10-CM/HCPCS; ICD-10-PCS codes have no prefix parent). Drug directions (RxNorm): `name_to_rxcui`, `ndc_to_rxcui`, `rxcui_to_ndc`, `rxcui_to_ingredients`, `rxcui_to_brands` — these return an error until RxNorm is bundled in a later release. Every result carries `source` provenance (which system or edge answered) so a chained call (e.g. into openfda with a resolved NDC) uses the right identifier.",
+    "Crosswalk a US medical code or drug across systems and within a hierarchy. Hierarchy directions (available now): `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full ancestor or descendant path (ICD-10-CM/HCPCS; ICD-10-PCS codes have no prefix parent). A resolvable code with no edge in the requested direction is a successful empty result with a notice, not an error. Drug directions (RxNorm): `name_to_rxcui`, `ndc_to_rxcui`, `rxcui_to_ndc`, `rxcui_to_ingredients`, `rxcui_to_brands` — these return an error until RxNorm is bundled in a later release. Every result carries `source` provenance (which system or edge answered) so a chained call (e.g. into openfda with a resolved NDC) uses the right identifier.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -55,7 +44,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
     direction: z
       .enum(DIRECTIONS)
       .describe(
-        'What to map to. parents/children walk the code hierarchy; the rxcui/ndc/name directions are RxNorm drug crosswalks (phase 2).',
+        'What to map to. parents/children return the immediate parent or children only (depth-1) — call iteratively to walk a full path; the rxcui/ndc/name directions are RxNorm drug crosswalks (phase 2).',
       ),
     system: z
       .enum(SYSTEM_IDS)
@@ -98,13 +87,22 @@ export const mapCodesTool = tool('medcode_map_codes', {
       .describe('Crosswalk results, each tagged with the edge that produced it.'),
   }),
 
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance when a resolvable code has no edge in the requested direction (e.g. a top-level code has no parent; a leaf has no children; ICD-10-PCS codes have no prefix parent).',
+      ),
+  },
+
   errors: [
     {
       reason: 'no_mapping',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The source resolved but has no edge in the requested direction.',
+      when: 'The source value did not resolve to any bundled code.',
       recovery:
-        'Confirm the direction is supported for this system, or decode the code with medcode_get_code first.',
+        'Check the code, or decode it with medcode_get_code first. A resolvable code with no edge in the requested direction returns an empty result with a notice, not this error.',
     },
     {
       reason: 'direction_unavailable',
@@ -141,19 +139,34 @@ export const mapCodesTool = tool('medcode_map_codes', {
       );
     }
     if (result.kind === 'source_not_found') {
-      throw ctx.fail(
-        'no_mapping',
-        `No "${input.direction}" mapping found for "${input.from.trim()}".`,
-        { ...ctx.recoveryFor('no_mapping') },
-      );
+      throw ctx.fail('no_mapping', `No bundled code matches "${input.from.trim()}".`, {
+        ...ctx.recoveryFor('no_mapping'),
+      });
     }
     if (result.hits.length === 0) {
-      const example = NO_EDGE_EXAMPLE[input.direction];
-      throw ctx.fail(
-        'no_mapping',
-        `"${input.from.trim()}" resolved but has no ${input.direction}${example ? ` (e.g. ${example})` : ''}.`,
-        { ...ctx.recoveryFor('no_mapping') },
+      // Resolved, but no edge in this direction — a successful empty result with a
+      // notice, consistent with search_codes / browse_hierarchy. Only `parents` and
+      // `children` reach this branch (drug directions return source_not_found).
+      const reason =
+        input.direction === 'children'
+          ? 'it is a leaf code with no children'
+          : result.resolvedSystem === 'ICD10PCS'
+            ? 'ICD-10-PCS codes are axis-based and have no prefix parent'
+            : 'it is a top-level code with no parent';
+      ctx.enrich.notice(
+        `"${input.from.trim()}" resolved in ${result.resolvedSystem} but has no ${input.direction} — ${reason}. Decode it with medcode_get_code, or map the opposite direction.`,
       );
+      ctx.log.info('Mapped code (no edge)', {
+        from: input.from,
+        direction: input.direction,
+        resolvedSystem: result.resolvedSystem,
+      });
+      return {
+        from: input.from.trim(),
+        direction: input.direction,
+        resolvedSystem: result.resolvedSystem,
+        hits: [],
+      };
     }
 
     ctx.log.info('Mapped code', {

@@ -107,17 +107,17 @@ const ICD10PCS: { code: string; short: string; long: string }[] = [
 ];
 
 /**
- * PCS axis values (subset): position 1 = section, position 2 = body system, etc.
- * Enough for `medcode_browse_hierarchy` to return valid next-position values.
+ * PCS axis values — only position 1 (Section), mirroring the shipped index. The
+ * real build bakes only the 17 position-1 Section values; positions 2–7 are
+ * context-dependent on the preceding axis path and are not enumerable from a flat
+ * partial code (see `browsePcs`), so a partial PCS browse returns no axes plus a
+ * notice. Seeding deeper positions here would let tests assert a next-position
+ * expansion the shipped server does not implement.
  */
 const PCS_AXES: { position: number; value: string; meaning: string }[] = [
   { position: 1, value: '0', meaning: 'Medical and Surgical' },
   { position: 1, value: '1', meaning: 'Obstetrics' },
   { position: 1, value: '2', meaning: 'Placement' },
-  { position: 2, value: 'D', meaning: 'Gastrointestinal System' },
-  { position: 2, value: '2', meaning: 'Heart and Great Vessels' },
-  { position: 3, value: 'T', meaning: 'Resection' },
-  { position: 3, value: '7', meaning: 'Dilation' },
 ];
 
 /** HCPCS Level II rows; one terminated to exercise the `terminated` status. */

@@ -332,15 +332,24 @@ export class CodeIndexService {
     if (present.length === 0) {
       // Echo a best-guess system for the caller's orientation, if shape suggests one.
       const detected = system ?? detectSystems(rawCode)[0];
+      // A bare integer matches only the RXCUI shape, but RxNorm is not bundled yet
+      // (phase 2). "No RXNORM code matches X" would imply we searched a populated
+      // table; instead name it as unbundled and flag the likely CPT / HCPCS Level I
+      // origin. Gating on hasRxNorm() lets the message auto-correct to a genuine
+      // per-concept not-found once RxNorm lands.
+      const whyNot =
+        detected === 'RXNORM' && !this.hasRxNorm()
+          ? `"${rawCode.trim()}" looks like an RxNorm RXCUI or a CPT / HCPCS Level I code. RxNorm is not bundled in this release, and CPT / HCPCS Level I are out of scope — this server bundles ICD-10-CM, ICD-10-PCS, and HCPCS Level II.`
+          : detected
+            ? `No ${detected} code matches "${rawCode.trim()}" in the bundled release.`
+            : `"${rawCode.trim()}" does not match the shape of any bundled code system.`;
       return {
         kind: 'resolved',
         result: {
           system: detected ?? 'ICD10CM',
           code: rawCode.trim().toUpperCase(),
           status: 'unknown',
-          whyNot: detected
-            ? `No ${detected} code matches "${rawCode.trim()}" in the bundled release.`
-            : `"${rawCode.trim()}" does not match the shape of any bundled code system.`,
+          whyNot,
         },
       };
     }

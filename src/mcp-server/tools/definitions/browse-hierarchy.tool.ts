@@ -2,9 +2,10 @@
  * @fileoverview medcode_browse_hierarchy — walk a code system's hierarchy
  * without a search term. Returns the children of a node, or the top-level
  * entries when no node is given. ICD-10-CM/HCPCS browse the prefix hierarchy
- * (chapter → category → code); ICD-10-PCS browses its axis structure (each of
- * the 7 characters is an independent axis), returning valid next-position axis
- * values rather than prefix children.
+ * (chapter → category → code); ICD-10-PCS exposes only its top-level Section
+ * axis (position 1) — positions 2–7 are context-dependent on the preceding axis
+ * path and are not enumerable from a flat partial code, so a partial PCS node
+ * returns no axes plus a notice.
  * @module mcp-server/tools/definitions/browse-hierarchy.tool
  */
 
@@ -41,7 +42,7 @@ const AxisNodeSchema = z
 export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
   title: 'medical-codes-mcp-server',
   description:
-    "Walk a US medical code system's hierarchy for discovery without a search term. With no `node`, returns the top-level entries (ICD-10-CM categories, HCPCS range buckets, or ICD-10-PCS first-axis values). With a `node`, returns its immediate children. ICD-10-CM and HCPCS use a prefix hierarchy (a shorter code is the parent of a longer one); ICD-10-PCS is axis-based — each of its 7 characters is an independent axis (section, body system, root operation, body part, approach, device, qualifier), so browsing returns the valid values for the next character position, not prefix children. Lets an agent orient in an unfamiliar system or enumerate a category's specific codes.",
+    "Walk a US medical code system's hierarchy for discovery without a search term. With no `node`, returns the top-level entries (ICD-10-CM categories, HCPCS range buckets, or ICD-10-PCS first-axis values). With a `node`, returns its immediate children. ICD-10-CM and HCPCS use a prefix hierarchy (a shorter code is the parent of a longer one); ICD-10-PCS is axis-based — each of its 7 characters is an independent axis (section, body system, root operation, body part, approach, device, qualifier), but only the top-level Section axis is browsable (omit `node`): positions 2–7 are context-dependent on the preceding axis path and are not enumerable from a flat partial code. Lets an agent orient in an unfamiliar system or enumerate a category's specific codes.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -51,7 +52,7 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
       .string()
       .optional()
       .describe(
-        'A node to expand. For ICD-10-CM/HCPCS, a code whose children to list. For ICD-10-PCS, a partial code whose next-position axis values to list. Omit for the top level.',
+        'A node to expand. For ICD-10-CM/HCPCS, a code whose children to list. ICD-10-PCS supports only top-level Section browsing (omit `node`) — a partial PCS code does not expand to next-position axis values. Omit for the top level.',
       ),
     limit: z
       .number()
@@ -74,7 +75,7 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
     axes: z
       .array(AxisNodeSchema)
       .describe(
-        'Valid next-position axis values for a partial PCS code. Empty when kind is "codes".',
+        'The top-level ICD-10-PCS Section axis values (only the Section axis is enumerable). Empty when kind is "codes".',
       ),
   }),
 
@@ -101,7 +102,8 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
 
   handler(input, ctx) {
     const limit = input.limit ?? getServerConfig().maxResults;
-    const result = getCodeIndexService().browse(input.system, input.node, limit);
+    const svc = getCodeIndexService();
+    const result = svc.browse(input.system, input.node, limit);
 
     if (result.kind === 'unknown_node') {
       throw ctx.fail('unknown_node', `Node "${input.node}" does not exist in ${input.system}.`, {
@@ -132,7 +134,9 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
         input.node
           ? `No children under "${input.node}" in ${input.system} — it may be a leaf code. ` +
               'Omit `node` to list the top level, or browse a parent category.'
-          : `${input.system} has no top-level entries to browse in this release.`,
+          : input.system === 'RXNORM' && !svc.hasRxNorm()
+            ? 'RxNorm is not bundled in this release — the drug-crosswalk layer (RXCUI, NDC, ingredients, brands) lands in a later release.'
+            : `${input.system} has no top-level entries to browse in this release.`,
       );
     }
     ctx.log.info('Browsed hierarchy', { node: input.node ?? null, count: result.codes.length });
