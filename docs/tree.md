@@ -1,6 +1,6 @@
 # medical-codes-mcp-server - Directory Structure
 
-Generated on: 2026-06-13 18:13:33
+Generated on: 2026-06-20 11:58:25
 
 ```text
 medical-codes-mcp-server/
@@ -34,6 +34,7 @@ medical-codes-mcp-server/
 │   ├── build-fixture-db.ts
 │   ├── build-index.ts
 │   ├── build.ts
+│   ├── check-dependency-specifiers.ts
 │   ├── check-docs-sync.ts
 │   ├── check-framework-antipatterns.ts
 │   ├── check-skill-versions.ts

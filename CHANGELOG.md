@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-06-20
+
+mcp-ts-core ^0.10.6 → ^0.10.9 maintenance: check-dependency-specifiers devcheck step + pluginManifests packaging check, ctx.content media collector and Canvas SQL gate classification land upstream, six scripts and the framework skill set re-synced. No server behavior change.
+
 ## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-06-19
 
 map_codes returns ok-empty with a notice for a resolvable code with no edge (no_mapping reserved for an unresolvable source); check_code names RxNorm as unbundled for out-of-scope numeric codes; PCS browse and depth-1 hierarchy walking documented accurately.

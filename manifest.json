@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "medical-codes-mcp-server",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Decode, search, validate, and crosswalk US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II — over a bundled offline index. Keyless, deterministic.",
   "author": { "name": "cyanheads" },
   "repository": {
