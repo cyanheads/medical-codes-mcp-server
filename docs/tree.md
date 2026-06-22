@@ -1,6 +1,6 @@
 # medical-codes-mcp-server - Directory Structure
 
-Generated on: 2026-06-20 11:58:25
+Generated on: 2026-06-22 01:11:14
 
 ```text
 medical-codes-mcp-server/
@@ -21,6 +21,7 @@ medical-codes-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── data/
 │   └── medical-codes.db
@@ -28,6 +29,7 @@ medical-codes-mcp-server/
 │   └── design.md
 ├── scripts/
 │   ├── ingest/
+│   │   ├── fetch-rxnav.ts
 │   │   └── parsers.ts
 │   ├── _db-writer.ts
 │   ├── build-changelog.ts

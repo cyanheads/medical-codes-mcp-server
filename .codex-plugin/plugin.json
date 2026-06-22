@@ -1,7 +1,7 @@
 {
   "name": "medical-codes-mcp-server",
-  "version": "0.1.5",
-  "description": "Decode, search, validate, and crosswalk US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II — over a bundled offline index.",
+  "version": "0.2.0",
+  "description": "Decode, search, validate, and crosswalk US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm — over a bundled offline index.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
@@ -17,6 +17,8 @@
     "icd-10-cm",
     "icd-10-pcs",
     "hcpcs",
+    "rxnorm",
+    "ndc",
     "medical-codes",
     "medical-coding",
     "healthcare"
@@ -24,8 +26,8 @@
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "medical-codes-mcp-server",
-    "shortDescription": "Decode, search, validate, and crosswalk US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II — over a bundled offline index.",
-    "longDescription": "Decode, search, validate, and crosswalk US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II — over a bundled offline index via MCP. STDIO or Streamable HTTP.",
+    "shortDescription": "Decode, search, validate, and crosswalk US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm — over a bundled offline index.",
+    "longDescription": "Decode, search, validate, and crosswalk US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm — over a bundled offline index via MCP. STDIO or Streamable HTTP.",
     "developerName": "cyanheads",
     "category": "research",
     "capabilities": ["Read"],

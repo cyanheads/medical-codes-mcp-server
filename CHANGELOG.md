@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-06-21
+
+RxNorm is now bundled and live: the five medcode_map_codes drug directions resolve against the offline index, and medcode_get_code decodes an NDC directly to its RxNorm product. Build-time acquisition moved from the UMLS-gated RRF files to the keyless RxNav REST API.
+
 ## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-06-20
 
 mcp-ts-core ^0.10.6 → ^0.10.9 maintenance: check-dependency-specifiers devcheck step + pluginManifests packaging check, ctx.content media collector and Canvas SQL gate classification land upstream, six scripts and the framework skill set re-synced. No server behavior change.

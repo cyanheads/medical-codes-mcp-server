@@ -1,0 +1,8 @@
+# npm tarball contents are governed by the "files" allowlist in package.json.
+# This .npmignore exists so npm does NOT fall back to .gitignore for exclusions:
+# .gitignore now excludes data/ (the >100 MB bundled SQLite index is a build
+# artifact kept out of git), but data/medical-codes.db MUST ship in the package —
+# without an explicit .npmignore, npm would honor the .gitignore rule and drop it.
+#
+# Nothing here excludes data/medical-codes.db. Keep it that way; it is the core
+# offline data the server reads.
