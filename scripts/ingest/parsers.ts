@@ -272,77 +272,80 @@ export interface RxNormParseResult {
   rels: { rxcui: string; rel: string; target: string; targetType: string }[];
 }
 
+/** A single RxNorm concept from the RxNav cache (`{rxcui,name,tty}`). */
+export interface RxNavConcept {
+  name: string;
+  rxcui: string;
+  tty: string;
+}
+
+/** One product's fetched edges — one line of `products.jsonl` from the fetcher. */
+export interface RxNavProduct {
+  brands: RxNavConcept[];
+  ingredients: RxNavConcept[];
+  ndcs: string[];
+  rxcui: string;
+}
+
 /**
- * Parse the RxNorm Prescribable Content RRF bundle. `RXNCONSO.RRF` →
- * RXCUI/name rows; `RXNSAT.RRF` rows where `ATN='NDC'` → NDC map; `RXNREL.RRF`
- * (with RELA labels) → ingredient/brand edges. Only the prescribable subset
- * (SAB='RXNORM' normalized names) is bundled — never the full release (UMLS-
- * licensed source vocabularies would poison redistribution).
+ * Parse the cached RxNorm Prescribable Content acquired over the keyless RxNav
+ * REST API (see `scripts/ingest/fetch-rxnav.ts`). NLM gates the RxNorm RRF bulk
+ * files behind UMLS/UTS auth, so the offline, keyless, redistributable build is
+ * sourced from RxNav — which serves the public-domain RxNorm normalized
+ * vocabulary, not the UMLS-licensed source vocabularies.
+ *
+ *  - `concepts` (from `allconcepts`) → one `codes(RXNORM)` row per RXCUI (name +
+ *    TTY); powers name→RXCUI search and get_code on an RXCUI.
+ *  - each product's `ndcs` (from `ndcs.json`, already 11-digit) → the NDC↔RXCUI map.
+ *  - each product's `ingredients`/`brands` (from `related.json?tty=IN+PIN+MIN+BN`)
+ *    → `has_ingredient` / `has_tradename` edges keyed by the product RXCUI, the
+ *    direction `rxcui_to_ingredients` / `rxcui_to_brands` query.
+ *
+ * Pure: takes already-parsed JSON, returns rows. Dedups concepts by RXCUI and
+ * edges/NDCs by their natural key so a resumed/re-fetched cache cannot duplicate.
  */
-export function parseRxNorm(files: {
-  rxnconso: string;
-  rxnsat: string;
-  rxnrel: string;
-}): RxNormParseResult {
+export function parseRxNav(concepts: RxNavConcept[], products: RxNavProduct[]): RxNormParseResult {
   const codes: CodeInput[] = [];
   const seen = new Set<string>();
-  // RXNCONSO columns (0-based): 0 RXCUI, 1 LAT, …, 11 SAB, 12 TTY, 13 CODE, 14 STR
-  for (const line of files.rxnconso.split(/\r?\n/)) {
-    if (!line) continue;
-    const c = line.split('|');
-    const rxcui = c[0];
-    const lat = c[1];
-    const sab = c[11];
-    const tty = c[12];
-    const str = c[14];
-    if (!rxcui || lat !== 'ENG' || sab !== 'RXNORM' || !str) continue;
-    if (seen.has(rxcui)) continue;
-    seen.add(rxcui);
+  for (const c of concepts) {
+    if (!c?.rxcui || !c?.name || seen.has(c.rxcui)) continue;
+    seen.add(c.rxcui);
     codes.push({
       system: 'RXNORM',
-      code: rxcui,
-      shortDesc: tty ?? null,
-      longDesc: str,
+      code: c.rxcui,
+      shortDesc: c.tty || null,
+      longDesc: c.name,
       billable: false,
       header: false,
-      chapter: tty ?? null,
+      chapter: c.tty || null,
       parent: null,
       effective: null,
       terminated: null,
     });
   }
 
-  // RXNSAT columns (0-based): 0 RXCUI, …, 8 ATN, 9 SAB, 10 ATV
   const ndcs: { ndc: string; rxcui: string }[] = [];
-  for (const line of files.rxnsat.split(/\r?\n/)) {
-    if (!line) continue;
-    const c = line.split('|');
-    if (c[8] !== 'NDC') continue;
-    const rxcui = c[0];
-    const ndc = (c[10] ?? '').replace(/[^0-9]/g, '');
-    if (rxcui && ndc) ndcs.push({ ndc, rxcui });
-  }
-
-  // RXNREL columns (0-based): 0 RXCUI1, 1 RXAUI1, 2 STYPE1, 3 REL, 4 RXCUI2,
-  // 5 RXAUI2, 6 STYPE2, 7 RELA, 8 RUI, … The directed relationship reads
-  // "RXCUI1 <RELA> RXCUI2"; we keep the ingredient/brand RELA labels.
+  const ndcSeen = new Set<string>();
   const rels: { rxcui: string; rel: string; target: string; targetType: string }[] = [];
-  const RELA_MAP: Record<string, string> = {
-    has_ingredient: 'has_ingredient',
-    has_tradename: 'has_tradename',
-    ingredient_of: 'ingredient_of',
-    tradename_of: 'tradename_of',
+  const relSeen = new Set<string>();
+  const addRel = (rxcui: string, rel: string, t: RxNavConcept, fallbackType: string) => {
+    if (!t?.rxcui) return;
+    const key = `${rxcui}|${rel}|${t.rxcui}`;
+    if (relSeen.has(key)) return;
+    relSeen.add(key);
+    rels.push({ rxcui, rel, target: t.rxcui, targetType: t.tty || fallbackType });
   };
-  for (const line of files.rxnrel.split(/\r?\n/)) {
-    if (!line) continue;
-    const c = line.split('|');
-    const rela = c[7] ?? '';
-    const mapped = RELA_MAP[rela];
-    if (!mapped) continue;
-    const rxcui1 = c[0];
-    const rxcui2 = c[4];
-    if (rxcui1 && rxcui2)
-      rels.push({ rxcui: rxcui1, rel: mapped, target: rxcui2, targetType: 'RXCUI' });
+  for (const p of products) {
+    if (!p?.rxcui) continue;
+    for (const raw of p.ndcs ?? []) {
+      const ndc = String(raw).replace(/[^0-9]/g, '');
+      const key = `${ndc}|${p.rxcui}`;
+      if (!ndc || ndcSeen.has(key)) continue;
+      ndcSeen.add(key);
+      ndcs.push({ ndc, rxcui: p.rxcui });
+    }
+    for (const ing of p.ingredients ?? []) addRel(p.rxcui, 'has_ingredient', ing, 'IN');
+    for (const bn of p.brands ?? []) addRel(p.rxcui, 'has_tradename', bn, 'BN');
   }
 
   return { codes, rels, ndcs };

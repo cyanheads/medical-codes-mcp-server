@@ -1,10 +1,11 @@
 /**
  * @fileoverview Generate the small synthetic fixture database the test suite and
- * a local smoke run exercise. Hand-curated representative rows across ICD-10-CM,
- * ICD-10-PCS, and HCPCS Level II (RxNorm is phase 2 — intentionally empty here,
- * mirroring v1 scope and letting tests exercise the `direction_unavailable`
- * path). Writes to `data/medical-codes.db` by default — the bundled path the
- * service resolves when `MEDCODE_DB_PATH` is unset.
+ * a local smoke run exercise. Hand-curated representative rows across all four
+ * bundled systems — ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm (a small
+ * drug graph with NDC and ingredient/brand edges so the drug crosswalk directions
+ * and offline NDC decode have real data to resolve against). Writes to
+ * `data/medical-codes.db` by default — the bundled path the service resolves when
+ * `MEDCODE_DB_PATH` is unset.
  *
  * Run: `bun run scripts/build-fixture-db.ts [outPath]`
  * @module scripts/build-fixture-db
@@ -17,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { hcpcsParent, icd10cmChapterLetter, icd10cmParent } from '@/services/code-index/schema.js';
 import type { SystemId } from '@/services/code-index/types.js';
 import { type CodeInput, createDbWriter } from './_db-writer.js';
-import { hcpcsSectionRows } from './ingest/parsers.ts';
+import { hcpcsSectionRows, type RxNavConcept } from './ingest/parsers.ts';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -148,6 +149,48 @@ const HCPCS: { code: string; short: string; long: string; terminated: string | n
   },
 ];
 
+/**
+ * A small RxNorm drug graph: two ingredients, one brand, two products. The
+ * products carry NDCs and ingredient/brand edges so the drug-crosswalk directions
+ * and offline NDC decode resolve against real fixture rows. Concept rows mirror
+ * what `parseRxNav` emits (code = RXCUI, longDesc = name, shortDesc/chapter = TTY).
+ */
+const RXNORM: RxNavConcept[] = [
+  { rxcui: '161', name: 'acetaminophen', tty: 'IN' },
+  { rxcui: '1191', name: 'aspirin', tty: 'IN' },
+  { rxcui: '202433', name: 'Tylenol', tty: 'BN' },
+  { rxcui: '198440', name: 'Acetaminophen 500 MG Oral Tablet', tty: 'SCD' },
+  { rxcui: '1049640', name: 'Aspirin 325 MG Oral Tablet', tty: 'SCD' },
+];
+
+/** NDC↔RXCUI map rows (stored 11-digit, as RxNav emits). */
+const RXNORM_NDCS: { ndc: string; rxcui: string }[] = [
+  { ndc: '11111222233', rxcui: '198440' }, // 5-4-2 hyphenated: 11111-2222-33
+  { ndc: '00904516160', rxcui: '1049640' }, // 4-4-2 hyphenated: 0904-5161-60
+];
+
+/** has_ingredient / has_tradename edges keyed by the product RXCUI. */
+const RXNORM_RELS: { rxcui: string; rel: string; target: string; targetType: string }[] = [
+  { rxcui: '198440', rel: 'has_ingredient', target: '161', targetType: 'IN' },
+  { rxcui: '198440', rel: 'has_tradename', target: '202433', targetType: 'BN' },
+  { rxcui: '1049640', rel: 'has_ingredient', target: '1191', targetType: 'IN' },
+];
+
+function rxnormRow(c: RxNavConcept): CodeInput {
+  return {
+    system: 'RXNORM',
+    code: c.rxcui,
+    shortDesc: c.tty,
+    longDesc: c.name,
+    billable: false,
+    header: false,
+    chapter: c.tty,
+    parent: null,
+    effective: null,
+    terminated: null,
+  };
+}
+
 function cmRow(spec: CmSpec): CodeInput {
   return {
     system: 'ICD10CM',
@@ -216,9 +259,20 @@ function main(): void {
   // and browse-by-bucket against the same shape the shipped index carries.
   for (const b of hcpcsSectionRows(HCPCS.map((h) => h.code.charAt(0)))) w.addCode(b);
 
+  // RxNorm drug graph: concepts (codes), ingredient/brand edges, and the NDC map.
+  for (const c of RXNORM) w.addCode(rxnormRow(c));
+  for (const e of RXNORM_RELS) w.addRxNormRel(e.rxcui, e.rel, e.target, e.targetType);
+  for (const n of RXNORM_NDCS) w.addNdc(n.ndc, n.rxcui);
+
   w.commit();
 
-  const meta: { system: SystemId; releaseId: string; start: string; end: string; url: string }[] = [
+  const meta: {
+    system: SystemId;
+    releaseId: string;
+    start: string | null;
+    end: string | null;
+    url: string;
+  }[] = [
     {
       system: 'ICD10CM',
       releaseId: 'ICD-10-CM FY2026 (fixture)',
@@ -240,6 +294,13 @@ function main(): void {
       end: '2026-12-31',
       url: 'https://www.cms.gov/medicare/coding-billing/healthcare-common-procedure-system',
     },
+    {
+      system: 'RXNORM',
+      releaseId: 'RxNorm (current normalized set) (fixture)',
+      start: null,
+      end: null,
+      url: 'https://rxnav.nlm.nih.gov/',
+    },
   ];
   for (const m of meta) {
     w.writeMeta({
@@ -254,7 +315,7 @@ function main(): void {
 
   w.finalize();
   console.log(
-    `Fixture DB written to ${outPath} — ICD10CM: ${ICD10CM.length}, ICD10PCS: ${ICD10PCS.length}, HCPCS: ${HCPCS.length} (RxNorm: 0, phase 2)`,
+    `Fixture DB written to ${outPath} — ICD10CM: ${ICD10CM.length}, ICD10PCS: ${ICD10PCS.length}, HCPCS: ${HCPCS.length}, RxNorm: ${RXNORM.length} concepts / ${RXNORM_RELS.length} edges / ${RXNORM_NDCS.length} NDCs`,
   );
 }
 

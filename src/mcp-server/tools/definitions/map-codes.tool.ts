@@ -1,10 +1,10 @@
 /**
  * @fileoverview medcode_map_codes — crosswalk a code or drug across systems and
- * within a hierarchy. v1 ships the hierarchy directions (code → parents/children);
- * the drug directions (drug name → RXCUI, NDC ↔ RXCUI, RXCUI → ingredients/brands)
- * land with RxNorm in phase 2 and raise `direction_unavailable` until then. The
- * relational bridge between the bundled systems and a composition point with the
- * openfda server (NDC/labels).
+ * within a hierarchy. Hierarchy directions (code → parents/children) and the
+ * RxNorm drug directions (drug name → RXCUI, NDC ↔ RXCUI, RXCUI →
+ * ingredients/brands) are all live against the bundled corpus. The relational
+ * bridge between the bundled systems and a composition point with the openfda
+ * server (NDC/labels).
  * @module mcp-server/tools/definitions/map-codes.tool
  */
 
@@ -30,7 +30,7 @@ const DIRECTIONS = [
 export const mapCodesTool = tool('medcode_map_codes', {
   title: 'medical-codes-mcp-server',
   description:
-    "Crosswalk a US medical code or drug across systems and within a hierarchy. Hierarchy directions (available now): `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full ancestor or descendant path (ICD-10-CM/HCPCS; ICD-10-PCS codes have no prefix parent). A resolvable code with no edge in the requested direction is a successful empty result with a notice, not an error. Drug directions (RxNorm): `name_to_rxcui`, `ndc_to_rxcui`, `rxcui_to_ndc`, `rxcui_to_ingredients`, `rxcui_to_brands` — these return an error until RxNorm is bundled in a later release. Every result carries `source` provenance (which system or edge answered) so a chained call (e.g. into openfda with a resolved NDC) uses the right identifier.",
+    "Crosswalk a US medical code or drug across systems and within a hierarchy. Hierarchy directions: `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full ancestor or descendant path (ICD-10-CM/HCPCS; ICD-10-PCS codes have no prefix parent). A resolvable code with no edge in the requested direction is a successful empty result with a notice, not an error. Drug directions (RxNorm): `name_to_rxcui` (drug name → RXCUI), `ndc_to_rxcui` and `rxcui_to_ndc` (NDC ↔ RXCUI; NDCs accepted hyphenated or 10/11-digit), `rxcui_to_ingredients` and `rxcui_to_brands` (RXCUI → ingredient/brand RXCUIs). Every result carries `source` provenance (which system or edge answered) so a chained call (e.g. into openfda with a resolved NDC) uses the right identifier.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -44,7 +44,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
     direction: z
       .enum(DIRECTIONS)
       .describe(
-        'What to map to. parents/children return the immediate parent or children only (depth-1) — call iteratively to walk a full path; the rxcui/ndc/name directions are RxNorm drug crosswalks (phase 2).',
+        'What to map to. parents/children return the immediate parent or children only (depth-1) — call iteratively to walk a full path; the rxcui/ndc/name directions are RxNorm drug crosswalks.',
       ),
     system: z
       .enum(SYSTEM_IDS)
@@ -107,8 +107,9 @@ export const mapCodesTool = tool('medcode_map_codes', {
     {
       reason: 'direction_unavailable',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'A drug-crosswalk direction was requested before RxNorm (phase 2) is bundled.',
-      recovery: 'Use a hierarchy direction (parents/children); drug crosswalks land with RxNorm.',
+      when: 'A drug-crosswalk direction was requested but this build carries no RxNorm tables.',
+      recovery:
+        'Use a hierarchy direction (parents/children), or rebuild the index with RxNorm bundled (the shipped default).',
     },
     {
       reason: 'ambiguous_system',
@@ -124,7 +125,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
     if (CodeIndexService.isDrugDirection(input.direction) && !svc.hasRxNorm()) {
       throw ctx.fail(
         'direction_unavailable',
-        `The "${input.direction}" crosswalk needs RxNorm, which is not bundled in this release.`,
+        `The "${input.direction}" crosswalk needs RxNorm, which is not present in this build of the index.`,
         { ...ctx.recoveryFor('direction_unavailable') },
       );
     }

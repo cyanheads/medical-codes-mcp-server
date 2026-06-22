@@ -58,3 +58,49 @@ export function detectSystems(rawCode: string): SystemId[] {
   if (RXCUI_RE.test(code)) matches.push('RXNORM');
   return matches;
 }
+
+/**
+ * Expand a National Drug Code to the 11-digit HIPAA form(s) the `ndc_map` stores
+ * (RxNav emits 11-digit). NDC is not a {@link SystemId} — it is an identifier the
+ * server decodes to its RxNorm product (see `getByNdc`), so it is detected here
+ * rather than in `detectSystems`. Returns the candidate 11-digit keys plus
+ * whether the input is an UNAMBIGUOUS NDC.
+ *
+ * - **Hyphenated** `4-4-2` / `5-3-2` / `5-4-1` / `5-4-2`: the segment widths fix
+ *   the 5-4-2 left-padding deterministically → one candidate, `unambiguous: true`
+ *   (a hyphenated drug code is never an RXCUI, so a miss is a real NDC miss).
+ * - **Bare 11 digits**: already the 11-digit form → one candidate, but
+ *   `unambiguous: false` — it also satisfies the RXCUI shape (no current RXCUI is
+ *   that long, but the caller still falls back to RXCUI on a map miss).
+ * - **Bare 10 digits**: segmentation unknown → the three standard `4-4-2` /
+ *   `5-3-2` / `5-4-1` expansions, `unambiguous: false`.
+ * - Anything else → no candidates (not NDC-shaped).
+ */
+export function ndcCandidates(rawCode: string): { candidates: string[]; unambiguous: boolean } {
+  const trimmed = rawCode.trim();
+  const segs = trimmed.split('-');
+
+  if (segs.length === 3 && segs.every((s) => /^[0-9]+$/.test(s))) {
+    const [a, b, c] = segs as [string, string, string];
+    if (a.length <= 5 && b.length <= 4 && c.length <= 2) {
+      const key = a.padStart(5, '0') + b.padStart(4, '0') + c.padStart(2, '0');
+      if (key.length === 11) return { candidates: [key], unambiguous: true };
+    }
+    return { candidates: [], unambiguous: false };
+  }
+
+  if (/^[0-9]+$/.test(trimmed)) {
+    if (trimmed.length === 11) return { candidates: [trimmed], unambiguous: false };
+    if (trimmed.length === 10) {
+      return {
+        candidates: [
+          `0${trimmed}`, // 4-4-2 → pad segment 1
+          `${trimmed.slice(0, 5)}0${trimmed.slice(5)}`, // 5-3-2 → pad segment 2
+          `${trimmed.slice(0, 9)}0${trimmed.slice(9)}`, // 5-4-1 → pad segment 3
+        ],
+        unambiguous: false,
+      };
+    }
+  }
+  return { candidates: [], unambiguous: false };
+}

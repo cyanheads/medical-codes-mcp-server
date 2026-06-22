@@ -177,7 +177,9 @@ So the architecture borrows the `MirrorService` *shape* — SQLite + FTS5, an in
 
 ### 4. Clean v1, then RxNorm (phase 2)
 
-ICD-10-CM/PCS + HCPCS are unambiguously public domain and parse from fixed-width/columnar text → they ship as a clean v1 with zero licensing nuance and no relational crosswalk. RxNorm adds (a) the Prescribable-subset verification, (b) RRF parsing, and (c) the only cross-system relational tables (`rxnorm_rel`, `ndc_map`). Landing it as phase 2 keeps the first release simple and unambiguous. The server identity is "US medical codes" either way — this is a sequencing call, not a scope change. `medcode_map_codes`'s drug-crosswalk directions are inert until phase 2; the tool ships with the hierarchy directions (code → parent/children) in v1 and gains the drug directions when RxNorm lands.
+ICD-10-CM/PCS + HCPCS are unambiguously public domain and parse from fixed-width/columnar text → they ship as a clean v1 with zero licensing nuance and no relational crosswalk. RxNorm adds the only cross-system relational tables (`rxnorm_rel`, `ndc_map`). Landing it as a second phase kept the first release simple and unambiguous. The server identity is "US medical codes" either way — this was a sequencing call, not a scope change. `medcode_map_codes`'s drug directions shipped inert (`direction_unavailable`) in v1, with the hierarchy directions live.
+
+**Update (0.2.0 — RxNorm landed):** the acquisition pivoted from the RRF files to the **keyless RxNav REST API** (`scripts/ingest/fetch-rxnav.ts`), because NLM moved the RxNorm RRF bulk downloads — including the prescribable subset — behind UMLS/UTS authentication, which an offline keyless package can't depend on. RxNav serves the public-domain RxNorm *normalized* vocabulary (never the UMLS-licensed source vocabularies), so the bundled scope is the **current normalized drug set** (ingredients, brands, clinical/branded drugs, packs) with their NDC + ingredient/brand edges — a superset of the prescribable subset, and still fully redistributable. The drug directions and first-class NDC → drug decode in `medcode_get_code` are now live.
 
 ### 5. The `system` enum collapses the surface; auto-detection keeps it ergonomic
 
@@ -214,7 +216,7 @@ Domain failure modes declared as `errors: [{ reason, code, when, recovery }]` so
 | `medcode_search_codes` | `no_match` | `NotFound` | FTS query returned zero rows | Broaden the terms, drop the `system`/`chapter` filter, or try synonyms. |
 | `medcode_check_code` | `unknown_code` | `NotFound` | the code does not exist in the named/detected system | Check the code, or search by description with `medcode_search_codes`. |
 | `medcode_map_codes` | `no_mapping` | `NotFound` | the source resolved but has no edge in the requested `direction` | Confirm the direction is supported for this system, or decode the code with `medcode_get_code` first. |
-| `medcode_map_codes` | `direction_unavailable` | `InvalidParams` | a drug-crosswalk direction requested before RxNorm (phase 2) is bundled | Use a hierarchy direction (parents/children); drug crosswalks land with RxNorm. |
+| `medcode_map_codes` | `direction_unavailable` | `InvalidParams` | a drug-crosswalk direction requested but the build carries no RxNorm tables | Use a hierarchy direction (parents/children), or rebuild the index with RxNorm bundled (the shipped default). |
 | `medcode_browse_hierarchy` | `unknown_node` | `NotFound` | the `node` doesn't exist in the system | Omit `node` to list top-level chapters, or verify the node code. |
 
 Validity vs. existence is deliberately split: a *non-billable* or *terminated* code is a successful `medcode_check_code` result (status + `whyNot`), **not** an error — the agent needs the detail, and throwing would hide it. Only a code that doesn't exist at all is `unknown_code`.

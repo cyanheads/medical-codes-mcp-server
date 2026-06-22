@@ -1,9 +1,10 @@
 /**
  * @fileoverview medcode_get_code — decode one or more codes to their official
- * descriptions across ICD-10-CM, ICD-10-PCS, HCPCS Level II, and (phase 2)
- * RxNorm. The 80% entry point: resolve a code seen in a claim, EHR field, or
- * another health server's output into its meaning. Auto-detects the system from
- * each code's shape; an explicit `system` disambiguates. Array-in /
+ * descriptions across ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm. The 80%
+ * entry point: resolve a code seen in a claim, EHR field, or another health
+ * server's output into its meaning. Auto-detects the system from each code's
+ * shape; an explicit `system` disambiguates. Also decodes a National Drug Code
+ * (NDC) directly to its RxNorm product via the bundled NDC↔RxNorm map. Array-in /
  * partial-success-out — one bad code never fails the rest.
  * @module mcp-server/tools/definitions/get-code.tool
  */
@@ -68,7 +69,13 @@ const FoundCodeSchema = DecodedCodeSchema.extend({
     .array(DecodedCodeSchema)
     .optional()
     .describe('Immediate child codes (present only when includeHierarchy is true).'),
-}).describe('A decoded code, optionally with its parent and immediate children.');
+  source: z
+    .string()
+    .optional()
+    .describe(
+      'Resolution provenance when the input was not a direct code: "NDC" when an NDC was decoded to its RxNorm product via the NDC↔RxNorm map. Omitted for direct code lookups.',
+    ),
+}).describe('A decoded code, optionally with its parent/children and resolution source.');
 
 /** A code that did not resolve, with a per-code reason. */
 const NotFoundCodeSchema = z
@@ -94,16 +101,23 @@ type NotFoundCode = z.infer<typeof NotFoundCodeSchema>;
 export const getCodeTool = tool('medcode_get_code', {
   title: 'medical-codes-mcp-server',
   description:
-    "Decode one or more US medical codes to their official descriptions across ICD-10-CM (diagnoses), ICD-10-PCS (inpatient procedures), HCPCS Level II (supplies/drugs/services), and — when bundled — RxNorm (drugs). Auto-detects the system from each code's shape; pass an explicit `system` only when a value is genuinely ambiguous. Accepts 1–50 codes and returns partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason, so one bad code never fails the batch. Set `includeHierarchy` to attach each code's parent and immediate children. The resolved `system` is echoed on every result for chaining into medcode_map_codes or a billability check.",
+    'Decode one or more US medical codes to their official descriptions across ICD-10-CM (diagnoses), ICD-10-PCS (inpatient procedures), HCPCS Level II (supplies/drugs/services), and RxNorm (drugs, by RXCUI). Also decodes a National Drug Code (NDC) — hyphenated or 10/11-digit — directly to its RxNorm product offline, tagged `source: "NDC"`. Auto-detects the system from each code\'s shape; pass an explicit `system` only when a value is genuinely ambiguous. Accepts 1–50 codes and returns partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason, so one bad code never fails the batch. Set `includeHierarchy` to attach each code\'s parent and immediate children. The resolved `system` is echoed on every result for chaining into medcode_map_codes or a billability check.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
   input: z.object({
     codes: z
-      .array(z.string().min(1).describe('A single code to decode, with or without dots.'))
+      .array(
+        z
+          .string()
+          .min(1)
+          .describe('A single code to decode (with or without dots), an RXCUI, or an NDC.'),
+      )
       .min(1)
       .max(50)
-      .describe('Codes to decode (1–50). Mixed systems are fine — each is detected independently.'),
+      .describe(
+        'Codes to decode (1–50). Mixed systems are fine — each is detected independently. An NDC (hyphenated or 10/11-digit) decodes to its RxNorm product.',
+      ),
     system: z
       .enum(SYSTEM_IDS)
       .optional()
@@ -137,6 +151,26 @@ export const getCodeTool = tool('medcode_get_code', {
     const notFound: NotFoundCode[] = [];
 
     for (const raw of input.codes) {
+      // First-class offline NDC decode: an NDC (hyphenated, or bare 10/11-digit)
+      // resolves to its RxNorm product via the NDC↔RxNorm map. Only when no
+      // explicit `system` is forced — an explicit system means a direct lookup.
+      if (!input.system) {
+        const ndc = svc.getByNdc(raw);
+        if (ndc.kind === 'found') {
+          for (const row of ndc.rows)
+            found.push({ ...CodeIndexService.project(row), source: 'NDC' });
+          continue;
+        }
+        if (ndc.kind === 'no_match') {
+          notFound.push({
+            code: raw,
+            reason: `"${raw}" is a valid NDC format but no bundled drug maps to it (normalized ${ndc.ndc}).`,
+          });
+          continue;
+        }
+        // 'not_ndc' → fall through to the normal system-detection path below.
+      }
+
       const result = svc.getByCode(raw, input.system);
       if (result.kind === 'not_found') {
         const shapes = svc.detectSystem(raw);
@@ -181,6 +215,7 @@ export const getCodeTool = tool('medcode_get_code', {
     const lines: string[] = [];
     for (const c of result.found) {
       lines.push(...renderCodeBlock(c));
+      if (c.source) lines.push(`**Resolved via:** ${c.source}`);
       if (c.parent !== undefined) lines.push(`**Parent:** ${c.parent ?? '(none — root)'}`);
       if (c.children && c.children.length > 0) {
         lines.push(`**Children (${c.children.length}):**`);

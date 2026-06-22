@@ -15,7 +15,7 @@ import { internalError } from '@cyanheads/mcp-ts-core/errors';
 import { logger, requestContextService, runtimeCaps } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
-import { detectSystems } from './detect.js';
+import { detectSystems, ndcCandidates } from './detect.js';
 import { displayCode, icd10cmParent, storageCode } from './schema.js';
 import {
   type BuildMetaRow,
@@ -257,6 +257,62 @@ export class CodeIndexService {
     return row ? { kind: 'found', row } : { kind: 'not_found' };
   }
 
+  /**
+   * Decode a National Drug Code to its RxNorm product(s) via `ndc_map` — the
+   * offline first-class NDC decode. NDC is an identifier, not a bundled system,
+   * so it is resolved here rather than through {@link getByCode}'s system path.
+   *
+   *  - `found` — one or more `RXNORM` rows the NDC maps to (usually one).
+   *  - `no_match` — an UNAMBIGUOUS NDC (hyphenated) that isn't in the bundled
+   *    prescribable set. A hyphenated drug code is never an RXCUI, so this is a
+   *    real NDC miss, not a fall-through case.
+   *  - `not_ndc` — the input isn't NDC-shaped, OR is a bare-digit NDC candidate
+   *    with no map hit (it may instead be an RXCUI — the caller tries that next).
+   */
+  getByNdc(
+    rawCode: string,
+  ):
+    | { kind: 'found'; ndc: string; rows: CodeRow[] }
+    | { kind: 'no_match'; ndc: string }
+    | { kind: 'not_ndc' } {
+    const { candidates, unambiguous } = ndcCandidates(rawCode);
+    if (candidates.length === 0) return { kind: 'not_ndc' };
+
+    const { matched, rxcuis } = this.ndcMapLookup(candidates);
+    if (rxcuis.size === 0)
+      return unambiguous ? { kind: 'no_match', ndc: matched } : { kind: 'not_ndc' };
+
+    const rows: CodeRow[] = [];
+    for (const rxcui of rxcuis) {
+      const row = this.getRow(rxcui, 'RXNORM');
+      if (row) rows.push(row);
+    }
+    if (rows.length === 0)
+      return unambiguous ? { kind: 'no_match', ndc: matched } : { kind: 'not_ndc' };
+    return { kind: 'found', ndc: matched, rows };
+  }
+
+  /**
+   * Resolve every RXCUI any of the candidate 11-digit NDCs maps to in `ndc_map`,
+   * tracking the candidate that actually hit (for the no-match NDC echo). Shared
+   * by {@link getByNdc} and the `ndc_to_rxcui` crosswalk so the map query stays
+   * identical between the two NDC paths.
+   */
+  private ndcMapLookup(candidates: string[]): { matched: string; rxcuis: Set<string> } {
+    const rxcuis = new Set<string>();
+    let matched = candidates[0] ?? '';
+    for (const ndc of candidates) {
+      const hits = this.db.query('SELECT rxcui FROM ndc_map WHERE ndc = ?').all(ndc) as {
+        rxcui: string;
+      }[];
+      if (hits.length > 0) {
+        matched = ndc;
+        for (const h of hits) rxcuis.add(h.rxcui);
+      }
+    }
+    return { matched, rxcuis };
+  }
+
   /** Immediate children of a code within its system (prefix hierarchy). */
   childrenOf(system: SystemId, parentCode: string): DecodedCode[] {
     const rows = this.db
@@ -332,17 +388,20 @@ export class CodeIndexService {
     if (present.length === 0) {
       // Echo a best-guess system for the caller's orientation, if shape suggests one.
       const detected = system ?? detectSystems(rawCode)[0];
-      // A bare integer matches only the RXCUI shape, but RxNorm is not bundled yet
-      // (phase 2). "No RXNORM code matches X" would imply we searched a populated
-      // table; instead name it as unbundled and flag the likely CPT / HCPCS Level I
-      // origin. Gating on hasRxNorm() lets the message auto-correct to a genuine
-      // per-concept not-found once RxNorm lands.
+      // A bare integer matches only the RXCUI shape. If this build carries no
+      // RxNorm (hasRxNorm() false — e.g. a custom MEDCODE_DB_PATH), "No RXNORM
+      // code matches X" would imply we searched a populated table; instead name
+      // RxNorm as absent and flag the likely CPT / HCPCS Level I origin. With
+      // RxNorm bundled the gate falls through to a genuine per-concept not-found.
+      const trimmed = rawCode.trim();
       const whyNot =
-        detected === 'RXNORM' && !this.hasRxNorm()
-          ? `"${rawCode.trim()}" looks like an RxNorm RXCUI or a CPT / HCPCS Level I code. RxNorm is not bundled in this release, and CPT / HCPCS Level I are out of scope — this server bundles ICD-10-CM, ICD-10-PCS, and HCPCS Level II.`
+        detected === 'RXNORM'
+          ? this.hasRxNorm()
+            ? `No RxNorm concept matches "${trimmed}". If this is a CPT or HCPCS Level I code, those are out of scope — this server bundles ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm.`
+            : `"${trimmed}" looks like an RxNorm RXCUI or a CPT / HCPCS Level I code. RxNorm is not present in this build, and CPT / HCPCS Level I are out of scope — this build carries ICD-10-CM, ICD-10-PCS, and HCPCS Level II.`
           : detected
-            ? `No ${detected} code matches "${rawCode.trim()}" in the bundled release.`
-            : `"${rawCode.trim()}" does not match the shape of any bundled code system.`;
+            ? `No ${detected} code matches "${trimmed}" in the bundled release.`
+            : `"${trimmed}" does not match the shape of any bundled code system.`;
       return {
         kind: 'resolved',
         result: {
@@ -404,10 +463,10 @@ export class CodeIndexService {
   }
 
   /**
-   * Crosswalk a value across systems or within a hierarchy. v1 supports the
-   * hierarchy directions (`parents`/`children`); the drug directions resolve
-   * against the RxNorm tables, which are empty until phase 2 — the tool guards
-   * for that before calling.
+   * Crosswalk a value across systems or within a hierarchy. The hierarchy
+   * directions (`parents`/`children`) and the RxNorm-backed drug directions both
+   * resolve here; the tool guards drug directions on `hasRxNorm()` (a graceful
+   * fallback for a build without the RxNorm tables) before calling.
    */
   mapCode(
     from: string,
@@ -459,13 +518,13 @@ export class CodeIndexService {
       };
     }
 
-    // Drug directions — RxNorm-backed (phase 2). The tool short-circuits these
-    // with `direction_unavailable` when the RxNorm tables are unbuilt; this
-    // implementation is live the moment the tables are populated.
+    // Drug directions — RxNorm-backed. The tool short-circuits these with
+    // `direction_unavailable` only when the RxNorm tables are absent from the
+    // build; with RxNorm bundled (the shipped default) they resolve here.
     return this.mapDrug(from, direction);
   }
 
-  /** Whether the RxNorm tables carry any rows (i.e. phase 2 is bundled). */
+  /** Whether the RxNorm tables carry any rows (i.e. RxNorm is bundled in this build). */
   hasRxNorm(): boolean {
     const row = this.db.query('SELECT COUNT(*) AS n FROM rxnorm_rel').get() as { n: number };
     return (row?.n ?? 0) > 0;
@@ -508,15 +567,21 @@ export class CodeIndexService {
         };
       }
       case 'ndc_to_rxcui': {
-        const ndc = value.replace(/[^0-9]/g, '');
-        const rows = this.db.query('SELECT rxcui FROM ndc_map WHERE ndc = ?').all(ndc) as {
-          rxcui: string;
-        }[];
-        if (rows.length === 0) return { kind: 'source_not_found' };
+        // Normalize to the 11-digit form(s) the map stores (RxNav emits 11-digit)
+        // so a 10-digit hyphenated NDC off a package label resolves; fall back to
+        // a plain digit-strip when the value isn't NDC-shaped.
+        const { candidates } = ndcCandidates(value);
+        const keys = candidates.length > 0 ? candidates : [value.replace(/[^0-9]/g, '')];
+        const { rxcuis } = this.ndcMapLookup(keys);
+        if (rxcuis.size === 0) return { kind: 'source_not_found' };
         return {
           kind: 'ok',
           resolvedSystem: 'RXNORM',
-          hits: rows.map((r) => ({ source: 'NDC', system: 'RXNORM' as const, value: r.rxcui })),
+          hits: [...rxcuis].map((rxcui) => ({
+            source: 'NDC',
+            system: 'RXNORM' as const,
+            value: rxcui,
+          })),
         };
       }
       case 'rxcui_to_ndc': {
@@ -574,6 +639,14 @@ export class CodeIndexService {
     | { kind: 'unknown_node' } {
     if (system === 'ICD10PCS') {
       return this.browsePcs(node, limit);
+    }
+
+    if (system === 'RXNORM') {
+      // RxNorm is a flat drug vocabulary in this index — concepts carry no prefix
+      // parent, so there is no hierarchy to walk. Return empty (rather than a
+      // meaningless capped dump of all concepts) and let the tool steer the caller
+      // to search_codes / get_code / map_codes via its notice.
+      return { kind: 'codes', codes: [] };
     }
 
     if (!node) {

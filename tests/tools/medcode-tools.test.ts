@@ -41,8 +41,9 @@ describe('medcode_list_systems', () => {
   it('lists the bundled systems with provenance', async () => {
     const ctx = createMockContext();
     const out = await listSystemsTool.handler(listSystemsTool.input.parse({}), ctx);
-    expect(out.systems.map((s) => s.system)).toEqual(['ICD10CM', 'ICD10PCS', 'HCPCS']);
+    expect(out.systems.map((s) => s.system)).toEqual(['ICD10CM', 'ICD10PCS', 'HCPCS', 'RXNORM']);
     expect(out.systems[0]?.label).toBe('ICD-10-CM');
+    expect(out.systems.find((s) => s.system === 'RXNORM')?.label).toBe('RxNorm');
     expect(out).toEqual(expect.schemaMatching(listSystemsTool.output));
   });
 });
@@ -69,6 +70,33 @@ describe('medcode_get_code', () => {
     const input = getCodeTool.input.parse({ codes: ['99999', 'ZZ999'] });
     const err = await caught(() => getCodeTool.handler(input, ctx));
     expect(err.data?.reason).toBe('no_codes_found');
+  });
+
+  it('decodes an NDC to its RxNorm product, tagged source NDC', async () => {
+    const ctx = createMockContext();
+    const out = await getCodeTool.handler(
+      getCodeTool.input.parse({ codes: ['11111-2222-33'] }),
+      ctx,
+    );
+    expect(out.found[0]).toMatchObject({ system: 'RXNORM', code: '198440', source: 'NDC' });
+  });
+
+  it('decodes a bare RXCUI directly, with no NDC source tag', async () => {
+    const ctx = createMockContext();
+    const out = await getCodeTool.handler(getCodeTool.input.parse({ codes: ['161'] }), ctx);
+    expect(out.found[0]).toMatchObject({ system: 'RXNORM', code: '161' });
+    expect(out.found[0]?.source).toBeUndefined();
+  });
+
+  it('reports an unknown hyphenated NDC as a valid-format NDC miss', async () => {
+    const ctx = createMockContext();
+    const out = await getCodeTool.handler(
+      getCodeTool.input.parse({ codes: ['11111-2222-33', '99999-8888-77'] }),
+      ctx,
+    );
+    expect(out.found.map((f) => f.code)).toEqual(['198440']);
+    expect(out.notFound[0]?.code).toBe('99999-8888-77');
+    expect(out.notFound[0]?.reason).toMatch(/NDC format/i);
   });
 });
 
@@ -130,14 +158,14 @@ describe('medcode_check_code', () => {
     expect(err.data?.reason).toBe('unknown_code');
   });
 
-  it('names RxNorm as unbundled (not "No RXNORM code matches") for a numeric out-of-scope code', async () => {
+  it('explains a numeric out-of-scope code (CPT) as not-in-RxNorm with an out-of-scope hint', async () => {
     const ctx = createMockContext({ errors: checkCodeTool.errors });
     const err = await caught(() =>
       checkCodeTool.handler(checkCodeTool.input.parse({ code: '99213' }), ctx),
     );
     expect(err.data?.reason).toBe('unknown_code');
-    expect(err.message).toMatch(/not bundled/i);
-    expect(err.message).not.toMatch(/No RXNORM code matches/i);
+    expect(err.message).toMatch(/out of scope/i);
+    expect(err.message).toMatch(/CPT/);
   });
 });
 
@@ -152,16 +180,37 @@ describe('medcode_map_codes', () => {
     expect(out.resolvedSystem).toBe('ICD10CM');
   });
 
-  it('throws direction_unavailable for a drug direction before RxNorm is bundled', async () => {
-    const ctx = createMockContext({ errors: mapCodesTool.errors });
-    const err = await caught(() =>
-      mapCodesTool.handler(
-        mapCodesTool.input.parse({ from: 'aspirin', direction: 'name_to_rxcui' }),
-        ctx,
-      ),
+  it('resolves the name_to_rxcui drug direction against bundled RxNorm', async () => {
+    const ctx = createMockContext();
+    const out = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: 'aspirin', direction: 'name_to_rxcui' }),
+      ctx,
     );
-    expect(err.data?.reason).toBe('direction_unavailable');
-    expect(err.message).toMatch(/RxNorm/i);
+    expect(out.resolvedSystem).toBe('RXNORM');
+    expect(out.hits.map((h) => h.value)).toContain('1191');
+  });
+
+  it('resolves ndc_to_rxcui for a hyphenated NDC, tagged source NDC', async () => {
+    const ctx = createMockContext();
+    const out = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: '11111-2222-33', direction: 'ndc_to_rxcui' }),
+      ctx,
+    );
+    expect(out.hits[0]?.value).toBe('198440');
+    expect(out.hits[0]?.source).toBe('NDC');
+  });
+
+  it('resolves rxcui_to_ingredients and rxcui_to_brands edges', async () => {
+    const ing = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: '198440', direction: 'rxcui_to_ingredients' }),
+      createMockContext(),
+    );
+    expect(ing.hits.map((h) => h.value)).toContain('161');
+    const brands = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: '198440', direction: 'rxcui_to_brands' }),
+      createMockContext(),
+    );
+    expect(brands.hits.map((h) => h.value)).toContain('202433');
   });
 
   it('returns ok-empty with a notice for a top-level code with no parent', async () => {
@@ -285,7 +334,7 @@ describe('medcode_browse_hierarchy', () => {
     expect(getEnrichment(ctx)?.notice).toMatch(/context-dependent|not enumerable/i);
   });
 
-  it('names RxNorm as not bundled when browsing the RXNORM system', async () => {
+  it('steers to search/get_code/map_codes when browsing the flat RXNORM vocabulary', async () => {
     const ctx = createMockContext();
     const out = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'RXNORM' }),
@@ -293,6 +342,6 @@ describe('medcode_browse_hierarchy', () => {
     );
     expect(out.kind).toBe('codes');
     expect(out.codes).toEqual([]);
-    expect(getEnrichment(ctx)?.notice).toMatch(/not bundled/i);
+    expect(getEnrichment(ctx)?.notice).toMatch(/flat drug vocabulary|no prefix hierarchy/i);
   });
 });

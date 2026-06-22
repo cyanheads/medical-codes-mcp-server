@@ -14,7 +14,7 @@ import {
   parseIcd10cmOrder,
   parseIcd10pcsAxes,
   parseIcd10pcsOrder,
-  parseRxNorm,
+  parseRxNav,
 } from '../../scripts/ingest/parsers.ts';
 
 /** Build an ICD-10-CM/PCS order line by 1-based column positions. */
@@ -238,46 +238,58 @@ describe('parseHcpcsAnweb', () => {
   });
 });
 
-describe('parseRxNorm', () => {
-  const conso = (rxcui: string, sab: string, tty: string, str: string) =>
-    [rxcui, 'ENG', 'S', '', '', '', 'Y', '', '', '', '', sab, tty, rxcui, str, '', 'N', ''].join(
-      '|',
+describe('parseRxNav', () => {
+  it('maps concepts to RXNORM code rows, deduped by RXCUI', () => {
+    const res = parseRxNav(
+      [
+        { rxcui: '161', name: 'acetaminophen', tty: 'IN' },
+        { rxcui: '198440', name: 'Acetaminophen 500 MG Oral Tablet', tty: 'SCD' },
+        { rxcui: '161', name: 'acetaminophen', tty: 'IN' }, // duplicate RXCUI — dropped
+      ],
+      [],
     );
-  const sat = (rxcui: string, atn: string, sab: string, atv: string) =>
-    [rxcui, '', '', '', '', '', '', '', atn, sab, atv, '', ''].join('|');
-  const rel = (r1: string, rela: string, r2: string) =>
-    [r1, '', 'CUI', '', r2, '', 'CUI', rela, '', '', '', ''].join('|');
-
-  it('keeps only the RXNORM/ENG normalized names, skipping other vocabularies', () => {
-    const res = parseRxNorm({
-      rxnconso: [
-        conso('161', 'RXNORM', 'IN', 'Acetaminophen'),
-        conso('9999', 'MTHSPL', 'XX', 'Skip'),
-      ].join('\n'),
-      rxnsat: '',
-      rxnrel: '',
-    });
-    expect(res.codes).toHaveLength(1);
+    expect(res.codes).toHaveLength(2);
     expect(res.codes[0]).toMatchObject({
       system: 'RXNORM',
       code: '161',
-      longDesc: 'Acetaminophen',
+      longDesc: 'acetaminophen',
+      shortDesc: 'IN',
+      chapter: 'IN',
+      billable: false,
+      header: false,
+      parent: null,
     });
   });
 
-  it('extracts NDC maps and ingredient/brand edges with correct columns', () => {
-    const res = parseRxNorm({
-      rxnconso: '',
-      rxnsat: [
-        sat('161', 'NDC', 'RXNORM', '0000-0000-01'),
-        sat('161', 'OTHER', 'RXNORM', 'ignore'),
-      ].join('\n'),
-      rxnrel: [rel('161', 'has_ingredient', '1191'), rel('1191', 'unrelated_rela', '2')].join('\n'),
-    });
-    expect(res.ndcs).toEqual([{ ndc: '0000000001', rxcui: '161' }]);
+  it('extracts the NDC map and ingredient/brand edges from products, deduped and digit-only', () => {
+    const res = parseRxNav(
+      [],
+      [
+        {
+          rxcui: '198440',
+          ndcs: ['11111-2222-33', '11111222233'], // hyphens stripped → identical key, deduped
+          ingredients: [{ rxcui: '161', name: 'acetaminophen', tty: 'IN' }],
+          brands: [{ rxcui: '202433', name: 'Tylenol', tty: 'BN' }],
+        },
+      ],
+    );
+    expect(res.ndcs).toEqual([{ ndc: '11111222233', rxcui: '198440' }]);
     expect(res.rels).toEqual([
-      { rxcui: '161', rel: 'has_ingredient', target: '1191', targetType: 'RXCUI' },
+      { rxcui: '198440', rel: 'has_ingredient', target: '161', targetType: 'IN' },
+      { rxcui: '198440', rel: 'has_tradename', target: '202433', targetType: 'BN' },
     ]);
+  });
+
+  it('skips concepts missing an rxcui or name, and products missing an rxcui', () => {
+    const res = parseRxNav(
+      [
+        { rxcui: '', name: 'no id', tty: 'IN' },
+        { rxcui: '5', name: '', tty: 'IN' },
+      ],
+      [{ rxcui: '', ndcs: ['1'], ingredients: [], brands: [] }],
+    );
+    expect(res.codes).toEqual([]);
+    expect(res.ndcs).toEqual([]);
   });
 });
 

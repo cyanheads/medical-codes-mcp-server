@@ -83,7 +83,7 @@ export type CheckStatus =
   | 'terminated'
   | 'unknown';
 
-/** Crosswalk directions for `medcode_map_codes`. Drug directions land with RxNorm (phase 2). */
+/** Crosswalk directions for `medcode_map_codes`. The drug directions are RxNorm-backed. */
 export type MapDirection =
   | 'parents'
   | 'children'
@@ -93,7 +93,7 @@ export type MapDirection =
   | 'rxcui_to_ingredients'
   | 'rxcui_to_brands';
 
-/** Map directions that require the RxNorm tables (absent in v1). */
+/** Map directions that require the RxNorm tables (bundled; the tool guards on hasRxNorm()). */
 export const DRUG_DIRECTIONS: readonly MapDirection[] = [
   'name_to_rxcui',
   'ndc_to_rxcui',

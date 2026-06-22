@@ -2,7 +2,7 @@
  * @fileoverview medcode_list_systems — list the bundled code systems with their
  * release identifiers, effective dates, and code counts. Cheap orientation /
  * provenance call so a caller can confirm which ICD-10 fiscal year, HCPCS
- * release, and RxNorm month are active before acting on results.
+ * release, and RxNorm snapshot are active before acting on results.
  * @module mcp-server/tools/definitions/list-systems.tool
  */
 
@@ -17,7 +17,7 @@ const SOURCE_URL =
 export const listSystemsTool = tool('medcode_list_systems', {
   title: 'medical-codes-mcp-server',
   description:
-    'List the bundled US medical code systems with their release identifiers, effective dates, and code counts. Confirms which ICD-10-CM fiscal year, ICD-10-PCS fiscal year, HCPCS Level II release, and (when bundled) RxNorm month are active before acting on any decode, search, or crosswalk result. The corpus is offline and built at package-build time — this call reports exactly which release is baked into the running server. ICD-10-CM/PCS are the US clinical modifications, not the ICD-10/ICD-11 base.',
+    'List the bundled US medical code systems with their release identifiers, effective dates, and code counts. Confirms which ICD-10-CM fiscal year, ICD-10-PCS fiscal year, HCPCS Level II release, and RxNorm Prescribable Content snapshot are active before acting on any decode, search, or crosswalk result. The corpus is offline and built at package-build time — this call reports exactly which release is baked into the running server. ICD-10-CM/PCS are the US clinical modifications, not the ICD-10/ICD-11 base.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 

@@ -28,11 +28,11 @@ await createApp({
     listSystemsTool,
   ],
   instructions:
-    'Offline US healthcare code lookup and crosswalk over a bundled SQLite index — keyless, no rate limit, deterministic. Bundled systems: ICD-10-CM (diagnoses), ICD-10-PCS (inpatient procedures), HCPCS Level II (supplies/drugs/services); RxNorm (drug crosswalks) lands in a later release. Decode a code with medcode_get_code (the 80% entry point; accepts a batch and auto-detects the system per code). Go description → code with medcode_search_codes. Validate billability with medcode_check_code — a non-billable or terminated code is a successful result with a whyNot, not an error. Walk the hierarchy with medcode_browse_hierarchy (prefix for ICD-10-CM/HCPCS, axis-based for ICD-10-PCS). Crosswalk parents/children with medcode_map_codes. Confirm which release is active with medcode_list_systems. ICD-10-CM/PCS are the US clinical modifications, not the ICD-10/ICD-11 base.',
+    'Offline US healthcare code lookup and crosswalk over a bundled SQLite index — keyless, no rate limit, deterministic. Bundled systems: ICD-10-CM (diagnoses), ICD-10-PCS (inpatient procedures), HCPCS Level II (supplies/drugs/services), and RxNorm drugs (the Prescribable Content subset). Decode a code with medcode_get_code (the 80% entry point; accepts a batch, auto-detects the system per code, and decodes an NDC directly to its RxNorm product). Go description → code with medcode_search_codes. Validate billability with medcode_check_code — a non-billable or terminated code is a successful result with a whyNot, not an error. Walk the hierarchy with medcode_browse_hierarchy (prefix for ICD-10-CM/HCPCS, axis-based for ICD-10-PCS). Crosswalk with medcode_map_codes — code parents/children, plus the RxNorm drug directions (drug name → RXCUI, NDC ↔ RXCUI, RXCUI → ingredients/brands). Confirm which release is active with medcode_list_systems. ICD-10-CM/PCS are the US clinical modifications, not the ICD-10/ICD-11 base.',
   landing: {
     requireAuth: false,
     tagline:
-      'Offline US healthcare code lookup and crosswalk — ICD-10-CM, ICD-10-PCS, and HCPCS Level II, keyless and deterministic.',
+      'Offline US healthcare code lookup and crosswalk — ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm drugs, keyless and deterministic.',
     repoRoot: 'https://github.com/cyanheads/medical-codes-mcp-server',
     links: [
       {

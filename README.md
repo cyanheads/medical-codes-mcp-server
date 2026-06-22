@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/medical-codes-mcp-server</h1>
-  <p><b>Decode, search, validate, and crosswalk US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II — over a bundled offline index via MCP. STDIO or Streamable HTTP.</b>
+  <p><b>Decode, search, validate, and crosswalk US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm — over a bundled offline index via MCP. STDIO or Streamable HTTP.</b>
   <div>6 Tools</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.5-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/medical-codes-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/medical-codes-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/medical-codes-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/medical-codes-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -49,8 +49,9 @@ Only freely-redistributable, public-domain US federal code sets are bundled:
 | **ICD-10-CM** | [CDC/NCHS](https://www.cdc.gov/nchs/icd/icd-10-cm/index.html) — US federal, public domain | Diagnoses (billable leaf codes + non-billable category headers) |
 | **ICD-10-PCS** | [CMS](https://www.cms.gov/medicare/coding-billing/icd-10-codes) — US federal, public domain | Inpatient procedures (axis-based 7-character codes) |
 | **HCPCS Level II** | [CMS](https://www.cms.gov/medicare/coding-billing/healthcare-common-procedure-system) — US federal, public domain | Supplies, drugs, and non-physician services |
+| **RxNorm** | [NLM RxNav](https://rxnav.nlm.nih.gov/) — public domain | Drugs: name ↔ RXCUI, NDC ↔ RXCUI crosswalk, ingredients, and brands |
 
-**RxNorm** ([NLM](https://www.nlm.nih.gov/research/umls/rxnorm/), public domain) — the drug-crosswalk layer (drug name ↔ RXCUI ↔ NDC, ingredients, brands) — is **not bundled yet**; it lands in a later release. Until then, `medcode_map_codes`' drug directions return a `direction_unavailable` error, and the hierarchy directions (`parents`/`children`) work today.
+**RxNorm** bundles the current RxNorm **normalized** drug vocabulary — ingredients, brand names, clinical & branded drugs, and packs, with their NDC and ingredient/brand crosswalks. It is sourced at build time from the keyless [RxNav REST API](https://rxnav.nlm.nih.gov/), which serves the public-domain normalized layer — never the UMLS-licensed source vocabularies, so it stays freely redistributable in an offline package. (The full UMLS RxNorm release, which pulls in those licensed sources, is intentionally excluded.) This powers `medcode_map_codes`' drug directions and direct NDC → drug decode in `medcode_get_code`.
 
 CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally absent — they are not freely redistributable, so they cannot ship in an offline package.
 
@@ -65,7 +66,7 @@ Six tools organized goal-first — one per user action, with a `system` discrimi
 | `medcode_get_code` | Decode 1–50 codes to their official descriptions. Auto-detects the system per code; partial-success `found` / `notFound`. |
 | `medcode_search_codes` | Full-text search over official descriptions — go from a clinical description to the code. |
 | `medcode_check_code` | Validate a code's existence, currency, and billability, with a `whyNot` for non-billable/terminated cases. |
-| `medcode_map_codes` | Crosswalk a code within its hierarchy (`parents`/`children`); RxNorm drug directions land in a later release. |
+| `medcode_map_codes` | Crosswalk a code within its hierarchy (`parents`/`children`) or a drug across RxNorm (name ↔ RXCUI, NDC ↔ RXCUI, RXCUI → ingredients/brands). |
 | `medcode_browse_hierarchy` | Walk a system's hierarchy for discovery without a search term. |
 | `medcode_list_systems` | List bundled systems with release identifiers, effective dates, and code counts (provenance). |
 
@@ -74,6 +75,7 @@ Six tools organized goal-first — one per user action, with a `system` discrimi
 Decode one or more codes seen in a claim, EHR field, or another health server's output. The 80% entry point.
 
 - Accepts 1–50 codes; mixed systems are fine — each code's system is detected independently from its shape
+- Decodes a **National Drug Code (NDC)** directly to its RxNorm product — hyphenated (`0777-3105-02`) or 10/11-digit — offline via the bundled NDC↔RxNorm map, tagged `source: "NDC"`
 - Partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason, so one bad code never fails the batch
 - An explicit `system` overrides auto-detection when a value is genuinely ambiguous (an ambiguous code lists its `candidateSystems`)
 - `includeHierarchy` attaches each code's parent and immediate children
@@ -106,8 +108,8 @@ Validate whether a code is safe to submit, before a claim goes out.
 
 Crosswalk a code across systems and within a hierarchy.
 
-- Hierarchy directions (available now): `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full path (ICD-10-CM / HCPCS; ICD-10-PCS codes have no prefix parent)
-- Drug directions (`name_to_rxcui`, `ndc_to_rxcui`, `rxcui_to_ndc`, `rxcui_to_ingredients`, `rxcui_to_brands`) are RxNorm-backed and return `direction_unavailable` until RxNorm is bundled in a later release
+- Hierarchy directions: `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full path (ICD-10-CM / HCPCS; ICD-10-PCS codes have no prefix parent)
+- Drug directions (RxNorm): `name_to_rxcui` (drug name → RXCUI), `ndc_to_rxcui` / `rxcui_to_ndc` (NDC ↔ RXCUI; NDCs accepted hyphenated or 10/11-digit), `rxcui_to_ingredients` / `rxcui_to_brands` (RXCUI → ingredient/brand RXCUIs)
 - Every result carries `source` provenance (which system or edge answered) so a chained call uses the right identifier
 
 ---
@@ -301,7 +303,7 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Building the bundled index
 
-The bundled `data/medical-codes.db` is committed and shipped — you only rebuild it when refreshing to a new federal release. The script never downloads: extract the canonical `.gov` source files (ICD-10-CM/PCS order files, HCPCS `ANWEB.txt` — URLs in the script header) into a directory, then point the script at it:
+The bundled `data/medical-codes.db` ships in the npm package and Docker image but, at >100 MB, is **not committed to git** — fetch it from the [GitHub Release assets](https://github.com/cyanheads/medical-codes-mcp-server/releases) or rebuild it locally with the build script. You only rebuild when refreshing to a new federal release. The script never downloads: extract the canonical `.gov` source files (ICD-10-CM/PCS order files, HCPCS `ANWEB.txt` — URLs in the script header) into a directory, then point the script at it:
 
 ```sh
 bun run scripts/build-index.ts --from-dir <dir-with-source-files> --fy 2026

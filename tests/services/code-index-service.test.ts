@@ -10,6 +10,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import type { CodeIndexService } from '@/services/code-index/code-index-service.js';
 import { escapeLike, toFtsMatch } from '@/services/code-index/code-index-service.js';
+import { ndcCandidates } from '@/services/code-index/detect.js';
 import { ensureIndex } from '../helpers/index-fixture.ts';
 
 let svc: CodeIndexService;
@@ -102,13 +103,13 @@ describe('checkCode', () => {
     const r = svc.checkCode('99999');
     expect(r.kind === 'resolved' && r.result.status).toBe('unknown');
   });
-  it('names RxNorm as unbundled for a numeric out-of-scope code, not a per-system not-found', () => {
-    const r = svc.checkCode('99213');
+  it('explains a numeric out-of-scope code (e.g. CPT) as not-in-RxNorm with an out-of-scope hint', () => {
+    const r = svc.checkCode('99213'); // a CPT code — out of scope, RxNorm-shaped (bare integer)
     expect(r.kind).toBe('resolved');
     if (r.kind === 'resolved') {
       expect(r.result.status).toBe('unknown');
-      expect(r.result.whyNot).toMatch(/not bundled/i);
-      expect(r.result.whyNot).not.toMatch(/No RXNORM code matches/i);
+      expect(r.result.whyNot).toMatch(/out of scope/i);
+      expect(r.result.whyNot).toMatch(/CPT/);
     }
   });
 });
@@ -171,11 +172,16 @@ describe('browse', () => {
 describe('listSystems / hasRxNorm', () => {
   it('lists bundled systems in canonical order with counts', () => {
     const systems = svc.listSystems();
-    expect(systems.map((s) => s.system)).toEqual(['ICD10CM', 'ICD10PCS', 'HCPCS']);
+    expect(systems.map((s) => s.system)).toEqual(['ICD10CM', 'ICD10PCS', 'HCPCS', 'RXNORM']);
     expect(systems[0]?.codeCount).toBeGreaterThan(0);
   });
-  it('reports RxNorm as not bundled in v1', () => {
-    expect(svc.hasRxNorm()).toBe(false);
+  it('reports RxNorm as bundled', () => {
+    expect(svc.hasRxNorm()).toBe(true);
+  });
+  it('records the RxNorm provenance row', () => {
+    const rx = svc.listSystems().find((s) => s.system === 'RXNORM');
+    expect(rx?.releaseId).toMatch(/RxNorm/);
+    expect(rx?.codeCount).toBeGreaterThan(0);
   });
 });
 
@@ -196,5 +202,104 @@ describe('escapeLike', () => {
   });
   it('leaves ordinary drug-name text untouched', () => {
     expect(escapeLike('metformin')).toBe('metformin');
+  });
+});
+
+describe('ndcCandidates', () => {
+  it('normalizes a hyphenated 5-4-2 NDC to one unambiguous 11-digit key', () => {
+    expect(ndcCandidates('11111-2222-33')).toEqual({
+      candidates: ['11111222233'],
+      unambiguous: true,
+    });
+  });
+  it('left-pads a hyphenated 4-4-2 NDC to 5-4-2', () => {
+    expect(ndcCandidates('0904-5161-60')).toEqual({
+      candidates: ['00904516160'],
+      unambiguous: true,
+    });
+  });
+  it('pads the middle segment of a hyphenated 5-3-2 NDC', () => {
+    expect(ndcCandidates('12345-678-90')).toEqual({
+      candidates: ['12345067890'],
+      unambiguous: true,
+    });
+  });
+  it('treats a bare 11-digit value as a single ambiguous candidate (also RXCUI-shaped)', () => {
+    expect(ndcCandidates('11111222233')).toEqual({
+      candidates: ['11111222233'],
+      unambiguous: false,
+    });
+  });
+  it('expands a bare 10-digit value into the three standard segmentations', () => {
+    expect(ndcCandidates('0904516160')).toEqual({
+      candidates: ['00904516160', '09045016160', '09045161600'],
+      unambiguous: false,
+    });
+  });
+  it('returns no candidates for an RXCUI-length integer or a non-NDC shape', () => {
+    expect(ndcCandidates('161').candidates).toEqual([]);
+    expect(ndcCandidates('E11.9').candidates).toEqual([]);
+  });
+});
+
+describe('getByCode (RxNorm)', () => {
+  it('decodes a bare RXCUI to its concept', () => {
+    const r = svc.getByCode('161');
+    expect(r.kind).toBe('found');
+    if (r.kind === 'found')
+      expect(r.row).toMatchObject({ system: 'RXNORM', code: '161', longDesc: 'acetaminophen' });
+  });
+});
+
+describe('getByNdc', () => {
+  it('decodes a bare 11-digit NDC to its RxNorm product', () => {
+    const r = svc.getByNdc('11111222233');
+    expect(r.kind).toBe('found');
+    if (r.kind === 'found') expect(r.rows[0]?.code).toBe('198440');
+  });
+  it('decodes a hyphenated 5-4-2 NDC', () => {
+    const r = svc.getByNdc('11111-2222-33');
+    expect(r.kind === 'found' && r.rows[0]?.code).toBe('198440');
+  });
+  it('decodes a hyphenated 4-4-2 NDC via 11-digit normalization', () => {
+    const r = svc.getByNdc('0904-5161-60');
+    expect(r.kind === 'found' && r.rows[0]?.code).toBe('1049640');
+  });
+  it('reports no_match for an unambiguous hyphenated NDC absent from the map', () => {
+    expect(svc.getByNdc('99999-8888-77').kind).toBe('no_match');
+  });
+  it('returns not_ndc for a non-NDC shape (falls through to RXCUI/other)', () => {
+    expect(svc.getByNdc('161').kind).toBe('not_ndc');
+    expect(svc.getByNdc('E11.9').kind).toBe('not_ndc');
+  });
+  it('returns not_ndc for a bare-digit NDC candidate with no map hit (may be an RXCUI)', () => {
+    expect(svc.getByNdc('99999888877').kind).toBe('not_ndc');
+  });
+});
+
+describe('mapCode (RxNorm drug directions)', () => {
+  it('name_to_rxcui finds concepts by name substring', () => {
+    const r = svc.mapCode('acetaminophen', 'name_to_rxcui');
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') expect(r.hits.map((h) => h.value)).toContain('161');
+  });
+  it('ndc_to_rxcui resolves a hyphenated NDC to its RXCUI', () => {
+    const r = svc.mapCode('11111-2222-33', 'ndc_to_rxcui');
+    expect(r.kind === 'ok' && r.hits[0]?.value).toBe('198440');
+  });
+  it('rxcui_to_ndc lists the NDCs for a product', () => {
+    const r = svc.mapCode('198440', 'rxcui_to_ndc');
+    expect(r.kind === 'ok' && r.hits.map((h) => h.value)).toContain('11111222233');
+  });
+  it('rxcui_to_ingredients returns the ingredient RXCUIs', () => {
+    const r = svc.mapCode('198440', 'rxcui_to_ingredients');
+    expect(r.kind === 'ok' && r.hits.map((h) => h.value)).toContain('161');
+  });
+  it('rxcui_to_brands returns the brand RXCUIs', () => {
+    const r = svc.mapCode('198440', 'rxcui_to_brands');
+    expect(r.kind === 'ok' && r.hits.map((h) => h.value)).toContain('202433');
+  });
+  it('source_not_found for an unknown drug name', () => {
+    expect(svc.mapCode('zzznotadrug', 'name_to_rxcui').kind).toBe('source_not_found');
   });
 });

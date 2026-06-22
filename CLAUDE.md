@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Server:** medical-codes-mcp-server
-**Version:** 0.1.5
+**Version:** 0.2.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.10.9`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
@@ -124,7 +124,7 @@ await createApp({
 });
 ```
 
-`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. This server uses it to tell the agent which tool is the 80% entry point, that a non-billable/terminated code is a successful `medcode_check_code` result, and that RxNorm drug crosswalks land in a later release.
+`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. This server uses it to tell the agent which tool is the 80% entry point, that a non-billable/terminated code is a successful `medcode_check_code` result, and that the RxNorm drug crosswalks are live (including direct NDC → drug decode).
 
 ---
 

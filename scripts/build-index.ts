@@ -18,12 +18,17 @@
  *      → icd10pcs_order_<FY>.txt  (+ icd10pcs_tabular_<FY>.xml for pcs_axes)
  *  - HCPCS Level II annual file: CMS HCPCS page
  *      → HCPC<yr>_CONTR_ANWEB.txt
- *  - RxNorm Prescribable Content subset (PHASE 2 — not bundled in v1): NLM
- *      → RxNorm_full_prescribe_<MMDDYYYY>.zip → RXNCONSO/RXNSAT/RXNREL.RRF
- *      MUST use the Prescribable subset, NEVER the full monthly release (the full
- *      release drags in UMLS-licensed source vocabularies and breaks redistribution).
+ *  - RxNorm Prescribable Content: the keyless RxNav REST API, NOT the RRF files.
+ *      NLM gates the RxNorm RRF bulk downloads (including the prescribable subset)
+ *      behind UMLS/UTS authentication, so they can't source an offline, keyless,
+ *      redistributable package. Instead, run `scripts/ingest/fetch-rxnav.ts` first
+ *      to cache the prescribable concepts + NDCs + ingredient/brand edges under
+ *      `<from-dir>/rxnav/`; this script reads that cache (still no download here).
+ *      RxNav serves the public-domain RxNorm normalized vocabulary, never the
+ *      UMLS-licensed source vocabularies — the same redistribution profile.
  *
  * Usage:
+ *   bun run scripts/ingest/fetch-rxnav.ts                                    # once, for RxNorm
  *   bun run scripts/build-index.ts --from-dir ./.sources --fy 2026 [--out data/medical-codes.db]
  *   Expected files in --from-dir (match the names above; the script probes common variants).
  * @module scripts/build-index
@@ -40,7 +45,9 @@ import {
   parseIcd10cmOrder,
   parseIcd10pcsAxes,
   parseIcd10pcsOrder,
-  parseRxNorm,
+  parseRxNav,
+  type RxNavConcept,
+  type RxNavProduct,
 } from './ingest/parsers.ts';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -146,15 +153,21 @@ function ingestHcpcs(w: DbWriter, dir: string, year: string): boolean {
 }
 
 function ingestRxNorm(w: DbWriter, dir: string): boolean {
-  const conso = findFile(dir, 'rxnconso');
-  const sat = findFile(dir, 'rxnsat');
-  const rel = findFile(dir, 'rxnrel');
-  if (!conso || !sat || !rel) return false;
-  const parsed = parseRxNorm({
-    rxnconso: readFileSync(conso, 'utf-8'),
-    rxnsat: readFileSync(sat, 'utf-8'),
-    rxnrel: readFileSync(rel, 'utf-8'),
-  });
+  // RxNorm comes from the keyless RxNav cache the fetcher writes under
+  // `<dir>/rxnav/` (concepts.json + products.jsonl) — NOT the RRF files, which
+  // NLM gates behind UMLS/UTS auth. Run scripts/ingest/fetch-rxnav.ts first.
+  const rxnavDir = join(dir, 'rxnav');
+  const conceptsPath = join(rxnavDir, 'concepts.json');
+  const productsPath = join(rxnavDir, 'products.jsonl');
+  if (!existsSync(conceptsPath) || !existsSync(productsPath)) return false;
+
+  const concepts = JSON.parse(readFileSync(conceptsPath, 'utf-8')).concepts as RxNavConcept[];
+  const products = readFileSync(productsPath, 'utf-8')
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as RxNavProduct);
+
+  const parsed = parseRxNav(concepts, products);
   w.begin();
   for (const r of parsed.codes) w.addCode(r);
   for (const e of parsed.rels) w.addRxNormRel(e.rxcui, e.rel, e.target, e.targetType);
@@ -162,11 +175,15 @@ function ingestRxNorm(w: DbWriter, dir: string): boolean {
   w.commit();
   w.writeMeta({
     system: 'RXNORM',
-    releaseId: 'RxNorm Prescribable Content',
+    // The current RxNorm normalized drug vocabulary (ingredients, brand names,
+    // clinical/branded drugs, and packs) from RxNav — the public-domain layer,
+    // never the UMLS-licensed source vocabularies. RxNav has no monthly release
+    // label, so the build-meta `built_at` timestamp records the snapshot date.
+    releaseId: 'RxNorm (current normalized set)',
     effectiveStart: null,
     effectiveEnd: null,
     codeCount: w.countFor('RXNORM'),
-    sourceUrl: 'https://www.nlm.nih.gov/research/umls/rxnorm/docs/rxnormfiles.html',
+    sourceUrl: 'https://rxnav.nlm.nih.gov/',
   });
   console.log(
     `  RxNorm: ${w.countFor('RXNORM')} concepts, ${parsed.rels.length} edges, ${parsed.ndcs.length} NDC maps`,
@@ -199,7 +216,7 @@ function main(): void {
     icd10cm: ingestIcd10cm(w, fromDir, fy),
     icd10pcs: ingestIcd10pcs(w, fromDir, fy),
     hcpcs: ingestHcpcs(w, fromDir, year),
-    rxnorm: ingestRxNorm(w, fromDir), // phase 2 — only if RRF files are present
+    rxnorm: ingestRxNorm(w, fromDir), // only if the RxNav cache (<dir>/rxnav/) is present
   };
 
   w.finalize();
@@ -208,7 +225,7 @@ function main(): void {
   if (!any) {
     console.error(
       `No recognized source files found in ${fromDir}. Expected at least one of: ` +
-        'icd10cm-order-*.txt, icd10pcs_order_*.txt, *ANWEB.txt, RXNCONSO.RRF.',
+        'icd10cm-order-*.txt, icd10pcs_order_*.txt, *ANWEB.txt, or a rxnav/ cache dir.',
     );
     process.exit(1);
   }
