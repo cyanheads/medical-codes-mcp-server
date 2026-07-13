@@ -1,6 +1,6 @@
 # medical-codes-mcp-server - Directory Structure
 
-Generated on: 2026-06-22 01:11:14
+Generated on: 2026-07-13 20:29:41
 
 ```text
 medical-codes-mcp-server/
@@ -11,10 +11,12 @@ medical-codes-mcp-server/
 │   ├── mcp.json
 │   └── plugin.json
 ├── .github/
-│   └── ISSUE_TEMPLATE/
-│       ├── bug_report.yml
-│       ├── config.yml
-│       └── feature_request.yml
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   ├── config.yml
+│   │   └── feature_request.yml
+│   ├── FUNDING.yml
+│   └── SECURITY.md
 ├── .sources/
 ├── .vscode/
 │   ├── extensions.json
@@ -24,7 +26,6 @@ medical-codes-mcp-server/
 │   ├── 0.2.x/
 │   └── template.md
 ├── data/
-│   └── medical-codes.db
 ├── docs/
 │   └── design.md
 ├── scripts/
@@ -170,13 +171,16 @@ medical-codes-mcp-server/
 │       └── medcode-tools.test.ts
 ├── .dockerignore
 ├── .env.example
+├── .gitattributes
 ├── .gitignore
 ├── .mcpbignore
+├── .npmignore
 ├── AGENTS.md
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile

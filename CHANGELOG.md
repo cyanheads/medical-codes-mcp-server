@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-07-13
+
+RxNorm wording reconciled to the active normalized set, a dead no_match error contract removed from medcode_search_codes, and mcp-ts-core bumped to ^0.10.14 with bunfig supply-chain hardening (Socket scanner, minimumReleaseAge) and a Docker build fix.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-06-21
 
 RxNorm is now bundled and live: the five medcode_map_codes drug directions resolve against the offline index, and medcode_get_code decodes an NDC directly to its RxNorm product. Build-time acquisition moved from the UMLS-gated RRF files to the keyless RxNav REST API.
