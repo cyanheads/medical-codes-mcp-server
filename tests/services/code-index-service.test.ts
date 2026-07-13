@@ -64,11 +64,22 @@ describe('getByCode', () => {
 });
 
 describe('searchFts', () => {
-  it('requires every token (AND semantics)', () => {
-    const hits = svc.searchFts('diabetic neuropathy', { limit: 10 }).codes;
-    expect(hits.map((h) => h.code)).toContain('E11.40');
-    // "polyneuropathy" must not match the "neuropathy" prefix token.
-    expect(hits.map((h) => h.code)).not.toContain('E11.42');
+  it('requires every token (AND semantics) and recalls single-token compounds', () => {
+    const codes = svc.searchFts('diabetic neuropathy', { limit: 10 }).codes.map((h) => h.code);
+    // Prefix tier matches the standalone "neuropathy" token…
+    expect(codes).toContain('E11.40');
+    // …and the substring tier now recalls E11.42 ("…diabetic polyneuropathy"), the
+    // single-token compound the prefix match misses. This inverts the prior
+    // not.toContain assertion that codified the #6 undercoding bug as correct. Both
+    // terms ("diabetic" AND "neuropathy") are still required.
+    expect(codes).toContain('E11.42');
+  });
+
+  it('surfaces compound siblings for a bare single-term query via the substring tier', () => {
+    // Fixture carries E1140 (standalone "neuropathy") and E1142 ("polyneuropathy");
+    // both must surface for a plain "neuropathy" search (E1141/E1143 aren't seeded).
+    const codes = svc.searchFts('neuropathy', { limit: 50 }).codes.map((h) => h.code);
+    expect(codes).toEqual(expect.arrayContaining(['E11.40', 'E11.42']));
   });
 
   it('honors the billableOnly filter', () => {
@@ -166,6 +177,20 @@ describe('browse', () => {
     const r = svc.browse('HCPCS', 'J', { offset: 0, limit: 50 });
     expect(r.kind).toBe('codes');
     if (r.kind === 'codes') expect(r.codes.map((c) => c.code)).toContain('J0120');
+  });
+  it('returns empty axes (not unknown_node) for a complete existing ICD-10-PCS code (#13)', () => {
+    // 0DTJ4ZZ is a complete 7-char PCS code present in the fixture — it exists but
+    // has no deeper axes to browse, so it is a successful empty-axes result.
+    const r = svc.browse('ICD10PCS', '0DTJ4ZZ', { offset: 0, limit: 50 });
+    expect(r.kind).toBe('axes');
+    if (r.kind === 'axes') {
+      expect(r.axes).toEqual([]);
+      expect(r.hasMore).toBe(false);
+    }
+  });
+  it('returns unknown_node for a shape-valid but absent ICD-10-PCS code (#13)', () => {
+    // 0DTJ1ZZ is a well-formed 7-char PCS code absent from the fixture.
+    expect(svc.browse('ICD10PCS', '0DTJ1ZZ', { offset: 0, limit: 50 }).kind).toBe('unknown_node');
   });
 });
 

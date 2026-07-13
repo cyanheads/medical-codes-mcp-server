@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.3](changelog/0.2.x/0.2.3.md) — 2026-07-13
+
+Fixes medcode_browse_hierarchy reporting unknown_node for a complete, existing ICD-10-PCS code; whitespace-only required inputs reaching the service layer (arbitrary results from an unscoped RxNorm name lookup); and medcode_search_codes missing single-token compound matches like mono-/polyneuropathy.
+
 ## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-07-13
 
 Cursor pagination (with nextCursor continuation) for medcode_search_codes, medcode_browse_hierarchy, and medcode_map_codes's children/name_to_rxcui directions, a childrenTruncated flag on medcode_get_code, and a fix for browse_hierarchy's capped children and inaccurate truncation metadata.

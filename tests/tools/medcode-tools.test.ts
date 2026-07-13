@@ -344,6 +344,84 @@ describe('medcode_browse_hierarchy', () => {
     expect(out.codes).toEqual([]);
     expect(getEnrichment(ctx)?.notice).toMatch(/flat drug vocabulary|no prefix hierarchy/i);
   });
+
+  it('returns empty axes with a complete-code notice for a complete ICD-10-PCS code (#13)', async () => {
+    const ctx = createMockContext();
+    const out = await browseHierarchyTool.handler(
+      browseHierarchyTool.input.parse({ system: 'ICD10PCS', node: '0DTJ4ZZ' }),
+      ctx,
+    );
+    expect(out.kind).toBe('axes');
+    expect(out.axes).toEqual([]);
+    // Distinct from the partial-node notice — it names the complete code, not the
+    // "positions 2–7 are context-dependent" partial wording.
+    expect(getEnrichment(ctx)?.notice).toMatch(/complete 7-character/i);
+  });
+
+  it('still throws unknown_node for a shape-valid but absent ICD-10-PCS code (#13)', async () => {
+    const ctx = createMockContext({ errors: browseHierarchyTool.errors });
+    const err = await caught(() =>
+      browseHierarchyTool.handler(
+        browseHierarchyTool.input.parse({ system: 'ICD10PCS', node: '0DTJ1ZZ' }),
+        ctx,
+      ),
+    );
+    expect(err.data?.reason).toBe('unknown_node');
+  });
+});
+
+describe('whitespace-only required strings are rejected (#14)', () => {
+  // A whitespace value clears .min(1); the shared nonBlankString .refine then rejects
+  // it at the Zod boundary, before any handler (and its service call — e.g.
+  // map_codes' name_to_rxcui LIKE '%%') runs. On the wire the MCP SDK enforces this
+  // same schema and returns InvalidParams (-32602) — verified in the live stdio
+  // field-test; the unit level pins the durable contract: the schema rejects it.
+  interface ParsedIssue {
+    code: string;
+    message: string;
+    path: (string | number)[];
+  }
+  function issuesOf(fn: () => unknown): ParsedIssue[] {
+    try {
+      fn();
+    } catch (e) {
+      return (e as { issues?: ParsedIssue[] }).issues ?? [];
+    }
+    throw new Error('expected input.parse to throw, but it resolved');
+  }
+
+  it('rejects a whitespace-only map_codes.from (the name_to_rxcui LIKE %% case)', () => {
+    const [issue] = issuesOf(() =>
+      mapCodesTool.input.parse({ from: '   ', direction: 'name_to_rxcui' }),
+    );
+    expect(issue).toMatchObject({ path: ['from'], code: 'custom' });
+    expect(issue?.message).toMatch(/blank or whitespace-only/);
+  });
+  it('rejects a whitespace-only search_codes.query', () => {
+    expect(() => searchCodesTool.input.parse({ query: ' \t ' })).toThrow(
+      /blank or whitespace-only/,
+    );
+  });
+  it('rejects a whitespace-only check_code.code', () => {
+    expect(() => checkCodeTool.input.parse({ code: '   ' })).toThrow(/blank or whitespace-only/);
+  });
+  it('rejects a whitespace-only element in get_code.codes[]', () => {
+    const [issue] = issuesOf(() => getCodeTool.input.parse({ codes: ['E11.9', '   '] }));
+    expect(issue?.path).toEqual(['codes', 1]);
+    expect(issue?.message).toMatch(/blank or whitespace-only/);
+  });
+  it('rejects a whitespace-only browse_hierarchy.node but keeps empty/omitted as top level', () => {
+    expect(() => browseHierarchyTool.input.parse({ system: 'ICD10PCS', node: '   ' })).toThrow();
+    // Empty string and omitted both still mean "top level" — the guard must not break it.
+    expect(() => browseHierarchyTool.input.parse({ system: 'ICD10PCS', node: '' })).not.toThrow();
+    expect(() => browseHierarchyTool.input.parse({ system: 'ICD10PCS' })).not.toThrow();
+  });
+  it('still accepts valid non-blank input (guard is not over-broad)', () => {
+    expect(() =>
+      mapCodesTool.input.parse({ from: 'aspirin', direction: 'name_to_rxcui' }),
+    ).not.toThrow();
+    expect(() => searchCodesTool.input.parse({ query: 'diabetes' })).not.toThrow();
+  });
 });
 
 describe('medcode_search_codes — pagination (#17)', () => {

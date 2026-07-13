@@ -12,9 +12,11 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCodeIndexService } from '@/services/code-index/code-index-service.js';
+import { storageCode } from '@/services/code-index/schema.js';
 import { SYSTEM_IDS } from '@/services/code-index/types.js';
 import { encodeNextCursor, resolvePage } from './_pagination.js';
 import { renderCodeLine } from './_render.js';
+import { nonBlankString } from './_schema.js';
 
 const SOURCE_URL =
   'https://github.com/cyanheads/medical-codes-mcp-server/blob/main/src/mcp-server/tools/definitions/browse-hierarchy.tool.ts';
@@ -49,10 +51,15 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
   input: z.object({
     system: z.enum(SYSTEM_IDS).describe('The code system to browse.'),
     node: z
-      .string()
+      .union([
+        z.literal(''),
+        nonBlankString('node').describe(
+          'A code whose children to list (ICD-10-CM/HCPCS). ICD-10-PCS supports only top-level Section browsing — a partial PCS code does not expand to next-position axis values.',
+        ),
+      ])
       .optional()
       .describe(
-        'A node to expand. For ICD-10-CM/HCPCS, a code whose children to list. ICD-10-PCS supports only top-level Section browsing (omit `node`) — a partial PCS code does not expand to next-position axis values. Omit for the top level.',
+        'A node to expand — or omit / pass an empty string for the top level. For ICD-10-CM/HCPCS, a code whose children to list; ICD-10-PCS supports only top-level Section browsing. Must not be blank or whitespace-only when provided.',
       ),
     limit: z
       .number()
@@ -127,14 +134,24 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
       ctx.enrich({ truncated: result.hasMore, shown: result.axes.length, cap: page.limit });
       if (result.hasMore) ctx.enrich({ nextCursor: encodeNextCursor(page) });
       if (result.axes.length === 0) {
+        // A complete 7-char code and a partial code both land here with empty axes;
+        // word the notice for each. (browsePcs already returned unknown_node for a
+        // node absent from the index, so a complete node reaching here exists.)
+        const isCompleteCode = input.node ? storageCode(input.node).length >= 7 : false;
         ctx.enrich.notice(
-          input.node
-            ? `ICD-10-PCS axis values for positions 2–7 are context-dependent (their meaning ` +
+          !input.node
+            ? `No ICD-10-PCS sections are bundled in this release.`
+            : isCompleteCode
+              ? `"${input.node}" is a complete 7-character ICD-10-PCS code — it exists, but its ` +
+                `7 axes (section, body system, root operation, body part, approach, device, ` +
+                `qualifier) are fully specified, so there is nothing deeper to browse. Decode it ` +
+                `with medcode_get_code for its full axis breakdown, or omit \`node\` to list the ` +
+                `17 sections.`
+              : `ICD-10-PCS axis values for positions 2–7 are context-dependent (their meaning ` +
                 `varies by the section, body system, and operation that precede them), so they ` +
                 `are not enumerable from a flat partial code. Omit \`node\` to list the 17 ` +
                 `sections, or decode a complete 7-character code with medcode_get_code for its ` +
-                `full axis breakdown.`
-            : `No ICD-10-PCS sections are bundled in this release.`,
+                `full axis breakdown.`,
         );
       }
       ctx.log.info('Browsed PCS axes', { node: input.node ?? null, count: result.axes.length });

@@ -11,6 +11,7 @@ import { getCodeIndexService } from '@/services/code-index/code-index-service.js
 import { SYSTEM_IDS } from '@/services/code-index/types.js';
 import { encodeNextCursor, resolvePage } from './_pagination.js';
 import { renderCodeLine } from './_render.js';
+import { nonBlankString } from './_schema.js';
 
 const SOURCE_URL =
   'https://github.com/cyanheads/medical-codes-mcp-server/blob/main/src/mcp-server/tools/definitions/search-codes.tool.ts';
@@ -18,15 +19,14 @@ const SOURCE_URL =
 export const searchCodesTool = tool('medcode_search_codes', {
   title: 'medical-codes-mcp-server',
   description:
-    'Find US medical codes whose official descriptions match a described concept, via full-text search over the bundled index. Every search term must appear (prefix-matched), so "diabetic neuropathy" returns codes mentioning both. Filter by `system` (ICD10CM/ICD10PCS/HCPCS/RXNORM), `billableOnly` to exclude headers/categories, and `chapter`. Use when you have a clinical description and need the code — the reverse of medcode_get_code. Results echo the resolved system per row for chaining, are ranked by relevance with a deterministic tie-break, and disclose truncation with a `nextCursor`: pass it back as `cursor` to page through the full ranked set.',
+    'Find US medical codes whose official descriptions match a described concept, via full-text search over the bundled index. Every search term must appear — matched first as a token prefix, then as a substring so inflected and compound forms are also found (a "neuropathy" search surfaces "mononeuropathy"/"polyneuropathy" siblings too, not only a standalone "neuropathy" token). Filter by `system` (ICD10CM/ICD10PCS/HCPCS/RXNORM), `billableOnly` to exclude headers/categories, and `chapter`. Use when you have a clinical description and need the code — the reverse of medcode_get_code. Results echo the resolved system per row for chaining, rank exact prefix matches ahead of substring-only matches with a deterministic tie-break, and disclose truncation with a `nextCursor`: pass it back as `cursor` to page through the full ranked set.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
   input: z.object({
-    query: z
-      .string()
-      .min(1)
-      .describe('Clinical description to match, e.g. "type 2 diabetes with neuropathy".'),
+    query: nonBlankString('query').describe(
+      'Clinical description to match, e.g. "type 2 diabetes with neuropathy". Must not be blank or whitespace-only.',
+    ),
     system: z
       .enum(SYSTEM_IDS)
       .optional()

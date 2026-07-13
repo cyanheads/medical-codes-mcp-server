@@ -13,6 +13,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 
 import { getCodeIndexService } from '@/services/code-index/code-index-service.js';
 import { SYSTEM_IDS, SYSTEM_LABELS } from '@/services/code-index/types.js';
+import { nonBlankString } from './_schema.js';
 
 const SOURCE_URL =
   'https://github.com/cyanheads/medical-codes-mcp-server/blob/main/src/mcp-server/tools/definitions/check-code.tool.ts';
@@ -25,7 +26,9 @@ export const checkCodeTool = tool('medcode_check_code', {
   sourceUrl: SOURCE_URL,
 
   input: z.object({
-    code: z.string().min(1).describe('The code to validate, with or without dots.'),
+    code: nonBlankString('code').describe(
+      'The code to validate, with or without dots. Must not be blank or whitespace-only.',
+    ),
     system: z
       .enum(SYSTEM_IDS)
       .optional()

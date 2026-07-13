@@ -387,13 +387,24 @@ export class CodeIndexService {
   }
 
   /**
-   * Full-text search over code descriptions, one page at a time. Translates the
-   * user's text into a safe FTS5 MATCH expression (every token required,
-   * prefix-matched), applies the system/billable/chapter filters, and returns the
-   * requested page plus an exact `hasMore`. The `ORDER BY` carries a `c.system,
-   * c.code` tie-breaker after the bm25 rank so the total order is deterministic —
-   * bm25 ties (same-length, same-term-frequency descriptions) would otherwise let
-   * offset-based pages skip or repeat rows.
+   * Full-text search over code descriptions, one page at a time. Recall comes from
+   * two tiers in a SINGLE ordered query so it paginates as one set:
+   *
+   *  - tier 0 — FTS5 `MATCH` rows (every token required, prefix-matched), ranked by
+   *    bm25. The precise, common case, ranked first.
+   *  - tier 1 — substring (`LIKE '%token%'`, AND across tokens) rows the FTS set did
+   *    NOT already contain. This is what recalls a single-token compound the prefix
+   *    match misses — "polyneuropathy"/"mononeuropathy" for a "neuropathy" query —
+   *    an undercoding trap for a billing tool. Same unindexed-`LIKE` precedent the
+   *    RxNorm `name_to_rxcui` crosswalk already runs at comparable scale.
+   *
+   * The system/billable/chapter filters apply to BOTH tiers so added recall never
+   * escapes the requested scope. `ORDER BY (tier, ord, system, code)` is a total
+   * order — `(system, code)` is unique — so `fetchPage` walks the merged set with an
+   * exact `hasMore`, and consecutive offset pages reconstruct it (page1 ⧺ page2 ==
+   * unpaged 2×limit) exactly as a single-tier query would. Building this as two
+   * separately-fetched sets merged in JS would break that reconstruction, so it must
+   * stay one query.
    */
   searchFts(
     queryText: string,
@@ -407,29 +418,57 @@ export class CodeIndexService {
   ): { codes: SearchHit[]; hasMore: boolean } {
     const match = toFtsMatch(queryText);
     if (!match) return { codes: [], hasMore: false };
+    const tokens = tokenizeQuery(queryText); // non-empty whenever `match` is non-null
 
-    const where: string[] = ['codes_fts MATCH ?'];
-    const params: unknown[] = [match];
+    // Code-level filters, applied identically to both tiers.
+    const cFilter: string[] = [];
+    const cParams: unknown[] = [];
     if (filters.system) {
-      where.push('c.system = ?');
-      params.push(filters.system);
+      cFilter.push('c.system = ?');
+      cParams.push(filters.system);
     }
     if (filters.billableOnly) {
-      where.push('c.billable = 1');
+      cFilter.push('c.billable = 1');
     }
     if (filters.chapter) {
-      where.push('c.chapter = ?');
-      params.push(filters.chapter);
+      cFilter.push('c.chapter = ?');
+      cParams.push(filters.chapter);
+    }
+    const cWhere = cFilter.length > 0 ? ` AND ${cFilter.join(' AND ')}` : '';
+
+    // Substring tier: every token must appear as a LIKE substring (AND semantics,
+    // mirroring the FTS tier). LIKE wildcards in the token are escaped so `%`/`_`
+    // match literally — same guard as the RxNorm name crosswalk.
+    const likeClause = tokens
+      .map(() => "(c.long_desc LIKE ? ESCAPE '\\' OR c.short_desc LIKE ? ESCAPE '\\')")
+      .join(' AND ');
+    const likeParams: unknown[] = [];
+    for (const token of tokens) {
+      const pattern = `%${escapeLike(token)}%`;
+      likeParams.push(pattern, pattern);
     }
 
-    const { rows, hasMore } = this.fetchPage(
-      `SELECT c.* FROM codes_fts f
-         JOIN codes c ON c.system = f.system AND c.code = f.code
-         WHERE ${where.join(' AND ')}
-         ORDER BY bm25(codes_fts), c.system, c.code`,
-      params,
-      { offset: filters.offset ?? 0, limit: filters.limit },
-    );
+    // The FTS tier is materialized once (bm25 is computed where MATCH is in scope),
+    // then reused for the tier-1 dedup so the substring arm carries only rows the
+    // prefix match didn't already return.
+    const sql = `WITH fts AS MATERIALIZED (
+        SELECT c.*, bm25(codes_fts) AS ord
+          FROM codes_fts f
+          JOIN codes c ON c.system = f.system AND c.code = f.code
+          WHERE codes_fts MATCH ?${cWhere}
+      )
+      SELECT *, 0 AS tier FROM fts
+      UNION ALL
+      SELECT c.*, NULL AS ord, 1 AS tier
+        FROM codes c
+        WHERE ${likeClause}${cWhere}
+          AND NOT EXISTS (SELECT 1 FROM fts WHERE fts.system = c.system AND fts.code = c.code)
+      ORDER BY tier, ord, system, code`;
+
+    const { rows, hasMore } = this.fetchPage(sql, [match, ...cParams, ...likeParams, ...cParams], {
+      offset: filters.offset ?? 0,
+      limit: filters.limit,
+    });
     return {
       codes: rows.map((r) => CodeIndexService.decode(CodeIndexService.toCodeRow(r))),
       hasMore,
@@ -755,13 +794,26 @@ export class CodeIndexService {
    * `parseIcd10pcsAxes`). So the top level (no node) returns the 17 Sections;
    * a partial code asks for a deeper position, which has no rows — the caller
    * gets an explicit notice (handled in the tool), not silent-empty or wrong data.
+   * A complete 7-character code that exists likewise has no deeper axis to browse,
+   * so it too returns empty axes — distinguished from a code absent from the index,
+   * which is the only `unknown_node`.
    */
   private browsePcs(
     node: string | undefined,
     page: Page,
   ): { kind: 'axes'; axes: PcsAxisRow[]; hasMore: boolean } | { kind: 'unknown_node' } {
     const partial = node ? storageCode(node) : '';
-    if (partial.length >= 7) return { kind: 'unknown_node' };
+    if (partial.length >= 7) {
+      // A complete PCS code (length 7) is a real node with nothing left to browse —
+      // its positions 2–7 are fully specified, and they are context-dependent so
+      // there is no next axis to enumerate. Return empty axes when it exists (the
+      // tool words the notice for a complete node); reserve `unknown_node` for a
+      // code that genuinely isn't in the index — checking existence FIRST, rather
+      // than erroring on length alone.
+      return this.getRow(partial, 'ICD10PCS')
+        ? { kind: 'axes', axes: [], hasMore: false }
+        : { kind: 'unknown_node' };
+    }
     const position = partial.length + 1; // next axis position to enumerate
     const { rows, hasMore } = this.fetchPage(
       'SELECT position, value, meaning FROM pcs_axes WHERE position = ? ORDER BY value',
@@ -806,18 +858,27 @@ export class CodeIndexService {
 }
 
 /**
- * Translate free user text into a safe FTS5 MATCH expression. Strips FTS5
- * operator characters, splits into tokens, and ANDs prefix-matched tokens so
- * "diabetic neuropathy" requires both stems. Returns null when nothing usable
- * remains (caller treats that as an empty result, not an error).
+ * Tokenize free user text the way both search tiers consume it: lowercase, strip
+ * FTS5 operator characters, split on whitespace, drop empties. Shared by
+ * {@link toFtsMatch} (the prefix tier) and the substring tier's LIKE patterns so
+ * the two tiers tokenize identically and stay in lockstep.
  */
-export function toFtsMatch(text: string): string | null {
-  const tokens = text
+export function tokenizeQuery(text: string): string[] {
+  return text
     .toLowerCase()
     .replace(/["()*:^-]/g, ' ')
     .split(/\s+/)
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
+}
+
+/**
+ * Translate free user text into a safe FTS5 MATCH expression. ANDs prefix-matched
+ * tokens so "diabetic neuropathy" requires both stems. Returns null when nothing
+ * usable remains (caller treats that as an empty result, not an error).
+ */
+export function toFtsMatch(text: string): string | null {
+  const tokens = tokenizeQuery(text);
   if (tokens.length === 0) return null;
   // Quote each token (defuses any residual special handling) and prefix-match.
   return tokens.map((t) => `"${t}"*`).join(' AND ');

@@ -15,6 +15,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { CodeIndexService, getCodeIndexService } from '@/services/code-index/code-index-service.js';
 import { SYSTEM_IDS } from '@/services/code-index/types.js';
 import { renderCodeBlock, renderCodeLine } from './_render.js';
+import { nonBlankString } from './_schema.js';
 
 const SOURCE_URL =
   'https://github.com/cyanheads/medical-codes-mcp-server/blob/main/src/mcp-server/tools/definitions/get-code.tool.ts';
@@ -114,10 +115,9 @@ export const getCodeTool = tool('medcode_get_code', {
   input: z.object({
     codes: z
       .array(
-        z
-          .string()
-          .min(1)
-          .describe('A single code to decode (with or without dots), an RXCUI, or an NDC.'),
+        nonBlankString('Each code').describe(
+          'A single code to decode (with or without dots), an RXCUI, or an NDC. Must not be blank or whitespace-only.',
+        ),
       )
       .min(1)
       .max(50)

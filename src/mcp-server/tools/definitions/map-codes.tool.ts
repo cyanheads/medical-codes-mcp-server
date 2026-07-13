@@ -14,6 +14,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { CodeIndexService, getCodeIndexService } from '@/services/code-index/code-index-service.js';
 import { type MapDirection, SYSTEM_IDS } from '@/services/code-index/types.js';
 import { encodeNextCursor, resolvePage } from './_pagination.js';
+import { nonBlankString } from './_schema.js';
 
 const SOURCE_URL =
   'https://github.com/cyanheads/medical-codes-mcp-server/blob/main/src/mcp-server/tools/definitions/map-codes.tool.ts';
@@ -36,12 +37,9 @@ export const mapCodesTool = tool('medcode_map_codes', {
   sourceUrl: SOURCE_URL,
 
   input: z.object({
-    from: z
-      .string()
-      .min(1)
-      .describe(
-        'The source value: a code (for parents/children), a drug name, an NDC, or an RXCUI.',
-      ),
+    from: nonBlankString('from').describe(
+      'The source value: a code (for parents/children), a drug name, an NDC, or an RXCUI. Must not be blank or whitespace-only.',
+    ),
     direction: z
       .enum(DIRECTIONS)
       .describe(
