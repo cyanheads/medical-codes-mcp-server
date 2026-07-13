@@ -345,3 +345,178 @@ describe('medcode_browse_hierarchy', () => {
     expect(getEnrichment(ctx)?.notice).toMatch(/flat drug vocabulary|no prefix hierarchy/i);
   });
 });
+
+describe('medcode_search_codes — pagination (#17)', () => {
+  it('paginates via nextCursor and reconstructs the ranked set by code identity', async () => {
+    const full = await searchCodesTool.handler(
+      searchCodesTool.input.parse({ query: 'diabetes', limit: 50 }),
+      createMockContext(),
+    );
+    expect(full.codes).toHaveLength(4);
+
+    const ctx1 = createMockContext();
+    const p1 = await searchCodesTool.handler(
+      searchCodesTool.input.parse({ query: 'diabetes', limit: 2 }),
+      ctx1,
+    );
+    const e1 = getEnrichment(ctx1);
+    expect(p1.codes).toHaveLength(2);
+    expect(e1?.truncated).toBe(true);
+    expect(typeof e1?.nextCursor).toBe('string');
+
+    const ctx2 = createMockContext();
+    const p2 = await searchCodesTool.handler(
+      searchCodesTool.input.parse({
+        query: 'diabetes',
+        limit: 2,
+        cursor: e1?.nextCursor as string,
+      }),
+      ctx2,
+    );
+    const e2 = getEnrichment(ctx2);
+    expect(p2.codes).toHaveLength(2);
+    expect(e2?.truncated).toBe(false);
+    expect(e2?.nextCursor).toBeUndefined();
+
+    expect([...p1.codes, ...p2.codes].map((c) => c.code)).toEqual(full.codes.map((c) => c.code));
+  });
+});
+
+describe('medcode_browse_hierarchy — pagination (#16)', () => {
+  // Fixture: ICD-10-CM A00 has exactly two children A00.0/A00.1.
+  it('honors the node-path limit with correct metadata (limit:1 → shown:1, cap:1, not shown:50/cap:1)', async () => {
+    const ctx = createMockContext();
+    const out = await browseHierarchyTool.handler(
+      browseHierarchyTool.input.parse({ system: 'ICD10CM', node: 'A00', limit: 1 }),
+      ctx,
+    );
+    expect(out.codes).toHaveLength(1);
+    expect(out.codes[0]?.code).toBe('A00.0');
+    const e = getEnrichment(ctx);
+    expect(e?.shown).toBe(1);
+    expect(e?.cap).toBe(1);
+    expect(e?.truncated).toBe(true);
+    expect(typeof e?.nextCursor).toBe('string');
+  });
+
+  it('paginates children via nextCursor and reconstructs by code identity', async () => {
+    const ctx1 = createMockContext();
+    const p1 = await browseHierarchyTool.handler(
+      browseHierarchyTool.input.parse({ system: 'ICD10CM', node: 'A00', limit: 1 }),
+      ctx1,
+    );
+    const cursor = getEnrichment(ctx1)?.nextCursor as string;
+
+    const ctx2 = createMockContext();
+    const p2 = await browseHierarchyTool.handler(
+      browseHierarchyTool.input.parse({ system: 'ICD10CM', node: 'A00', limit: 1, cursor }),
+      ctx2,
+    );
+    const e2 = getEnrichment(ctx2);
+    expect(p2.codes.map((c) => c.code)).toEqual(['A00.1']);
+    expect(e2?.truncated).toBe(false);
+    expect(e2?.nextCursor).toBeUndefined();
+
+    expect([...p1.codes, ...p2.codes].map((c) => c.code)).toEqual(['A00.0', 'A00.1']);
+  });
+
+  it('reports complete (truncated:false) at the exact child count', async () => {
+    const ctx = createMockContext();
+    const out = await browseHierarchyTool.handler(
+      browseHierarchyTool.input.parse({ system: 'ICD10CM', node: 'A00', limit: 2 }),
+      ctx,
+    );
+    expect(out.codes).toHaveLength(2);
+    const e = getEnrichment(ctx);
+    expect(e?.shown).toBe(2);
+    expect(e?.cap).toBe(2);
+    expect(e?.truncated).toBe(false);
+    expect(e?.nextCursor).toBeUndefined();
+  });
+});
+
+describe('medcode_get_code — childrenTruncated (#16)', () => {
+  it('discloses childrenTruncated:false when children fit the cap', async () => {
+    const ctx = createMockContext();
+    const out = await getCodeTool.handler(
+      getCodeTool.input.parse({ codes: ['E11'], includeHierarchy: true }),
+      ctx,
+    );
+    expect(out.found[0]?.childrenTruncated).toBe(false);
+  });
+
+  it('omits childrenTruncated when hierarchy is not requested', async () => {
+    const ctx = createMockContext();
+    const out = await getCodeTool.handler(getCodeTool.input.parse({ codes: ['E11'] }), ctx);
+    expect(out.found[0]?.childrenTruncated).toBeUndefined();
+  });
+});
+
+describe('medcode_map_codes — pagination (#16 children, #18 name_to_rxcui)', () => {
+  it('paginates the children direction via nextCursor and reconstructs by code identity', async () => {
+    const ctx1 = createMockContext();
+    const p1 = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: 'A00', direction: 'children', system: 'ICD10CM', limit: 1 }),
+      ctx1,
+    );
+    const e1 = getEnrichment(ctx1);
+    expect(p1.hits.map((h) => h.value)).toEqual(['A00.0']);
+    expect(e1?.truncated).toBe(true);
+    expect(e1?.shown).toBe(1);
+    expect(typeof e1?.nextCursor).toBe('string');
+
+    const ctx2 = createMockContext();
+    const p2 = await mapCodesTool.handler(
+      mapCodesTool.input.parse({
+        from: 'A00',
+        direction: 'children',
+        system: 'ICD10CM',
+        limit: 1,
+        cursor: e1?.nextCursor as string,
+      }),
+      ctx2,
+    );
+    const e2 = getEnrichment(ctx2);
+    expect(p2.hits.map((h) => h.value)).toEqual(['A00.1']);
+    expect(e2?.truncated).toBe(false);
+    expect(e2?.nextCursor).toBeUndefined();
+
+    expect([...p1.hits, ...p2.hits].map((h) => h.value)).toEqual(['A00.0', 'A00.1']);
+  });
+
+  it('paginates name_to_rxcui via nextCursor and reconstructs by RXCUI identity', async () => {
+    const full = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: 'a', direction: 'name_to_rxcui', limit: 50 }),
+      createMockContext(),
+    );
+    const fullValues = full.hits.map((h) => h.value);
+    expect(fullValues).toEqual(['161', '1191', '198440', '1049640']);
+
+    const ctx1 = createMockContext();
+    const p1 = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: 'a', direction: 'name_to_rxcui', limit: 2 }),
+      ctx1,
+    );
+    const e1 = getEnrichment(ctx1);
+    expect(p1.hits.map((h) => h.value)).toEqual(['161', '1191']);
+    expect(e1?.truncated).toBe(true);
+    expect(typeof e1?.nextCursor).toBe('string');
+
+    const ctx2 = createMockContext();
+    const p2 = await mapCodesTool.handler(
+      mapCodesTool.input.parse({
+        from: 'a',
+        direction: 'name_to_rxcui',
+        limit: 2,
+        cursor: e1?.nextCursor as string,
+      }),
+      ctx2,
+    );
+    const e2 = getEnrichment(ctx2);
+    expect(p2.hits.map((h) => h.value)).toEqual(['198440', '1049640']);
+    expect(e2?.truncated).toBe(false);
+    expect(e2?.nextCursor).toBeUndefined();
+
+    expect([...p1.hits, ...p2.hits].map((h) => h.value)).toEqual(fullValues);
+  });
+});

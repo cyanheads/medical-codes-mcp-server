@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "medical-codes-mcp-server",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "license": "Apache-2.0",
   "description": "Decode, search, validate, and crosswalk US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm — over a bundled offline index. Keyless, deterministic.",
   "author": { "name": "cyanheads" },

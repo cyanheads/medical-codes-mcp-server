@@ -11,9 +11,9 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getServerConfig } from '@/config/server-config.js';
 import { getCodeIndexService } from '@/services/code-index/code-index-service.js';
 import { SYSTEM_IDS } from '@/services/code-index/types.js';
+import { encodeNextCursor, resolvePage } from './_pagination.js';
 import { renderCodeLine } from './_render.js';
 
 const SOURCE_URL =
@@ -42,7 +42,7 @@ const AxisNodeSchema = z
 export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
   title: 'medical-codes-mcp-server',
   description:
-    "Walk a US medical code system's hierarchy for discovery without a search term. With no `node`, returns the top-level entries (ICD-10-CM categories, HCPCS range buckets, or ICD-10-PCS first-axis values). With a `node`, returns its immediate children. ICD-10-CM and HCPCS use a prefix hierarchy (a shorter code is the parent of a longer one); ICD-10-PCS is axis-based — each of its 7 characters is an independent axis (section, body system, root operation, body part, approach, device, qualifier), but only the top-level Section axis is browsable (omit `node`): positions 2–7 are context-dependent on the preceding axis path and are not enumerable from a flat partial code. Lets an agent orient in an unfamiliar system or enumerate a category's specific codes.",
+    "Walk a US medical code system's hierarchy for discovery without a search term. With no `node`, returns the top-level entries (ICD-10-CM categories, HCPCS range buckets, or ICD-10-PCS first-axis values). With a `node`, returns its immediate children. ICD-10-CM and HCPCS use a prefix hierarchy (a shorter code is the parent of a longer one); ICD-10-PCS is axis-based — each of its 7 characters is an independent axis (section, body system, root operation, body part, approach, device, qualifier), but only the top-level Section axis is browsable (omit `node`): positions 2–7 are context-dependent on the preceding axis path and are not enumerable from a flat partial code. Lets an agent orient in an unfamiliar system or enumerate a category's specific codes. A large child set paginates: when the response carries a `nextCursor`, pass it back as `cursor` to fetch the next page.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -60,7 +60,13 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
       .min(1)
       .max(200)
       .optional()
-      .describe('Max entries to return. Defaults to MEDCODE_MAX_RESULTS (50), ceiling 200.'),
+      .describe('Max entries per page. Defaults to MEDCODE_MAX_RESULTS (50), ceiling 200.'),
+    cursor: z
+      .string()
+      .optional()
+      .describe(
+        "Opaque continuation token from a previous response's `nextCursor`, to fetch the next page of children/entries. Omit for the top of the list.",
+      ),
   }),
 
   output: z.object({
@@ -80,9 +86,15 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
   }),
 
   enrichment: {
-    truncated: z.boolean().describe('True when the returned list was capped at the limit.'),
-    shown: z.number().describe('Number of entries returned (codes or axes).'),
-    cap: z.number().describe('The limit that was applied.'),
+    truncated: z.boolean().describe('True when more entries exist beyond this page.'),
+    shown: z.number().describe('Number of entries returned on this page (codes or axes).'),
+    cap: z.number().describe('The page size that was applied.'),
+    nextCursor: z
+      .string()
+      .optional()
+      .describe(
+        'Opaque token to pass back as `cursor` for the next page. Present only when more entries exist beyond this page.',
+      ),
     notice: z
       .string()
       .optional()
@@ -101,9 +113,9 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
   ],
 
   handler(input, ctx) {
-    const limit = input.limit ?? getServerConfig().maxResults;
+    const page = resolvePage(input.cursor, input.limit);
     const svc = getCodeIndexService();
-    const result = svc.browse(input.system, input.node, limit);
+    const result = svc.browse(input.system, input.node, page);
 
     if (result.kind === 'unknown_node') {
       throw ctx.fail('unknown_node', `Node "${input.node}" does not exist in ${input.system}.`, {
@@ -112,7 +124,8 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
     }
 
     if (result.kind === 'axes') {
-      ctx.enrich({ truncated: result.axes.length >= limit, shown: result.axes.length, cap: limit });
+      ctx.enrich({ truncated: result.hasMore, shown: result.axes.length, cap: page.limit });
+      if (result.hasMore) ctx.enrich({ nextCursor: encodeNextCursor(page) });
       if (result.axes.length === 0) {
         ctx.enrich.notice(
           input.node
@@ -128,7 +141,8 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
       return { kind: 'axes' as const, codes: [], axes: result.axes };
     }
 
-    ctx.enrich({ truncated: result.codes.length >= limit, shown: result.codes.length, cap: limit });
+    ctx.enrich({ truncated: result.hasMore, shown: result.codes.length, cap: page.limit });
+    if (result.hasMore) ctx.enrich({ nextCursor: encodeNextCursor(page) });
     if (result.codes.length === 0) {
       ctx.enrich.notice(
         input.system === 'RXNORM' && !svc.hasRxNorm()

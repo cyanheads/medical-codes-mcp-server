@@ -23,6 +23,7 @@ import {
   type CodeRow,
   DRUG_DIRECTIONS,
   type MapDirection,
+  type Page,
   type PcsAxisRow,
   type RxNormRelRow,
   SYSTEM_IDS,
@@ -96,6 +97,8 @@ export interface DecodedCode {
 /** A decoded code plus its immediate hierarchy neighbours. */
 export interface DecodedCodeWithHierarchy extends DecodedCode {
   children: DecodedCode[];
+  /** True when the code has more immediate children than `children` carries (the list was capped). */
+  childrenTruncated: boolean;
   parent: string | null;
 }
 
@@ -313,37 +316,97 @@ export class CodeIndexService {
     return { matched, rxcuis };
   }
 
-  /** Immediate children of a code within its system (prefix hierarchy). */
-  childrenOf(system: SystemId, parentCode: string): DecodedCode[] {
+  /**
+   * The single SQL pagination primitive behind every capped query path
+   * (children, FTS search, drug-name crosswalk, browse). Appends
+   * `LIMIT ? OFFSET ?` to the caller's `sql` — which must already carry a fully
+   * deterministic `ORDER BY` — fetches `limit + 1` rows, and slices back to
+   * `limit`. Whether the extra row came back IS `hasMore`: an exact signal that
+   * replaces the `rows.length >= limit` heuristic (which false-positives when the
+   * corpus holds exactly `limit` matches). One primitive, many callers; each
+   * builds its own `WHERE`/`ORDER BY`, only the offset/limit mechanics are shared.
+   */
+  private fetchPage(
+    sql: string,
+    params: readonly unknown[],
+    page: Page,
+  ): { rows: Record<string, unknown>[]; hasMore: boolean } {
     const rows = this.db
-      .query('SELECT * FROM codes WHERE system = ? AND parent = ? ORDER BY code LIMIT ?')
-      .all(system, parentCode, getServerConfig().maxResults) as Record<string, unknown>[];
-    return rows.map((r) => CodeIndexService.decode(CodeIndexService.toCodeRow(r)));
+      .query(`${sql} LIMIT ? OFFSET ?`)
+      .all(...params, page.limit + 1, page.offset) as Record<string, unknown>[];
+    const hasMore = rows.length > page.limit;
+    return { rows: hasMore ? rows.slice(0, page.limit) : rows, hasMore };
   }
 
-  /** Decode with parent + immediate children attached. */
-  getByCodeWithHierarchy(row: CodeRow): DecodedCodeWithHierarchy {
-    const base = CodeIndexService.decode(row);
-    const parentStorage = row.system === 'ICD10CM' ? icd10cmParent(row.code) : row.parent;
-    const children = this.childrenOf(row.system, row.code);
+  /**
+   * Immediate children of a code within its system (prefix hierarchy), one page
+   * at a time. `ORDER BY code` is already a full deterministic order — `(system,
+   * code)` is the table's primary key — so no tie-breaker is needed. `hasMore`
+   * reports whether children beyond this page exist, so callers can paginate or
+   * disclose truncation exactly.
+   */
+  childrenOf(
+    system: SystemId,
+    parentCode: string,
+    page: Page,
+  ): { children: DecodedCode[]; hasMore: boolean } {
+    const { rows, hasMore } = this.fetchPage(
+      'SELECT * FROM codes WHERE system = ? AND parent = ? ORDER BY code',
+      [system, parentCode],
+      page,
+    );
     return {
-      ...base,
-      parent: parentStorage ? displayCode(row.system, parentStorage) : null,
-      children,
+      children: rows.map((r) => CodeIndexService.decode(CodeIndexService.toCodeRow(r))),
+      hasMore,
     };
   }
 
   /**
-   * Full-text search over code descriptions. Translates the user's text into a
-   * safe FTS5 MATCH expression (every token required, prefix-matched), applies
-   * the system/billable/chapter filters, and caps at `limit`.
+   * Decode with parent + immediate children attached. The children list is
+   * capped at `childrenLimit` (the server cap by default); `childrenTruncated`
+   * discloses when a code has more children than were attached, so a batched
+   * decode never silently hides a large child set — the caller retrieves the rest
+   * via `medcode_browse_hierarchy` / `medcode_map_codes` for that node.
+   */
+  getByCodeWithHierarchy(
+    row: CodeRow,
+    childrenLimit: number = getServerConfig().maxResults,
+  ): DecodedCodeWithHierarchy {
+    const base = CodeIndexService.decode(row);
+    const parentStorage = row.system === 'ICD10CM' ? icd10cmParent(row.code) : row.parent;
+    const { children, hasMore } = this.childrenOf(row.system, row.code, {
+      offset: 0,
+      limit: childrenLimit,
+    });
+    return {
+      ...base,
+      parent: parentStorage ? displayCode(row.system, parentStorage) : null,
+      children,
+      childrenTruncated: hasMore,
+    };
+  }
+
+  /**
+   * Full-text search over code descriptions, one page at a time. Translates the
+   * user's text into a safe FTS5 MATCH expression (every token required,
+   * prefix-matched), applies the system/billable/chapter filters, and returns the
+   * requested page plus an exact `hasMore`. The `ORDER BY` carries a `c.system,
+   * c.code` tie-breaker after the bm25 rank so the total order is deterministic —
+   * bm25 ties (same-length, same-term-frequency descriptions) would otherwise let
+   * offset-based pages skip or repeat rows.
    */
   searchFts(
     queryText: string,
-    filters: { system?: SystemId; billableOnly?: boolean; chapter?: string; limit: number },
-  ): SearchHit[] {
+    filters: {
+      system?: SystemId;
+      billableOnly?: boolean;
+      chapter?: string;
+      offset?: number;
+      limit: number;
+    },
+  ): { codes: SearchHit[]; hasMore: boolean } {
     const match = toFtsMatch(queryText);
-    if (!match) return [];
+    if (!match) return { codes: [], hasMore: false };
 
     const where: string[] = ['codes_fts MATCH ?'];
     const params: unknown[] = [match];
@@ -358,17 +421,19 @@ export class CodeIndexService {
       where.push('c.chapter = ?');
       params.push(filters.chapter);
     }
-    params.push(filters.limit);
 
-    const rows = this.db
-      .query(
-        `SELECT c.* FROM codes_fts f
+    const { rows, hasMore } = this.fetchPage(
+      `SELECT c.* FROM codes_fts f
          JOIN codes c ON c.system = f.system AND c.code = f.code
          WHERE ${where.join(' AND ')}
-         ORDER BY bm25(codes_fts) LIMIT ?`,
-      )
-      .all(...params) as Record<string, unknown>[];
-    return rows.map((r) => CodeIndexService.decode(CodeIndexService.toCodeRow(r)));
+         ORDER BY bm25(codes_fts), c.system, c.code`,
+      params,
+      { offset: filters.offset ?? 0, limit: filters.limit },
+    );
+    return {
+      codes: rows.map((r) => CodeIndexService.decode(CodeIndexService.toCodeRow(r))),
+      hasMore,
+    };
   }
 
   /**
@@ -472,8 +537,9 @@ export class CodeIndexService {
     from: string,
     direction: MapDirection,
     system?: SystemId,
+    page: Page = { offset: 0, limit: getServerConfig().maxResults },
   ):
-    | { kind: 'ok'; hits: MapHit[]; resolvedSystem: SystemId | null }
+    | { kind: 'ok'; hits: MapHit[]; resolvedSystem: SystemId | null; hasMore: boolean }
     | { kind: 'ambiguous'; systems: SystemId[] }
     | { kind: 'source_not_found' } {
     if (direction === 'parents' || direction === 'children') {
@@ -486,11 +552,12 @@ export class CodeIndexService {
       if (!row) return { kind: 'source_not_found' };
 
       if (direction === 'children') {
-        const kids = this.childrenOf(sys, code);
+        const { children, hasMore } = this.childrenOf(sys, code, page);
         return {
           kind: 'ok',
           resolvedSystem: sys,
-          hits: kids.map((k) => ({
+          hasMore,
+          hits: children.map((k) => ({
             source: sys,
             system: sys,
             value: k.code,
@@ -500,13 +567,14 @@ export class CodeIndexService {
       }
       // parents — single immediate parent for prefix systems; PCS has none.
       const parentStorage = sys === 'ICD10CM' ? icd10cmParent(code) : row.parent;
-      if (!parentStorage) return { kind: 'ok', resolvedSystem: sys, hits: [] };
+      if (!parentStorage) return { kind: 'ok', resolvedSystem: sys, hasMore: false, hits: [] };
       const parentRow = this.getRow(parentStorage, sys);
-      if (!parentRow) return { kind: 'ok', resolvedSystem: sys, hits: [] };
+      if (!parentRow) return { kind: 'ok', resolvedSystem: sys, hasMore: false, hits: [] };
       const parentDesc = parentRow.longDesc ?? parentRow.shortDesc;
       return {
         kind: 'ok',
         resolvedSystem: sys,
+        hasMore: false,
         hits: [
           {
             source: sys,
@@ -521,7 +589,7 @@ export class CodeIndexService {
     // Drug directions — RxNorm-backed. The tool short-circuits these with
     // `direction_unavailable` only when the RxNorm tables are absent from the
     // build; with RxNorm bundled (the shipped default) they resolve here.
-    return this.mapDrug(from, direction);
+    return this.mapDrug(from, direction, page);
   }
 
   /** Whether the RxNorm tables carry any rows (i.e. RxNorm is bundled in this build). */
@@ -534,8 +602,9 @@ export class CodeIndexService {
   private mapDrug(
     from: string,
     direction: MapDirection,
+    page: Page,
   ):
-    | { kind: 'ok'; hits: MapHit[]; resolvedSystem: SystemId | null }
+    | { kind: 'ok'; hits: MapHit[]; resolvedSystem: SystemId | null; hasMore: boolean }
     | { kind: 'source_not_found' } {
     const value = from.trim();
     switch (direction) {
@@ -543,19 +612,23 @@ export class CodeIndexService {
         // Escape LIKE wildcards in the user value so `%` / `_` / `\` match
         // literally instead of acting as operators (an unescaped `%` would match
         // every drug name). Bind the escaped term inside `%…%` and declare the
-        // escape char with ESCAPE.
+        // escape char with ESCAPE. A broad substring can match tens of thousands
+        // of concepts, so this direction paginates. `ORDER BY length(code)` is not
+        // unique (many RXCUIs share a string length), so `, code` makes the total
+        // order deterministic — offset pages would otherwise skip or repeat rows.
         const term = `%${escapeLike(value)}%`;
-        const rows = this.db
-          .query(
-            `SELECT code, long_desc, short_desc FROM codes
+        const { rows, hasMore } = this.fetchPage(
+          `SELECT code, long_desc, short_desc FROM codes
              WHERE system = 'RXNORM' AND (long_desc LIKE ? ESCAPE '\\' OR short_desc LIKE ? ESCAPE '\\')
-             ORDER BY length(code) LIMIT ?`,
-          )
-          .all(term, term, getServerConfig().maxResults) as Record<string, unknown>[];
+             ORDER BY length(code), code`,
+          [term, term],
+          page,
+        );
         if (rows.length === 0) return { kind: 'source_not_found' };
         return {
           kind: 'ok',
           resolvedSystem: 'RXNORM',
+          hasMore,
           hits: rows.map((r) => ({
             source: 'RXNORM',
             system: 'RXNORM' as const,
@@ -577,6 +650,7 @@ export class CodeIndexService {
         return {
           kind: 'ok',
           resolvedSystem: 'RXNORM',
+          hasMore: false,
           hits: [...rxcuis].map((rxcui) => ({
             source: 'NDC',
             system: 'RXNORM' as const,
@@ -592,6 +666,7 @@ export class CodeIndexService {
         return {
           kind: 'ok',
           resolvedSystem: 'RXNORM',
+          hasMore: false,
           hits: rows.map((r) => ({ source: 'NDC', system: null, value: r.ndc })),
         };
       }
@@ -605,6 +680,7 @@ export class CodeIndexService {
         return {
           kind: 'ok',
           resolvedSystem: 'RXNORM',
+          hasMore: false,
           hits: rows.map((r) => ({
             source: r.rel,
             system: 'RXNORM' as const,
@@ -632,13 +708,13 @@ export class CodeIndexService {
   browse(
     system: SystemId,
     node: string | undefined,
-    limit: number,
+    page: Page,
   ):
-    | { kind: 'codes'; codes: DecodedCode[] }
-    | { kind: 'axes'; axes: PcsAxisRow[] }
+    | { kind: 'codes'; codes: DecodedCode[]; hasMore: boolean }
+    | { kind: 'axes'; axes: PcsAxisRow[]; hasMore: boolean }
     | { kind: 'unknown_node' } {
     if (system === 'ICD10PCS') {
-      return this.browsePcs(node, limit);
+      return this.browsePcs(node, page);
     }
 
     if (system === 'RXNORM') {
@@ -646,25 +722,30 @@ export class CodeIndexService {
       // parent, so there is no hierarchy to walk. Return empty (rather than a
       // meaningless capped dump of all concepts) and let the tool steer the caller
       // to search_codes / get_code / map_codes via its notice.
-      return { kind: 'codes', codes: [] };
+      return { kind: 'codes', codes: [], hasMore: false };
     }
 
     if (!node) {
       // Top level: codes with no parent (roots). For ICD10CM these are 3-char
       // categories; for HCPCS the single-letter range buckets (if seeded) or the
-      // distinct chapters.
-      const rows = this.db
-        .query('SELECT * FROM codes WHERE system = ? AND parent IS NULL ORDER BY code LIMIT ?')
-        .all(system, limit) as Record<string, unknown>[];
+      // distinct chapters. `ORDER BY code` is unique (the table primary key), so
+      // the page is deterministic and offset/limit walk it cleanly.
+      const { rows, hasMore } = this.fetchPage(
+        'SELECT * FROM codes WHERE system = ? AND parent IS NULL ORDER BY code',
+        [system],
+        page,
+      );
       return {
         kind: 'codes',
         codes: rows.map((r) => CodeIndexService.decode(CodeIndexService.toCodeRow(r))),
+        hasMore,
       };
     }
 
     const code = storageCode(node);
     if (!this.getRow(code, system)) return { kind: 'unknown_node' };
-    return { kind: 'codes', codes: this.childrenOf(system, code) };
+    const { children, hasMore } = this.childrenOf(system, code, page);
+    return { kind: 'codes', codes: children, hasMore };
   }
 
   /**
@@ -677,17 +758,25 @@ export class CodeIndexService {
    */
   private browsePcs(
     node: string | undefined,
-    limit: number,
-  ): { kind: 'axes'; axes: PcsAxisRow[] } | { kind: 'unknown_node' } {
+    page: Page,
+  ): { kind: 'axes'; axes: PcsAxisRow[]; hasMore: boolean } | { kind: 'unknown_node' } {
     const partial = node ? storageCode(node) : '';
     if (partial.length >= 7) return { kind: 'unknown_node' };
     const position = partial.length + 1; // next axis position to enumerate
-    const rows = this.db
-      .query(
-        'SELECT position, value, meaning FROM pcs_axes WHERE position = ? ORDER BY value LIMIT ?',
-      )
-      .all(position, limit) as PcsAxisRow[];
-    return { kind: 'axes', axes: rows };
+    const { rows, hasMore } = this.fetchPage(
+      'SELECT position, value, meaning FROM pcs_axes WHERE position = ? ORDER BY value',
+      [position],
+      page,
+    );
+    return {
+      kind: 'axes',
+      axes: rows.map((r) => ({
+        position: Number(r.position),
+        value: r.value as string,
+        meaning: r.meaning as string,
+      })),
+      hasMore,
+    };
   }
 
   /** Provenance for every bundled system. */

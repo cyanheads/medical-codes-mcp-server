@@ -69,6 +69,12 @@ const FoundCodeSchema = DecodedCodeSchema.extend({
     .array(DecodedCodeSchema)
     .optional()
     .describe('Immediate child codes (present only when includeHierarchy is true).'),
+  childrenTruncated: z
+    .boolean()
+    .optional()
+    .describe(
+      'True when the code has more immediate children than `children` carries — the list was capped at the server cap (present only when includeHierarchy is true). Retrieve the full child list with medcode_browse_hierarchy or medcode_map_codes (children) for this code.',
+    ),
   source: z
     .string()
     .optional()
@@ -101,7 +107,7 @@ type NotFoundCode = z.infer<typeof NotFoundCodeSchema>;
 export const getCodeTool = tool('medcode_get_code', {
   title: 'medical-codes-mcp-server',
   description:
-    'Decode one or more US medical codes to their official descriptions across ICD-10-CM (diagnoses), ICD-10-PCS (inpatient procedures), HCPCS Level II (supplies/drugs/services), and RxNorm (drugs, by RXCUI). Also decodes a National Drug Code (NDC) — hyphenated or 10/11-digit — directly to its RxNorm product offline, tagged `source: "NDC"`. Auto-detects the system from each code\'s shape; pass an explicit `system` only when a value is genuinely ambiguous. Accepts 1–50 codes and returns partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason, so one bad code never fails the batch. Set `includeHierarchy` to attach each code\'s parent and immediate children. The resolved `system` is echoed on every result for chaining into medcode_map_codes or a billability check.',
+    'Decode one or more US medical codes to their official descriptions across ICD-10-CM (diagnoses), ICD-10-PCS (inpatient procedures), HCPCS Level II (supplies/drugs/services), and RxNorm (drugs, by RXCUI). Also decodes a National Drug Code (NDC) — hyphenated or 10/11-digit — directly to its RxNorm product offline, tagged `source: "NDC"`. Auto-detects the system from each code\'s shape; pass an explicit `system` only when a value is genuinely ambiguous. Accepts 1–50 codes and returns partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason, so one bad code never fails the batch. Set `includeHierarchy` to attach each code\'s parent and immediate children (with a `childrenTruncated` flag when a code has more children than the cap returns — walk the full set via medcode_browse_hierarchy or medcode_map_codes). The resolved `system` is echoed on every result for chaining into medcode_map_codes or a billability check.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -220,6 +226,11 @@ export const getCodeTool = tool('medcode_get_code', {
       if (c.children && c.children.length > 0) {
         lines.push(`**Children (${c.children.length}):**`);
         for (const k of c.children) lines.push(renderCodeLine(k));
+      }
+      if (c.childrenTruncated) {
+        lines.push(
+          '_More children exist beyond those shown — retrieve them with medcode_browse_hierarchy or medcode_map_codes (children)._',
+        );
       }
       lines.push('');
     }

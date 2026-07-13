@@ -65,21 +65,21 @@ describe('getByCode', () => {
 
 describe('searchFts', () => {
   it('requires every token (AND semantics)', () => {
-    const hits = svc.searchFts('diabetic neuropathy', { limit: 10 });
+    const hits = svc.searchFts('diabetic neuropathy', { limit: 10 }).codes;
     expect(hits.map((h) => h.code)).toContain('E11.40');
     // "polyneuropathy" must not match the "neuropathy" prefix token.
     expect(hits.map((h) => h.code)).not.toContain('E11.42');
   });
 
   it('honors the billableOnly filter', () => {
-    const all = svc.searchFts('diabetes', { limit: 50 });
-    const billable = svc.searchFts('diabetes', { limit: 50, billableOnly: true });
+    const all = svc.searchFts('diabetes', { limit: 50 }).codes;
+    const billable = svc.searchFts('diabetes', { limit: 50, billableOnly: true }).codes;
     expect(all.some((h) => h.code === 'E11')).toBe(true); // header present unfiltered
     expect(billable.some((h) => h.code === 'E11')).toBe(false); // header excluded
   });
 
-  it('returns an empty array for no match', () => {
-    expect(svc.searchFts('zzzznotarealterm', { limit: 10 })).toEqual([]);
+  it('returns an empty result for no match', () => {
+    expect(svc.searchFts('zzzznotarealterm', { limit: 10 }).codes).toEqual([]);
   });
 });
 
@@ -144,17 +144,17 @@ describe('mapCode', () => {
 
 describe('browse', () => {
   it('lists ICD-10-CM top-level categories (no node)', () => {
-    const r = svc.browse('ICD10CM', undefined, 50);
+    const r = svc.browse('ICD10CM', undefined, { offset: 0, limit: 50 });
     expect(r.kind).toBe('codes');
     if (r.kind === 'codes') expect(r.codes.some((c) => c.code === 'E11')).toBe(true);
   });
   it('returns PCS axis values for the first position', () => {
-    const r = svc.browse('ICD10PCS', undefined, 50);
+    const r = svc.browse('ICD10PCS', undefined, { offset: 0, limit: 50 });
     expect(r.kind).toBe('axes');
     if (r.kind === 'axes') expect(r.axes.some((a) => a.position === 1)).toBe(true);
   });
   it('lists HCPCS top-level letter buckets (no node)', () => {
-    const r = svc.browse('HCPCS', undefined, 50);
+    const r = svc.browse('HCPCS', undefined, { offset: 0, limit: 50 });
     expect(r.kind).toBe('codes');
     if (r.kind === 'codes') {
       const bucket = r.codes.find((c) => c.code === 'J');
@@ -163,9 +163,108 @@ describe('browse', () => {
     }
   });
   it('lists the codes under a HCPCS letter bucket (node)', () => {
-    const r = svc.browse('HCPCS', 'J', 50);
+    const r = svc.browse('HCPCS', 'J', { offset: 0, limit: 50 });
     expect(r.kind).toBe('codes');
     if (r.kind === 'codes') expect(r.codes.map((c) => c.code)).toContain('J0120');
+  });
+});
+
+describe('pagination (fetchPage-backed paths)', () => {
+  describe('childrenOf', () => {
+    // Fixture: ICD-10-CM A00 has exactly two children A000/A001 (display A00.0/A00.1),
+    // ordered by the unique primary key `code`.
+    it('returns the first page with an exact hasMore', () => {
+      const p1 = svc.childrenOf('ICD10CM', 'A00', { offset: 0, limit: 1 });
+      expect(p1.children.map((c) => c.code)).toEqual(['A00.0']);
+      expect(p1.hasMore).toBe(true);
+    });
+    it('returns the last page with hasMore false', () => {
+      const p2 = svc.childrenOf('ICD10CM', 'A00', { offset: 1, limit: 1 });
+      expect(p2.children.map((c) => c.code)).toEqual(['A00.1']);
+      expect(p2.hasMore).toBe(false);
+    });
+    it('does not false-positive hasMore when limit equals the child count', () => {
+      const exact = svc.childrenOf('ICD10CM', 'A00', { offset: 0, limit: 2 });
+      expect(exact.children.map((c) => c.code)).toEqual(['A00.0', 'A00.1']);
+      expect(exact.hasMore).toBe(false);
+    });
+    it('reconstructs the full child set from consecutive pages by code identity', () => {
+      const full = svc
+        .childrenOf('ICD10CM', 'A00', { offset: 0, limit: 50 })
+        .children.map((c) => c.code);
+      const p1 = svc.childrenOf('ICD10CM', 'A00', { offset: 0, limit: 1 }).children;
+      const p2 = svc.childrenOf('ICD10CM', 'A00', { offset: 1, limit: 1 }).children;
+      expect([...p1, ...p2].map((c) => c.code)).toEqual(full.slice(0, 2));
+    });
+  });
+
+  describe('searchFts', () => {
+    // Fixture: "diabetes" matches four ICD-10-CM rows (E11, E11.9, E11.40, E11.42).
+    it('paginates and reconstructs the ranked set by code identity', () => {
+      const full = svc.searchFts('diabetes', { offset: 0, limit: 50 }).codes;
+      expect(full).toHaveLength(4);
+      const p1 = svc.searchFts('diabetes', { offset: 0, limit: 2 });
+      const p2 = svc.searchFts('diabetes', { offset: 2, limit: 2 });
+      expect(p1.codes).toHaveLength(2);
+      expect(p1.hasMore).toBe(true);
+      expect(p2.codes).toHaveLength(2);
+      expect(p2.hasMore).toBe(false);
+      expect([...p1.codes, ...p2.codes].map((c) => c.code)).toEqual(full.map((c) => c.code));
+    });
+    it('orders deterministically across identical queries (tie-break locked)', () => {
+      const a = svc.searchFts('diabetes', { offset: 0, limit: 50 }).codes.map((c) => c.code);
+      const b = svc.searchFts('diabetes', { offset: 0, limit: 50 }).codes.map((c) => c.code);
+      expect(a).toEqual(b);
+    });
+    it('reports hasMore false at the exact match count (no >=cap false positive)', () => {
+      const exact = svc.searchFts('diabetes', { offset: 0, limit: 4 });
+      expect(exact.codes).toHaveLength(4);
+      expect(exact.hasMore).toBe(false);
+    });
+    it('returns an empty final page past the end', () => {
+      const past = svc.searchFts('diabetes', { offset: 4, limit: 2 });
+      expect(past.codes).toEqual([]);
+      expect(past.hasMore).toBe(false);
+    });
+  });
+
+  describe('mapCode name_to_rxcui', () => {
+    // Fixture: substring "a" matches four of five RxNorm concepts, ordered by
+    // (length(code), code): 161, 1191, 198440, 1049640.
+    it('paginates and reconstructs the drug-name set by RXCUI identity', () => {
+      const full = svc.mapCode('a', 'name_to_rxcui', undefined, { offset: 0, limit: 50 });
+      expect(full.kind).toBe('ok');
+      if (full.kind !== 'ok') return;
+      const fullValues = full.hits.map((h) => h.value);
+      expect(fullValues).toEqual(['161', '1191', '198440', '1049640']);
+
+      const p1 = svc.mapCode('a', 'name_to_rxcui', undefined, { offset: 0, limit: 2 });
+      const p2 = svc.mapCode('a', 'name_to_rxcui', undefined, { offset: 2, limit: 2 });
+      if (p1.kind !== 'ok' || p2.kind !== 'ok') throw new Error('expected ok');
+      expect(p1.hits.map((h) => h.value)).toEqual(['161', '1191']);
+      expect(p1.hasMore).toBe(true);
+      expect(p2.hits.map((h) => h.value)).toEqual(['198440', '1049640']);
+      expect(p2.hasMore).toBe(false);
+      expect([...p1.hits, ...p2.hits].map((h) => h.value)).toEqual(fullValues);
+    });
+  });
+
+  describe('getByCodeWithHierarchy childrenTruncated', () => {
+    it('flags truncation when a code has more children than the cap', () => {
+      const r = svc.getByCode('A00');
+      expect(r.kind).toBe('found');
+      if (r.kind !== 'found') return;
+      const capped = svc.getByCodeWithHierarchy(r.row, 1);
+      expect(capped.children.map((c) => c.code)).toEqual(['A00.0']);
+      expect(capped.childrenTruncated).toBe(true);
+    });
+    it('reports no truncation when the children fit the cap', () => {
+      const r = svc.getByCode('A00');
+      if (r.kind !== 'found') throw new Error('expected found');
+      const full = svc.getByCodeWithHierarchy(r.row, 50);
+      expect(full.children.map((c) => c.code)).toEqual(['A00.0', 'A00.1']);
+      expect(full.childrenTruncated).toBe(false);
+    });
   });
 });
 

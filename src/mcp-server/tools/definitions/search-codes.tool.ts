@@ -7,9 +7,9 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { getServerConfig } from '@/config/server-config.js';
 import { getCodeIndexService } from '@/services/code-index/code-index-service.js';
 import { SYSTEM_IDS } from '@/services/code-index/types.js';
+import { encodeNextCursor, resolvePage } from './_pagination.js';
 import { renderCodeLine } from './_render.js';
 
 const SOURCE_URL =
@@ -18,7 +18,7 @@ const SOURCE_URL =
 export const searchCodesTool = tool('medcode_search_codes', {
   title: 'medical-codes-mcp-server',
   description:
-    'Find US medical codes whose official descriptions match a described concept, via full-text search over the bundled index. Every search term must appear (prefix-matched), so "diabetic neuropathy" returns codes mentioning both. Filter by `system` (ICD10CM/ICD10PCS/HCPCS/RXNORM), `billableOnly` to exclude headers/categories, and `chapter`. Use when you have a clinical description and need the code — the reverse of medcode_get_code. Results echo the resolved system per row for chaining, and disclose truncation when the result hits the cap.',
+    'Find US medical codes whose official descriptions match a described concept, via full-text search over the bundled index. Every search term must appear (prefix-matched), so "diabetic neuropathy" returns codes mentioning both. Filter by `system` (ICD10CM/ICD10PCS/HCPCS/RXNORM), `billableOnly` to exclude headers/categories, and `chapter`. Use when you have a clinical description and need the code — the reverse of medcode_get_code. Results echo the resolved system per row for chaining, are ranked by relevance with a deterministic tie-break, and disclose truncation with a `nextCursor`: pass it back as `cursor` to page through the full ranked set.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -46,7 +46,13 @@ export const searchCodesTool = tool('medcode_search_codes', {
       .max(200)
       .optional()
       .describe(
-        "Max codes to return. Defaults to the server's MEDCODE_MAX_RESULTS (50), ceiling 200.",
+        "Max codes per page. Defaults to the server's MEDCODE_MAX_RESULTS (50), ceiling 200.",
+      ),
+    cursor: z
+      .string()
+      .optional()
+      .describe(
+        "Opaque continuation token from a previous response's `nextCursor`, to fetch the next page of the same ranked result set. Omit for the first page.",
       ),
   }),
 
@@ -85,9 +91,15 @@ export const searchCodesTool = tool('medcode_search_codes', {
         chapter: z.string().nullable().describe('Chapter filter applied, or null.'),
       })
       .describe('Filters the server applied to the search.'),
-    truncated: z.boolean().describe('True when results were capped at the limit.'),
-    shown: z.number().describe('Number of codes returned.'),
-    cap: z.number().describe('The limit that was applied.'),
+    truncated: z.boolean().describe('True when more matches exist beyond this page.'),
+    shown: z.number().describe('Number of codes returned on this page.'),
+    cap: z.number().describe('The page size that was applied.'),
+    nextCursor: z
+      .string()
+      .optional()
+      .describe(
+        'Opaque token to pass back as `cursor` for the next page. Present only when more matches exist beyond this page.',
+      ),
     notice: z
       .string()
       .optional()
@@ -102,12 +114,13 @@ export const searchCodesTool = tool('medcode_search_codes', {
   },
 
   handler(input, ctx) {
-    const cap = input.limit ?? getServerConfig().maxResults;
-    const codes = getCodeIndexService().searchFts(input.query, {
+    const page = resolvePage(input.cursor, input.limit);
+    const { codes, hasMore } = getCodeIndexService().searchFts(input.query, {
       ...(input.system && { system: input.system }),
       billableOnly: input.billableOnly,
       ...(input.chapter && { chapter: input.chapter }),
-      limit: cap,
+      offset: page.offset,
+      limit: page.limit,
     });
 
     ctx.enrich({
@@ -119,8 +132,8 @@ export const searchCodesTool = tool('medcode_search_codes', {
       },
     });
 
-    const wasTruncated = codes.length >= cap;
-    ctx.enrich({ truncated: wasTruncated, shown: codes.length, cap });
+    ctx.enrich({ truncated: hasMore, shown: codes.length, cap: page.limit });
+    if (hasMore) ctx.enrich({ nextCursor: encodeNextCursor(page) });
 
     if (codes.length === 0) {
       ctx.enrich.notice(

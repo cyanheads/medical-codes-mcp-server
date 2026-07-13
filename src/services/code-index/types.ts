@@ -55,6 +55,16 @@ export interface BuildMetaRow {
   system: SystemId;
 }
 
+/**
+ * A pagination window over a query result: the zero-based offset of the first
+ * row and the page size. Shared by every paginated query path (search, browse,
+ * children, drug-name crosswalk) so they route through one offset/limit contract.
+ */
+export interface Page {
+  limit: number;
+  offset: number;
+}
+
 /** An ICD-10-PCS axis-value row from `pcs_axes`. */
 export interface PcsAxisRow {
   /** What that value means at that position. */

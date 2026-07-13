@@ -13,6 +13,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 
 import { CodeIndexService, getCodeIndexService } from '@/services/code-index/code-index-service.js';
 import { type MapDirection, SYSTEM_IDS } from '@/services/code-index/types.js';
+import { encodeNextCursor, resolvePage } from './_pagination.js';
 
 const SOURCE_URL =
   'https://github.com/cyanheads/medical-codes-mcp-server/blob/main/src/mcp-server/tools/definitions/map-codes.tool.ts';
@@ -30,7 +31,7 @@ const DIRECTIONS = [
 export const mapCodesTool = tool('medcode_map_codes', {
   title: 'medical-codes-mcp-server',
   description:
-    "Crosswalk a US medical code or drug across systems and within a hierarchy. Hierarchy directions: `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full ancestor or descendant path (ICD-10-CM/HCPCS; ICD-10-PCS codes have no prefix parent). A resolvable code with no edge in the requested direction is a successful empty result with a notice, not an error. Drug directions (RxNorm): `name_to_rxcui` (drug name → RXCUI), `ndc_to_rxcui` and `rxcui_to_ndc` (NDC ↔ RXCUI; NDCs accepted hyphenated or 10/11-digit), `rxcui_to_ingredients` and `rxcui_to_brands` (RXCUI → ingredient/brand RXCUIs). Every result carries `source` provenance (which system or edge answered) so a chained call (e.g. into openfda with a resolved NDC) uses the right identifier.",
+    "Crosswalk a US medical code or drug across systems and within a hierarchy. Hierarchy directions: `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full ancestor or descendant path (ICD-10-CM/HCPCS; ICD-10-PCS codes have no prefix parent). A resolvable code with no edge in the requested direction is a successful empty result with a notice, not an error. Drug directions (RxNorm): `name_to_rxcui` (drug name → RXCUI), `ndc_to_rxcui` and `rxcui_to_ndc` (NDC ↔ RXCUI; NDCs accepted hyphenated or 10/11-digit), `rxcui_to_ingredients` and `rxcui_to_brands` (RXCUI → ingredient/brand RXCUIs). Every result carries `source` provenance (which system or edge answered) so a chained call (e.g. into openfda with a resolved NDC) uses the right identifier. The `children` and `name_to_rxcui` directions can return large sets and paginate: a `nextCursor` in the response is passed back as `cursor` (with an optional `limit` page size) to walk the full set; the point directions ignore both.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -51,6 +52,21 @@ export const mapCodesTool = tool('medcode_map_codes', {
       .optional()
       .describe(
         'For parents/children, force the source code into this system. Omit to auto-detect.',
+      ),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe(
+        'Max results per page for the paginated directions (children, name_to_rxcui). Defaults to MEDCODE_MAX_RESULTS (50), ceiling 200. Ignored by the point directions.',
+      ),
+    cursor: z
+      .string()
+      .optional()
+      .describe(
+        "Opaque continuation token from a previous response's `nextCursor`, for the paginated directions (children, name_to_rxcui). Omit for the first page.",
       ),
   }),
 
@@ -88,6 +104,26 @@ export const mapCodesTool = tool('medcode_map_codes', {
   }),
 
   enrichment: {
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        'Paginated directions (children, name_to_rxcui) only: true when more results exist beyond this page.',
+      ),
+    shown: z
+      .number()
+      .optional()
+      .describe('Paginated directions only: number of hits returned on this page.'),
+    cap: z
+      .number()
+      .optional()
+      .describe('Paginated directions only: the page size that was applied.'),
+    nextCursor: z
+      .string()
+      .optional()
+      .describe(
+        'Paginated directions only: opaque token to pass back as `cursor` for the next page. Present only when more results exist beyond this page.',
+      ),
     notice: z
       .string()
       .optional()
@@ -130,7 +166,8 @@ export const mapCodesTool = tool('medcode_map_codes', {
       );
     }
 
-    const result = svc.mapCode(input.from, input.direction, input.system);
+    const page = resolvePage(input.cursor, input.limit);
+    const result = svc.mapCode(input.from, input.direction, input.system, page);
 
     if (result.kind === 'ambiguous') {
       throw ctx.fail(
@@ -144,6 +181,15 @@ export const mapCodesTool = tool('medcode_map_codes', {
         ...ctx.recoveryFor('no_mapping'),
       });
     }
+
+    // children and name_to_rxcui paginate; disclose truncation + continuation for
+    // them (even at zero hits — a leaf's empty children page is still "complete").
+    // The point directions ignore the page and carry no continuation metadata.
+    if (input.direction === 'children' || input.direction === 'name_to_rxcui') {
+      ctx.enrich({ truncated: result.hasMore, shown: result.hits.length, cap: page.limit });
+      if (result.hasMore) ctx.enrich({ nextCursor: encodeNextCursor(page) });
+    }
+
     if (result.hits.length === 0) {
       // Resolved, but no edge in this direction — a successful empty result with a
       // notice, consistent with search_codes / browse_hierarchy. Only `parents` and

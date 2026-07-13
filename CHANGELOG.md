@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-07-13
+
+Cursor pagination (with nextCursor continuation) for medcode_search_codes, medcode_browse_hierarchy, and medcode_map_codes's children/name_to_rxcui directions, a childrenTruncated flag on medcode_get_code, and a fix for browse_hierarchy's capped children and inaccurate truncation metadata.
+
 ## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-07-13
 
 RxNorm wording reconciled to the active normalized set, a dead no_match error contract removed from medcode_search_codes, and mcp-ts-core bumped to ^0.10.14 with bunfig supply-chain hardening (Socket scanner, minimumReleaseAge) and a Docker build fix.
