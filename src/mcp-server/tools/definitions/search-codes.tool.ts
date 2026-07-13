@@ -7,7 +7,6 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getCodeIndexService } from '@/services/code-index/code-index-service.js';
 import { SYSTEM_IDS } from '@/services/code-index/types.js';
@@ -101,15 +100,6 @@ export const searchCodesTool = tool('medcode_search_codes', {
         `**Filters:** system=${f.system ?? 'any'}, billableOnly=${f.billableOnly}, chapter=${f.chapter ?? 'any'}`,
     },
   },
-
-  errors: [
-    {
-      reason: 'no_match',
-      code: JsonRpcErrorCode.NotFound,
-      when: 'The full-text query returned zero rows.',
-      recovery: 'Broaden the terms, drop the system or chapter filter, or try clinical synonyms.',
-    },
-  ],
 
   handler(input, ctx) {
     const cap = input.limit ?? getServerConfig().maxResults;
