@@ -81,8 +81,10 @@ repomix-output*
 # tabular XML). The build input, re-downloadable from the .gov URLs — never
 # committed.
 .sources/
-# Generated test fixture DB (built on demand by tests/helpers/index-fixture.ts).
+# Generated test fixture DB (built on demand by tests/helpers/index-fixture.ts),
+# plus the per-worker scratch copies it builds before publishing the shared path.
 tests/fixtures/*.db
+tests/fixtures/*.tmp
 docs/api/
 docs/devdocs.md
 .mcp.json
