@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.5](changelog/0.2.x/0.2.5.md) — 2026-08-09
+
+medcode_get_code's hierarchy formatter renders empty/complete children explicitly; medcode_search_codes trims and omits blank chapter filters; medcode_browse_hierarchy rejects ICD-10-PCS nodes outside the axis alphabet or that prefix no bundled code; a NUL in a search query is normalized to a token separator instead of reaching FTS5 raw.
+
 ## [0.2.4](changelog/0.2.x/0.2.4.md) — 2026-08-09
 
 medcode_map_codes now names ingredient/brand crosswalk targets and paginates rxcui_to_ndc; medcode_get_code rejects undersized hyphenated NDC segments instead of padding them into an unrelated product; mcp-ts-core bumped to ^0.11.1.
