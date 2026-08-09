@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.4](changelog/0.2.x/0.2.4.md) — 2026-08-09
+
+medcode_map_codes now names ingredient/brand crosswalk targets and paginates rxcui_to_ndc; medcode_get_code rejects undersized hyphenated NDC segments instead of padding them into an unrelated product; mcp-ts-core bumped to ^0.11.1.
+
 ## [0.2.3](changelog/0.2.x/0.2.3.md) — 2026-07-13
 
 Fixes medcode_browse_hierarchy reporting unknown_node for a complete, existing ICD-10-PCS code; whitespace-only required inputs reaching the service layer (arbitrary results from an unscoped RxNorm name lookup); and medcode_search_codes missing single-token compound matches like mono-/polyneuropathy.

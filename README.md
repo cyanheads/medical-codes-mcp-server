@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/medical-codes-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/medical-codes-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/medical-codes-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/medical-codes-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -75,7 +75,7 @@ Six tools organized goal-first — one per user action, with a `system` discrimi
 Decode one or more codes seen in a claim, EHR field, or another health server's output. The 80% entry point.
 
 - Accepts 1–50 codes; mixed systems are fine — each code's system is detected independently from its shape
-- Decodes a **National Drug Code (NDC)** directly to its RxNorm product — hyphenated (`0777-3105-02`) or 10/11-digit — offline via the bundled NDC↔RxNorm map, tagged `source: "NDC"`
+- Decodes a **National Drug Code (NDC)** directly to its RxNorm product — hyphenated in an FDA segment configuration (4-4-2 `0777-3105-02`, 5-3-2, 5-4-1, or the 11-digit 5-4-2) or as bare 10/11 digits — offline via the bundled NDC↔RxNorm map, tagged `source: "NDC"`
 - Partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason, so one bad code never fails the batch
 - An explicit `system` overrides auto-detection when a value is genuinely ambiguous (an ambiguous code lists its `candidateSystems`)
 - `includeHierarchy` attaches each code's parent and immediate children
@@ -109,8 +109,9 @@ Validate whether a code is safe to submit, before a claim goes out.
 Crosswalk a code across systems and within a hierarchy.
 
 - Hierarchy directions: `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full path (ICD-10-CM / HCPCS; ICD-10-PCS codes have no prefix parent)
-- Drug directions (RxNorm): `name_to_rxcui` (drug name → RXCUI), `ndc_to_rxcui` / `rxcui_to_ndc` (NDC ↔ RXCUI; NDCs accepted hyphenated or 10/11-digit), `rxcui_to_ingredients` / `rxcui_to_brands` (RXCUI → ingredient/brand RXCUIs)
+- Drug directions (RxNorm): `name_to_rxcui` (drug name → RXCUI), `ndc_to_rxcui` / `rxcui_to_ndc` (NDC ↔ RXCUI; NDCs accepted hyphenated in an FDA segment configuration — 4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2 — or as bare 10/11 digits), `rxcui_to_ingredients` / `rxcui_to_brands` (RXCUI → ingredient/brand RXCUIs, each with the target's RxNorm name)
 - Every result carries `source` provenance (which system or edge answered) so a chained call uses the right identifier
+- `children`, `name_to_rxcui`, and `rxcui_to_ndc` can return large sets and paginate — a product can carry thousands of package NDCs; pass a response's `nextCursor` back as `cursor` (with an optional `limit`) to walk the full set
 
 ---
 

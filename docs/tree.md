@@ -1,6 +1,6 @@
 # medical-codes-mcp-server - Directory Structure
 
-Generated on: 2026-07-13 22:15:47
+Generated on: 2026-08-09 11:48:53
 
 ```text
 medical-codes-mcp-server/
@@ -163,13 +163,25 @@ medical-codes-mcp-server/
 │   └── index.ts
 ├── tests/
 │   ├── fixtures/
+│   ├── fuzz/
+│   │   └── code-inputs.fuzz.test.ts
 │   ├── helpers/
+│   │   ├── bundled-index.ts
 │   │   └── index-fixture.ts
 │   ├── ingest/
 │   │   └── parsers.test.ts
+│   ├── integration/
+│   │   └── bundled-index-correctness.test.ts
+│   ├── scripts/
+│   │   └── packaging-regex.test.ts
 │   ├── services/
+│   │   ├── code-index-lifecycle.test.ts
 │   │   └── code-index-service.test.ts
+│   ├── smoke/
+│   │   └── tool-surface.smoke.test.ts
 │   └── tools/
+│       ├── correctness-critical.test.ts
+│       ├── format-rendering.test.ts
 │       └── medcode-tools.test.ts
 ├── .dockerignore
 ├── .env.example
