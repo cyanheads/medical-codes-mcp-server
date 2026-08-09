@@ -39,6 +39,9 @@ describe('medcode_get_code format', () => {
     expect(text).toContain('Type 2 diabetes mellitus');
     expect(text).toContain('**Parent:** (none — root)');
     expect(text).toContain('**Children (1):**');
+    // A complete child list says so, so the text path never leaves the caller
+    // guessing whether more children were withheld.
+    expect(text).toContain('_Complete: no further children exist beyond those listed._');
     // Every child the structured path carries must be named in the text too.
     for (const child of out.found[0]?.children ?? []) expect(text).toContain(child.code);
   });
@@ -102,8 +105,12 @@ describe('medcode_get_code format', () => {
     });
     const text = textOf(getCodeTool.format!(out));
 
+    expect(text).toContain('**Children (1):**');
     expect(text).toMatch(/More children exist/i);
     expect(text).toContain('medcode_browse_hierarchy');
+    // The truncated and complete states are mutually exclusive renders — a caller
+    // must never see both, or the disclosure is worthless.
+    expect(text).not.toMatch(/^_Complete:/m);
     // A row with neither description must say so, not render an empty gap.
     expect(text).toContain('(no description)');
   });

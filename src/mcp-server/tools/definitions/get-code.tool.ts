@@ -222,14 +222,21 @@ export const getCodeTool = tool('medcode_get_code', {
     for (const c of result.found) {
       lines.push(...renderCodeBlock(c));
       if (c.source) lines.push(`**Resolved via:** ${c.source}`);
+      // Each hierarchy field renders on presence, not on truthiness: an empty child
+      // list and a `childrenTruncated: false` are facts the caller asked for, and
+      // gating them on content would render them exactly like the absent hierarchy
+      // of a plain lookup. Presence is the only signal that separates "hierarchy
+      // requested, child set empty and complete" from "hierarchy not requested".
       if (c.parent !== undefined) lines.push(`**Parent:** ${c.parent ?? '(none — root)'}`);
-      if (c.children && c.children.length > 0) {
+      if (c.children !== undefined) {
         lines.push(`**Children (${c.children.length}):**`);
         for (const k of c.children) lines.push(renderCodeLine(k));
       }
-      if (c.childrenTruncated) {
+      if (c.childrenTruncated !== undefined) {
         lines.push(
-          '_More children exist beyond those shown — retrieve them with medcode_browse_hierarchy or medcode_map_codes (children)._',
+          c.childrenTruncated
+            ? '_More children exist beyond those shown — retrieve them with medcode_browse_hierarchy or medcode_map_codes (children)._'
+            : '_Complete: no further children exist beyond those listed._',
         );
       }
       lines.push('');

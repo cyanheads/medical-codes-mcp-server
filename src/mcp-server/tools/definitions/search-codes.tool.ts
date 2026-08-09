@@ -38,7 +38,9 @@ export const searchCodesTool = tool('medcode_search_codes', {
     chapter: z
       .string()
       .optional()
-      .describe("Restrict to a chapter/range bucket (the value from a code's `chapter` field)."),
+      .describe(
+        "Restrict to a chapter/range bucket (the value from a code's `chapter` field). Surrounding whitespace is trimmed; a blank or whitespace-only value carries no filtering intent and is treated as omitted, which the response discloses as `appliedFilters.chapter: null`.",
+      ),
     limit: z
       .number()
       .int()
@@ -115,10 +117,17 @@ export const searchCodesTool = tool('medcode_search_codes', {
 
   handler(input, ctx) {
     const page = resolvePage(input.cursor, input.limit);
+    // One normalization feeds BOTH the SQL predicate and the echoed appliedFilters,
+    // so the filter that ran and the filter that is reported cannot diverge. Blank
+    // is omitted rather than rejected: `chapter` is an optional filter, so a value
+    // with no content states no filtering intent, and dropping it is disclosed by
+    // the echoed `chapter: null` — unlike `node`, where a normalized-away value
+    // would silently change which subtree was walked.
+    const chapter = input.chapter?.trim() || undefined;
     const { codes, hasMore } = getCodeIndexService().searchFts(input.query, {
       ...(input.system && { system: input.system }),
       billableOnly: input.billableOnly,
-      ...(input.chapter && { chapter: input.chapter }),
+      ...(chapter && { chapter }),
       offset: page.offset,
       limit: page.limit,
     });
@@ -128,7 +137,7 @@ export const searchCodesTool = tool('medcode_search_codes', {
       appliedFilters: {
         system: input.system ?? null,
         billableOnly: input.billableOnly,
-        chapter: input.chapter ?? null,
+        chapter: chapter ?? null,
       },
     });
 

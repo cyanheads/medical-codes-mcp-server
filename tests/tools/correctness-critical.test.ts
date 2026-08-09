@@ -218,35 +218,62 @@ describe('crosswalk completeness and known output defects', () => {
   });
 
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/21
-  it.skip('renders an explicitly empty and complete hierarchy on the text client path', async () => {
+  it('renders an explicitly empty and complete hierarchy on the text client path', async () => {
     const out = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['E11.9'], includeHierarchy: true }),
       createMockContext(),
     );
     expect(out.found[0]).toMatchObject({ children: [], childrenTruncated: false });
 
-    const text = getCodeTool.format!(out)
-      .flatMap((block) => (block.type === 'text' ? [block.text] : []))
-      .join('\n');
-    expect(text).toMatch(/children\s*\(?0\)?/i);
-    expect(text).toMatch(/complete|not truncated|childrenTruncated:\s*false/i);
+    const text = renderText(getCodeTool.format!(out));
+    expect(text).toContain('**Children (0):**');
+    expect(text).toMatch(/complete/i);
+
+    // The defect is a collision, not a missing line: without hierarchy the same two
+    // facts are genuinely absent, so a text-only client can only tell the two states
+    // apart if the no-hierarchy render carries neither line.
+    const plain = await getCodeTool.handler(
+      getCodeTool.input.parse({ codes: ['E11.9'] }),
+      createMockContext(),
+    );
+    expect(plain.found[0]).not.toHaveProperty('children');
+    const plainText = renderText(getCodeTool.format!(plain));
+    expect(plainText).not.toMatch(/children/i);
+    expect(plainText).not.toMatch(/complete/i);
   });
 
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/22
-  it.skip('normalizes empty and whitespace-only chapter filters to omitted', async () => {
+  it('treats a blank chapter filter as omitted and applies a padded one trimmed', async () => {
+    const baseCtx = createMockContext();
     const base = await searchCodesTool.handler(
-      searchCodesTool.input.parse({ query: 'diabetes' }),
-      createMockContext(),
+      searchCodesTool.input.parse({ query: 'sterile' }),
+      baseCtx,
     );
+    // "sterile" spans two HCPCS chapters in the fixture, so "no chapter predicate
+    // ran" is observable in the result set itself, not merely inferred from parity
+    // with a baseline that a single-chapter query would satisfy either way.
+    expect(new Set(base.codes.map((code) => code.chapter))).toEqual(new Set(['A', 'K']));
+    expect(getEnrichment(baseCtx)?.appliedFilters).toMatchObject({ chapter: null });
 
     for (const chapter of ['', '   ']) {
       const ctx = createMockContext();
       const out = await searchCodesTool.handler(
-        searchCodesTool.input.parse({ query: 'diabetes', chapter }),
+        searchCodesTool.input.parse({ query: 'sterile', chapter }),
         ctx,
       );
       expect(out.codes.map((code) => code.code)).toEqual(base.codes.map((code) => code.code));
+      expect(new Set(out.codes.map((code) => code.chapter))).toEqual(new Set(['A', 'K']));
       expect(getEnrichment(ctx)?.appliedFilters).toMatchObject({ chapter: null });
     }
+
+    // A real value that arrives padded filters on the trimmed value rather than
+    // zero-hitting on the literal, and echoes what it actually applied.
+    const paddedCtx = createMockContext();
+    const padded = await searchCodesTool.handler(
+      searchCodesTool.input.parse({ query: 'sterile', chapter: ' A ' }),
+      paddedCtx,
+    );
+    expect(padded.codes.map((code) => code.code)).toEqual(['A4206']);
+    expect(getEnrichment(paddedCtx)?.appliedFilters).toMatchObject({ chapter: 'A' });
   });
 });
