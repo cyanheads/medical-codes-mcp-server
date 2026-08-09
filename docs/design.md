@@ -216,7 +216,7 @@ Domain failure modes declared as `errors: [{ reason, code, when, recovery }]` so
 | `medcode_check_code` | `unknown_code` | `NotFound` | the code does not exist in the named/detected system | Check the code, or search by description with `medcode_search_codes`. |
 | `medcode_map_codes` | `no_mapping` | `NotFound` | the source resolved but has no edge in the requested `direction` | Confirm the direction is supported for this system, or decode the code with `medcode_get_code` first. |
 | `medcode_map_codes` | `direction_unavailable` | `InvalidParams` | a drug-crosswalk direction requested but the build carries no RxNorm tables | Use a hierarchy direction (parents/children), or rebuild the index with RxNorm bundled (the shipped default). |
-| `medcode_browse_hierarchy` | `unknown_node` | `NotFound` | the `node` doesn't exist in the system | Omit `node` to list top-level chapters, or verify the node code. |
+| `medcode_browse_hierarchy` | `unknown_node` | `NotFound` | the `node` doesn't exist in the system — for ICD-10-PCS, also a node carrying a character outside the axis alphabet (digits plus A-Z without `I`/`O`) or one no bundled code begins with | Omit `node` to list top-level entries, or verify the node code. |
 
 Validity vs. existence is deliberately split: a *non-billable* or *terminated* code is a successful `medcode_check_code` result (status + `whyNot`), **not** an error — the agent needs the detail, and throwing would hide it. Only a code that doesn't exist at all is `unknown_code`.
 

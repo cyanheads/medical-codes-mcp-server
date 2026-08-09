@@ -15,7 +15,7 @@ import { internalError } from '@cyanheads/mcp-ts-core/errors';
 import { logger, requestContextService, runtimeCaps } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
-import { detectSystems, ndcCandidates } from './detect.js';
+import { detectSystems, ICD10PCS_PARTIAL_RE, ndcCandidates } from './detect.js';
 import { displayCode, icd10cmParent, storageCode } from './schema.js';
 import {
   type BuildMetaRow,
@@ -766,7 +766,7 @@ export class CodeIndexService {
   ):
     | { kind: 'codes'; codes: DecodedCode[]; hasMore: boolean }
     | { kind: 'axes'; axes: PcsAxisRow[]; hasMore: boolean }
-    | { kind: 'unknown_node' } {
+    | { kind: 'unknown_node'; reason?: string } {
     if (system === 'ICD10PCS') {
       return this.browsePcs(node, page);
     }
@@ -811,13 +811,29 @@ export class CodeIndexService {
    * gets an explicit notice (handled in the tool), not silent-empty or wrong data.
    * A complete 7-character code that exists likewise has no deeper axis to browse,
    * so it too returns empty axes — distinguished from a code absent from the index,
-   * which is the only `unknown_node`.
+   * which is `unknown_node`, as is a node outside the PCS axis alphabet and a node
+   * no bundled code begins with.
    */
   private browsePcs(
     node: string | undefined,
     page: Page,
-  ): { kind: 'axes'; axes: PcsAxisRow[]; hasMore: boolean } | { kind: 'unknown_node' } {
+  ):
+    | { kind: 'axes'; axes: PcsAxisRow[]; hasMore: boolean }
+    | { kind: 'unknown_node'; reason?: string } {
     const partial = node ? storageCode(node) : '';
+    // A node outside the 34-value axis alphabet (`I`, `O`, punctuation, `.` — which
+    // storageCode strips to nothing) cannot prefix any PCS code at any position, so
+    // it is rejected here rather than silently walked as if it were a valid partial
+    // path. Purely lexical, and it runs ahead of the length branch so an existing
+    // complete code is still resolved by DB membership, never by shape alone.
+    if (node && !ICD10PCS_PARTIAL_RE.test(partial)) {
+      return {
+        kind: 'unknown_node',
+        reason:
+          `"${node}" is not a valid ICD-10-PCS node: every axis value is a digit 0-9 or ` +
+          `a letter A-Z excluding I and O (which would read as 1 and 0).`,
+      };
+    }
     if (partial.length >= 7) {
       // A complete PCS code (length 7) is a real node with nothing left to browse —
       // its positions 2–7 are fully specified, and they are context-dependent so
@@ -828,6 +844,23 @@ export class CodeIndexService {
       return this.getRow(partial, 'ICD10PCS')
         ? { kind: 'axes', axes: [], hasMore: false }
         : { kind: 'unknown_node' };
+    }
+    // The alphabet check alone is far too permissive: only a subset of the axis values
+    // opens a code, and every later position is constrained by the ones before it, so
+    // the large majority of in-alphabet combinations name no path at all. Without this
+    // a fabricated node draws the same empty-axes success and context-dependent notice
+    // a real partial path gets — the misleading-success the alphabet guard above only
+    // half removes. Membership comes from `codes`, the same table (and the same source
+    // file) the complete-code branch checks, so the two agree on what the release holds
+    // rather than coupling the guard to the separately-sourced `pcs_axes`.
+    if (partial && !this.pcsPrefixExists(partial)) {
+      return {
+        kind: 'unknown_node',
+        reason:
+          `No ICD-10-PCS code in this release begins with "${node}" — each axis position is ` +
+          `only valid in the context of the values that precede it, so most character ` +
+          `combinations are not real paths.`,
+      };
     }
     const position = partial.length + 1; // next axis position to enumerate
     const { rows, hasMore } = this.fetchPage(
@@ -844,6 +877,24 @@ export class CodeIndexService {
       })),
       hasMore,
     };
+  }
+
+  /**
+   * Whether any bundled ICD-10-PCS code begins with `prefix`. Expressed as a half-open
+   * range rather than `GLOB 'prefix*'` so SQLite seeks the `(system, code)` primary key
+   * instead of scanning the system's partition — a bound GLOB pattern does not get the
+   * prefix optimization. `prefix` has already passed {@link ICD10PCS_PARTIAL_RE}, so its
+   * final character is at most `Z` and incrementing that code unit is a valid exclusive
+   * upper bound under SQLite's default BINARY collation.
+   */
+  private pcsPrefixExists(prefix: string): boolean {
+    const upperBound =
+      prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
+    return !!this.db
+      .query(
+        "SELECT 1 AS hit FROM codes WHERE system = 'ICD10PCS' AND code >= ? AND code < ? LIMIT 1",
+      )
+      .get(prefix, upperBound);
   }
 
   /** Provenance for every bundled system. */
@@ -873,14 +924,27 @@ export class CodeIndexService {
 }
 
 /**
+ * U+0000 is the one character that breaks the FTS5 query path. FTS5 re-parses its
+ * `MATCH` argument as a miniature query language, and an embedded NUL terminates
+ * that parse (`SQLiteError: unterminated string`) — while every other C0 control
+ * passes through as ordinary token text, and the plain `=` / `LIKE` binds elsewhere
+ * in this service are unaffected (SQLite treats a bound value as opaque bytes).
+ * Normalizing it to a token separator here, next to the FTS operator characters,
+ * keeps a query like `diabetes\u0000neuropathy` a useful two-token search; rejecting
+ * the whole query at the schema boundary would throw that search away instead.
+ */
+const NUL = '\u0000';
+
+/**
  * Tokenize free user text the way both search tiers consume it: lowercase, strip
- * FTS5 operator characters, split on whitespace, drop empties. Shared by
- * {@link toFtsMatch} (the prefix tier) and the substring tier's LIKE patterns so
- * the two tiers tokenize identically and stay in lockstep.
+ * FTS5 operator characters and {@link NUL}, split on whitespace, drop empties.
+ * Shared by {@link toFtsMatch} (the prefix tier) and the substring tier's LIKE
+ * patterns so the two tiers tokenize identically and stay in lockstep.
  */
 export function tokenizeQuery(text: string): string[] {
   return text
     .toLowerCase()
+    .replaceAll(NUL, ' ')
     .replace(/["()*:^-]/g, ' ')
     .split(/\s+/)
     .map((t) => t.trim())

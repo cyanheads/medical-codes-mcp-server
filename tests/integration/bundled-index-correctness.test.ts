@@ -274,8 +274,10 @@ describe('hierarchy algorithms', () => {
   });
 
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/24
-  it.skip('rejects invalid PCS axis values instead of returning a normal empty traversal', async () => {
-    for (const node of ['I', 'O', '!']) {
+  it('rejects invalid PCS axis values instead of returning a normal empty traversal', async () => {
+    // `i` normalizes to `I`; `.` is stripped to nothing by storageCode and would
+    // otherwise be served the top-level section list as if no node had been passed.
+    for (const node of ['I', 'O', '!', '.', 'i', '0DO']) {
       const err = await caught(() =>
         browseHierarchyTool.handler(
           browseHierarchyTool.input.parse({ system: 'ICD10PCS', node }),
@@ -283,7 +285,49 @@ describe('hierarchy algorithms', () => {
         ),
       );
       expect(err.data?.reason).toBe('unknown_node');
+      expect(err.message).toMatch(/ICD-10-PCS/);
     }
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/24
+  it('rejects an in-alphabet node that prefixes no code rather than implying a path', async () => {
+    // Section values are 17 of the 34 axis characters and each later position is
+    // constrained by the ones before it, so these clear the alphabet check while
+    // naming nothing. Left unguarded they draw the same empty-axes success and
+    // "positions 2–7 are context-dependent" notice a real partial path gets.
+    for (const node of ['A', 'Z', 'E', '0Z', '0DZ', 'ZZZZZZ']) {
+      const err = await caught(() =>
+        browseHierarchyTool.handler(
+          browseHierarchyTool.input.parse({ system: 'ICD10PCS', node }),
+          createMockContext({ errors: browseHierarchyTool.errors }),
+        ),
+      );
+      expect(err.data?.reason).toBe('unknown_node');
+      expect(err.message).toMatch(/begins with/);
+    }
+  });
+
+  it('keeps every real partial prefix and complete code browsable', async () => {
+    // The guards are a narrowing, so what they must NOT reject is the load-bearing
+    // half: prefixes at each length keep their context-dependent-axis notice, and a
+    // complete existing code keeps the successful empty-axes result from #13.
+    for (const node of ['0', '0D', '0DT', '0DTJ', '0DTJ4', '0DTJ4Z', 'X', 'XW']) {
+      const ctx = createMockContext({ errors: browseHierarchyTool.errors });
+      const out = await browseHierarchyTool.handler(
+        browseHierarchyTool.input.parse({ system: 'ICD10PCS', node }),
+        ctx,
+      );
+      expect(out).toEqual({ kind: 'axes', codes: [], axes: [] });
+      expect(getEnrichment(ctx)?.notice).toMatch(/context-dependent/i);
+    }
+
+    const completeCtx = createMockContext({ errors: browseHierarchyTool.errors });
+    const complete = await browseHierarchyTool.handler(
+      browseHierarchyTool.input.parse({ system: 'ICD10PCS', node: '0DTJ4ZZ' }),
+      completeCtx,
+    );
+    expect(complete).toEqual({ kind: 'axes', codes: [], axes: [] });
+    expect(getEnrichment(completeCtx)?.notice).toMatch(/complete 7-character/i);
   });
 });
 

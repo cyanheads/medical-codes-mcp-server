@@ -2,7 +2,9 @@
  * @fileoverview Code-shape auto-detection. Each bundled system has a distinct
  * lexical shape; `detectSystems` returns every system a raw code could belong
  * to so the caller can disambiguate (one match → route directly; multiple →
- * `ambiguous_system`; zero → unknown shape).
+ * `ambiguous_system`; zero → unknown shape). The shape patterns for a single
+ * system live together here, so the partial-node character class the ICD-10-PCS
+ * hierarchy browse validates against sits beside the complete-code one it mirrors.
  * @module services/code-index/detect
  */
 
@@ -23,6 +25,16 @@ const ICD10CM_RE = /^[A-TV-Z][0-9][0-9AB][0-9A-Z]{0,4}$/;
  * confusion with 1 and 0).
  */
 const ICD10PCS_RE = /^[0-9A-HJ-NP-Z]{7}$/;
+
+/**
+ * A partial ICD-10-PCS node: one or more characters from the SAME 34-value axis
+ * alphabet as {@link ICD10PCS_RE} — keep the two character classes in step. Every
+ * position of every bundled PCS code draws from that set, so a value outside it
+ * can never prefix a real code and is rejected rather than walked as a hierarchy
+ * node. Length is deliberately unconstrained: this is a lexical test only, and the
+ * caller (`browsePcs`) already discriminates complete codes from partial paths.
+ */
+export const ICD10PCS_PARTIAL_RE = /^[0-9A-HJ-NP-Z]+$/;
 
 /**
  * HCPCS Level II: one letter A-V, then exactly four digits (e.g. `J0120`,

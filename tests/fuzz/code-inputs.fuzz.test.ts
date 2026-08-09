@@ -5,7 +5,9 @@
  * @module tests/fuzz/code-inputs.fuzz.test
  */
 
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { searchCodesTool } from '@/mcp-server/tools/definitions/search-codes.tool.js';
 import type { CodeIndexService } from '@/services/code-index/code-index-service.js';
 import { detectSystems, ndcCandidates } from '@/services/code-index/detect.js';
 import type { SystemId } from '@/services/code-index/types.js';
@@ -145,7 +147,6 @@ describe('index query fuzz', () => {
   it('keeps adversarial full-text queries bounded and duplicate-free in every system', () => {
     const systems: SystemId[] = ['ICD10CM', 'ICD10PCS', 'HCPCS', 'RXNORM'];
     for (const query of SEARCH_CORPUS) {
-      if (query.includes(NUL_QUERY)) continue;
       for (const system of systems) {
         let page: ReturnType<CodeIndexService['searchFts']>;
         try {
@@ -165,11 +166,35 @@ describe('index query fuzz', () => {
   });
 
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/25
-  it.skip('handles NUL-containing search queries without leaking a raw SQLite parser error', () => {
+  it('handles NUL-containing search queries without leaking a raw SQLite parser error', () => {
     for (const query of [NUL_QUERY, `diabetes${NUL_QUERY}neuropathy`]) {
       for (const system of ['ICD10CM', 'ICD10PCS', 'HCPCS', 'RXNORM'] satisfies SystemId[]) {
         expect(() => svc.searchFts(query, { system, offset: 0, limit: 7 })).not.toThrow();
       }
     }
+  });
+
+  it('keeps the terms of a NUL-separated query searchable instead of discarding them', async () => {
+    // Normalizing (rather than rejecting) is only worth it if the surviving terms
+    // still search: the embedded NUL must act as a token separator, so this query
+    // resolves to "diabetic" AND "neuropathy" and returns the same rows as the
+    // clean spelling — a rejection or a NUL-stripped single token would return none.
+    const clean = svc.searchFts('diabetic neuropathy', { offset: 0, limit: 50 }).codes;
+    const withNul = svc.searchFts(`diabetic${NUL_QUERY}neuropathy`, {
+      offset: 0,
+      limit: 50,
+    }).codes;
+    expect(clean.length).toBeGreaterThan(0);
+    expect(withNul.map((code) => code.code)).toEqual(clean.map((code) => code.code));
+
+    // At the tool boundary a NUL-only query is an ordinary empty result with the
+    // standard broaden-your-terms notice, not a handler failure.
+    const ctx = createMockContext();
+    const out = await searchCodesTool.handler(
+      searchCodesTool.input.parse({ query: NUL_QUERY }),
+      ctx,
+    );
+    expect(out.codes).toEqual([]);
+    expect(getEnrichment(ctx)?.notice).toMatch(/broaden/i);
   });
 });

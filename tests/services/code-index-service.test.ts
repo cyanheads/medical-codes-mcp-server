@@ -10,7 +10,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import type { CodeIndexService } from '@/services/code-index/code-index-service.js';
 import { escapeLike, toFtsMatch } from '@/services/code-index/code-index-service.js';
-import { ndcCandidates } from '@/services/code-index/detect.js';
+import { ICD10PCS_PARTIAL_RE, ndcCandidates } from '@/services/code-index/detect.js';
 import { ensureIndex } from '../helpers/index-fixture.ts';
 
 let svc: CodeIndexService;
@@ -212,6 +212,46 @@ describe('browse', () => {
   it('returns unknown_node for a shape-valid but absent ICD-10-PCS code (#13)', () => {
     // 0DTJ1ZZ is a well-formed 7-char PCS code absent from the fixture.
     expect(svc.browse('ICD10PCS', '0DTJ1ZZ', { offset: 0, limit: 50 }).kind).toBe('unknown_node');
+  });
+  it('returns unknown_node for a node outside the ICD-10-PCS axis alphabet (#24)', () => {
+    for (const node of ['I', 'O', '!', '.', '0DI', 'ⅰ']) {
+      const r = svc.browse('ICD10PCS', node, { offset: 0, limit: 50 });
+      expect(r.kind).toBe('unknown_node');
+      if (r.kind === 'unknown_node') expect(r.reason).toMatch(/ICD-10-PCS/);
+    }
+  });
+  it('returns unknown_node for an in-alphabet node no bundled code begins with (#24)', () => {
+    // Only 17 of the 34 axis values open a code and each later position is
+    // constrained by the ones before it, so an in-alphabet string is not a path.
+    // These are all drawn from the alphabet and clear the lexical guard.
+    for (const node of ['Z', '1', '0A', '0DTJ2']) {
+      const r = svc.browse('ICD10PCS', node, { offset: 0, limit: 50 });
+      expect(r.kind).toBe('unknown_node');
+      if (r.kind === 'unknown_node') expect(r.reason).toMatch(/begins with/);
+    }
+  });
+  it('still walks a real partial prefix to the next-position axis query (#24)', () => {
+    // What the guards must NOT reject: every prefix of a code the index carries
+    // keeps reaching the axis query (empty here, since only position 1 is seeded).
+    for (const node of ['0', '0D', '0DT', '0DTJ', '0DTJ4', '0DTJ4Z', '02', '02703DZ']) {
+      expect(svc.browse('ICD10PCS', node, { offset: 0, limit: 50 }).kind).toBe('axes');
+    }
+  });
+});
+
+describe('ICD10PCS_PARTIAL_RE', () => {
+  it('accepts exactly the axis alphabet the complete-code shape detector accepts', () => {
+    // The partial-node guard and the 7-character shape test carry the same character
+    // class in two literals; this pins them together so one can never drift.
+    for (const ch of '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ') {
+      expect(ICD10PCS_PARTIAL_RE.test(ch)).toBe(
+        svc.detectSystem(ch.repeat(7)).includes('ICD10PCS'),
+      );
+    }
+    expect(ICD10PCS_PARTIAL_RE.test('I')).toBe(false);
+    expect(ICD10PCS_PARTIAL_RE.test('O')).toBe(false);
+    expect(ICD10PCS_PARTIAL_RE.test('')).toBe(false);
+    expect(ICD10PCS_PARTIAL_RE.test('0DTJ4ZZ')).toBe(true);
   });
 });
 

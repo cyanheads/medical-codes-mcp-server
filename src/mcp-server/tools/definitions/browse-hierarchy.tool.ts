@@ -4,8 +4,10 @@
  * entries when no node is given. ICD-10-CM/HCPCS browse the prefix hierarchy
  * (chapter → category → code); ICD-10-PCS exposes only its top-level Section
  * axis (position 1) — positions 2–7 are context-dependent on the preceding axis
- * path and are not enumerable from a flat partial code, so a partial PCS node
- * returns no axes plus a notice.
+ * path and are not enumerable from a flat partial code, so a PCS node that really
+ * does prefix a bundled code returns no axes plus a notice. One that does not —
+ * an out-of-alphabet character, or a combination no code begins with — is
+ * `unknown_node`, never a silent empty traversal.
  * @module mcp-server/tools/definitions/browse-hierarchy.tool
  */
 
@@ -114,7 +116,7 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
     {
       reason: 'unknown_node',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The node does not exist in the system.',
+      when: 'The node does not exist in the system — for ICD-10-PCS, also when it uses a character outside the axis alphabet or begins no bundled code.',
       recovery: 'Omit `node` to list top-level entries, or verify the node code.',
     },
   ],
@@ -125,9 +127,11 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
     const result = svc.browse(input.system, input.node, page);
 
     if (result.kind === 'unknown_node') {
-      throw ctx.fail('unknown_node', `Node "${input.node}" does not exist in ${input.system}.`, {
-        ...ctx.recoveryFor('unknown_node'),
-      });
+      throw ctx.fail(
+        'unknown_node',
+        result.reason ?? `Node "${input.node}" does not exist in ${input.system}.`,
+        { ...ctx.recoveryFor('unknown_node') },
+      );
     }
 
     if (result.kind === 'axes') {
