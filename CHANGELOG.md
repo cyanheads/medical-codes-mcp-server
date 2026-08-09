@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.6](changelog/0.2.x/0.2.6.md) — 2026-08-09
+
+medcode_map_codes distinguishes IN/PIN/MIN ingredient concepts, names ndc_to_rxcui targets, no longer misreports a past-the-end cursor or a resolvable RXCUI with no edges as an unmapped source; medcode_get_code decodes materialized header rows; medcode_search_codes matches chapter filters case-insensitively.
+
 ## [0.2.5](changelog/0.2.x/0.2.5.md) — 2026-08-09
 
 medcode_get_code's hierarchy formatter renders empty/complete children explicitly; medcode_search_codes trims and omits blank chapter filters; medcode_browse_hierarchy rejects ICD-10-PCS nodes outside the axis alphabet or that prefix no bundled code; a NUL in a search query is normalized to a token separator instead of reaching FTS5 raw.
