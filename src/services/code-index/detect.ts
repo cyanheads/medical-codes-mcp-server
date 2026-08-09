@@ -60,6 +60,17 @@ export function detectSystems(rawCode: string): SystemId[] {
 }
 
 /**
+ * The only segment-width configurations the FDA assigns: the three 10-digit forms
+ * (`4-4-2`, `5-3-2`, `5-4-1`) plus the normalized 11-digit `5-4-2`. Matched as an
+ * exact tuple, not as per-segment upper bounds — an undersized segment is not a
+ * short spelling of a valid NDC, it is a malformed identifier, and left-padding it
+ * anyway turns junk like `2-152-1` into the real key `00002015201`, a package the
+ * caller never named.
+ * @see https://www.fda.gov/drugs/development-approval-process-drugs/national-drug-code-database-background-information
+ */
+const NDC_SEGMENT_WIDTHS: ReadonlySet<string> = new Set(['4-4-2', '5-3-2', '5-4-1', '5-4-2']);
+
+/**
  * Expand a National Drug Code to the 11-digit HIPAA form(s) the `ndc_map` stores
  * (RxNav emits 11-digit). NDC is not a {@link SystemId} — it is an identifier the
  * server decodes to its RxNorm product (see `getByNdc`), so it is detected here
@@ -68,7 +79,8 @@ export function detectSystems(rawCode: string): SystemId[] {
  *
  * - **Hyphenated** `4-4-2` / `5-3-2` / `5-4-1` / `5-4-2`: the segment widths fix
  *   the 5-4-2 left-padding deterministically → one candidate, `unambiguous: true`
- *   (a hyphenated drug code is never an RXCUI, so a miss is a real NDC miss).
+ *   (a hyphenated drug code is never an RXCUI, so a miss is a real NDC miss). Any
+ *   other width combination is rejected outright.
  * - **Bare 11 digits**: already the 11-digit form → one candidate, but
  *   `unambiguous: false` — it also satisfies the RXCUI shape (no current RXCUI is
  *   that long, but the caller still falls back to RXCUI on a map miss).
@@ -82,11 +94,13 @@ export function ndcCandidates(rawCode: string): { candidates: string[]; unambigu
 
   if (segs.length === 3 && segs.every((s) => /^[0-9]+$/.test(s))) {
     const [a, b, c] = segs as [string, string, string];
-    if (a.length <= 5 && b.length <= 4 && c.length <= 2) {
-      const key = a.padStart(5, '0') + b.padStart(4, '0') + c.padStart(2, '0');
-      if (key.length === 11) return { candidates: [key], unambiguous: true };
+    if (!NDC_SEGMENT_WIDTHS.has(`${a.length}-${b.length}-${c.length}`)) {
+      return { candidates: [], unambiguous: false };
     }
-    return { candidates: [], unambiguous: false };
+    return {
+      candidates: [a.padStart(5, '0') + b.padStart(4, '0') + c.padStart(2, '0')],
+      unambiguous: true,
+    };
   }
 
   if (/^[0-9]+$/.test(trimmed)) {

@@ -33,7 +33,10 @@ interface CmSpec {
 
 /**
  * ICD-10-CM rows forming complete parent chains so hierarchy browse/map have
- * real edges. E11 (diabetes) and its children; I10 (hypertension); A00 cholera.
+ * real edges. E11 (diabetes) and its children; I10 (hypertension); A00 cholera;
+ * the A01 → A01.0 → A01.00 typhoid chain, whose leaf collides with the HCPCS
+ * transport code `A0100` so the cross-system ambiguity contract has a fixture
+ * case (the shipped corpus carries the same collision).
  */
 const ICD10CM: CmSpec[] = [
   {
@@ -86,6 +89,21 @@ const ICD10CM: CmSpec[] = [
     billable: true,
     header: false,
   },
+  {
+    code: 'A01',
+    short: 'Typhoid and paratyphoid fevers',
+    long: 'Typhoid and paratyphoid fevers',
+    billable: false,
+    header: true,
+  },
+  { code: 'A010', short: 'Typhoid fever', long: 'Typhoid fever', billable: false, header: true },
+  {
+    code: 'A0100',
+    short: 'Typhoid fever, unspecified',
+    long: 'Typhoid fever, unspecified',
+    billable: true,
+    header: false,
+  },
 ];
 
 /** ICD-10-PCS rows (every complete 7-char code is billable; parent stays NULL). */
@@ -121,8 +139,17 @@ const PCS_AXES: { position: number; value: string; meaning: string }[] = [
   { position: 1, value: '2', meaning: 'Placement' },
 ];
 
-/** HCPCS Level II rows; one terminated to exercise the `terminated` status. */
+/**
+ * HCPCS Level II rows; one terminated to exercise the `terminated` status, and
+ * `A0100` deliberately colliding with the ICD-10-CM typhoid leaf above.
+ */
 const HCPCS: { code: string; short: string; long: string; terminated: string | null }[] = [
+  {
+    code: 'A0100',
+    short: 'Nonemergency transport taxi',
+    long: 'Non-emergency transportation; taxi',
+    terminated: null,
+  },
   {
     code: 'J0120',
     short: 'Tetracycline injection',
@@ -163,10 +190,20 @@ const RXNORM: RxNavConcept[] = [
   { rxcui: '1049640', name: 'Aspirin 325 MG Oral Tablet', tty: 'SCD' },
 ];
 
-/** NDC↔RXCUI map rows (stored 11-digit, as RxNav emits). */
+/**
+ * NDC↔RXCUI map rows (stored 11-digit, as RxNav emits). 1049640 carries five
+ * package NDCs — a deliberate high-fanout product, since a real RXCUI can map to
+ * thousands of packages and `rxcui_to_ndc` pages through them; a single-NDC
+ * fixture could never exercise a page split, a final short page, or a
+ * cursor-walk reconstruction.
+ */
 const RXNORM_NDCS: { ndc: string; rxcui: string }[] = [
   { ndc: '11111222233', rxcui: '198440' }, // 5-4-2 hyphenated: 11111-2222-33
   { ndc: '00904516160', rxcui: '1049640' }, // 4-4-2 hyphenated: 0904-5161-60
+  { ndc: '00904516140', rxcui: '1049640' },
+  { ndc: '00904516161', rxcui: '1049640' },
+  { ndc: '00904516180', rxcui: '1049640' },
+  { ndc: '00904516189', rxcui: '1049640' },
 ];
 
 /** has_ingredient / has_tradename edges keyed by the product RXCUI. */

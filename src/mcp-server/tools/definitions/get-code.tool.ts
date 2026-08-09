@@ -108,7 +108,7 @@ type NotFoundCode = z.infer<typeof NotFoundCodeSchema>;
 export const getCodeTool = tool('medcode_get_code', {
   title: 'medical-codes-mcp-server',
   description:
-    'Decode one or more US medical codes to their official descriptions across ICD-10-CM (diagnoses), ICD-10-PCS (inpatient procedures), HCPCS Level II (supplies/drugs/services), and RxNorm (drugs, by RXCUI). Also decodes a National Drug Code (NDC) — hyphenated or 10/11-digit — directly to its RxNorm product offline, tagged `source: "NDC"`. Auto-detects the system from each code\'s shape; pass an explicit `system` only when a value is genuinely ambiguous. Accepts 1–50 codes and returns partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason, so one bad code never fails the batch. Set `includeHierarchy` to attach each code\'s parent and immediate children (with a `childrenTruncated` flag when a code has more children than the cap returns — walk the full set via medcode_browse_hierarchy or medcode_map_codes). The resolved `system` is echoed on every result for chaining into medcode_map_codes or a billability check.',
+    'Decode one or more US medical codes to their official descriptions across ICD-10-CM (diagnoses), ICD-10-PCS (inpatient procedures), HCPCS Level II (supplies/drugs/services), and RxNorm (drugs, by RXCUI). Also decodes a National Drug Code (NDC) directly to its RxNorm product offline, tagged `source: "NDC"` — hyphenated in an FDA segment configuration (4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2) or as bare 10/11 digits; any other segment widths are malformed and stay unresolved. Auto-detects the system from each code\'s shape; pass an explicit `system` only when a value is genuinely ambiguous. Accepts 1–50 codes and returns partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason, so one bad code never fails the batch. Set `includeHierarchy` to attach each code\'s parent and immediate children (with a `childrenTruncated` flag when a code has more children than the cap returns — walk the full set via medcode_browse_hierarchy or medcode_map_codes). The resolved `system` is echoed on every result for chaining into medcode_map_codes or a billability check.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -122,7 +122,7 @@ export const getCodeTool = tool('medcode_get_code', {
       .min(1)
       .max(50)
       .describe(
-        'Codes to decode (1–50). Mixed systems are fine — each is detected independently. An NDC (hyphenated or 10/11-digit) decodes to its RxNorm product.',
+        'Codes to decode (1–50). Mixed systems are fine — each is detected independently. An NDC decodes to its RxNorm product: hyphenated as 4-4-2, 5-3-2, 5-4-1, or 5-4-2, or as bare 10/11 digits.',
       ),
     system: z
       .enum(SYSTEM_IDS)

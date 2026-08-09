@@ -75,16 +75,6 @@ export interface PcsAxisRow {
   value: string;
 }
 
-/** An RXCUI relationship edge from `rxnorm_rel`. */
-export interface RxNormRelRow {
-  /** Relationship/attribute label, e.g. 'has_ingredient', 'tradename_of', 'NDC'. */
-  rel: string;
-  rxcui: string;
-  target: string;
-  /** Concept type of the target, e.g. 'IN', 'BN', 'SCD', 'NDC'. */
-  targetType: string;
-}
-
 /** Discriminated validity status for `medcode_check_code`. */
 export type CheckStatus =
   | 'valid_billable'

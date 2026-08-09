@@ -92,6 +92,15 @@ describe('searchFts', () => {
   it('returns an empty result for no match', () => {
     expect(svc.searchFts('zzzznotarealterm', { limit: 10 }).codes).toEqual([]);
   });
+
+  it('restricts results to one chapter bucket', () => {
+    // "fever" matches the A01 typhoid chain (chapter A) only; asking for chapter E
+    // must drop them rather than ignore the filter.
+    const inA = svc.searchFts('fever', { limit: 50, chapter: 'A' }).codes;
+    expect(inA.map((h) => h.code)).toContain('A01.00');
+    expect(inA.every((h) => h.chapter === 'A')).toBe(true);
+    expect(svc.searchFts('fever', { limit: 50, chapter: 'E' }).codes).toEqual([]);
+  });
 });
 
 describe('checkCode', () => {
@@ -113,6 +122,18 @@ describe('checkCode', () => {
   it('reports unknown for an absent code', () => {
     const r = svc.checkCode('99999');
     expect(r.kind === 'resolved' && r.result.status).toBe('unknown');
+  });
+  it('reports ambiguous for a code present in two systems, and resolves each when forced', () => {
+    const ambiguous = svc.checkCode('A0100');
+    expect(ambiguous.kind).toBe('ambiguous');
+    if (ambiguous.kind === 'ambiguous') expect(ambiguous.systems).toEqual(['ICD10CM', 'HCPCS']);
+
+    // The same string is a billable diagnosis in one system and a billable
+    // transport service in the other — the verdicts must not be interchangeable.
+    const diagnosis = svc.checkCode('A0100', 'ICD10CM');
+    expect(diagnosis.kind === 'resolved' && diagnosis.result.code).toBe('A01.00');
+    const transport = svc.checkCode('A0100', 'HCPCS');
+    expect(transport.kind === 'resolved' && transport.result.code).toBe('A0100');
   });
   it('explains a numeric out-of-scope code (e.g. CPT) as not-in-RxNorm with an out-of-scope hint', () => {
     const r = svc.checkCode('99213'); // a CPT code — out of scope, RxNorm-shaped (bare integer)
@@ -274,6 +295,35 @@ describe('pagination (fetchPage-backed paths)', () => {
     });
   });
 
+  describe('mapCode rxcui_to_ndc', () => {
+    // Fixture: 1049640 carries five package NDCs, ordered by the `ndc` column.
+    const ALL_NDCS = ['00904516140', '00904516160', '00904516161', '00904516180', '00904516189'];
+
+    it('paginates and reconstructs the package set by NDC identity', () => {
+      const full = svc.mapCode('1049640', 'rxcui_to_ndc', undefined, { offset: 0, limit: 50 });
+      if (full.kind !== 'ok') throw new Error('expected ok');
+      expect(full.hits.map((h) => h.value)).toEqual(ALL_NDCS);
+      expect(full.hasMore).toBe(false);
+
+      const pages = [0, 2, 4].map((offset) =>
+        svc.mapCode('1049640', 'rxcui_to_ndc', undefined, { offset, limit: 2 }),
+      );
+      const values = pages.map((p) => (p.kind === 'ok' ? p.hits.map((h) => h.value) : []));
+      expect(values).toEqual([
+        ['00904516140', '00904516160'],
+        ['00904516161', '00904516180'],
+        ['00904516189'],
+      ]);
+      expect(pages.map((p) => p.kind === 'ok' && p.hasMore)).toEqual([true, true, false]);
+      expect(values.flat()).toEqual(ALL_NDCS);
+    });
+
+    it('does not false-positive hasMore when the limit equals the package count', () => {
+      const exact = svc.mapCode('1049640', 'rxcui_to_ndc', undefined, { offset: 0, limit: 5 });
+      expect(exact.kind === 'ok' && exact.hasMore).toBe(false);
+    });
+  });
+
   describe('getByCodeWithHierarchy childrenTruncated', () => {
     it('flags truncation when a code has more children than the cap', () => {
       const r = svc.getByCode('A00');
@@ -425,5 +475,33 @@ describe('mapCode (RxNorm drug directions)', () => {
   });
   it('source_not_found for an unknown drug name', () => {
     expect(svc.mapCode('zzznotadrug', 'name_to_rxcui').kind).toBe('source_not_found');
+  });
+  it('ndc_to_rxcui falls back to a digit strip for a non-standard separator', () => {
+    // Not NDC-shaped (spaces, not hyphens), so no segmentation is inferred — the
+    // digits alone still have to reach the 11-digit key.
+    const r = svc.mapCode('11111 2222 33', 'ndc_to_rxcui');
+    expect(r.kind === 'ok' && r.hits[0]?.value).toBe('198440');
+  });
+  it('source_not_found for an NDC absent from the map', () => {
+    expect(svc.mapCode('99999-8888-77', 'ndc_to_rxcui').kind).toBe('source_not_found');
+  });
+  it('source_not_found for a product with no packages or no edges', () => {
+    // 161 is an ingredient concept: no NDC packages, no ingredient/brand edges of
+    // its own. Each direction reports a missing source rather than an empty hit list.
+    expect(svc.mapCode('161', 'rxcui_to_ndc').kind).toBe('source_not_found');
+    expect(svc.mapCode('161', 'rxcui_to_ingredients').kind).toBe('source_not_found');
+    expect(svc.mapCode('161', 'rxcui_to_brands').kind).toBe('source_not_found');
+  });
+  it('ambiguous for a hierarchy source present in two systems', () => {
+    const r = svc.mapCode('A0100', 'parents');
+    expect(r.kind).toBe('ambiguous');
+    if (r.kind === 'ambiguous') expect(r.systems).toEqual(['ICD10CM', 'HCPCS']);
+  });
+  it('carries the target description on a hierarchy parent hit', () => {
+    const r = svc.mapCode('A0100', 'parents', 'ICD10CM');
+    expect(r.kind === 'ok' && r.hits[0]).toMatchObject({
+      value: 'A01.0',
+      description: 'Typhoid fever',
+    });
   });
 });

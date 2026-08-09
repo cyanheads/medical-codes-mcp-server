@@ -6,7 +6,7 @@
  * @module tests/tools/medcode-tools.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 import { browseHierarchyTool } from '@/mcp-server/tools/definitions/browse-hierarchy.tool.js';
@@ -65,6 +65,17 @@ describe('medcode_get_code', () => {
     expect(out.found[0]?.children?.map((c) => c.code)).toContain('E11.9');
   });
 
+  it('attaches the stored parent for a non-prefix system', async () => {
+    // HCPCS parents come from the stored `parent` column (the letter bucket), not
+    // from the ICD-10-CM prefix rule.
+    const ctx = createMockContext();
+    const out = await getCodeTool.handler(
+      getCodeTool.input.parse({ codes: ['J0120'], includeHierarchy: true }),
+      ctx,
+    );
+    expect(out.found[0]).toMatchObject({ system: 'HCPCS', parent: 'J', children: [] });
+  });
+
   it('throws no_codes_found when nothing resolves', async () => {
     const ctx = createMockContext({ errors: getCodeTool.errors });
     const input = getCodeTool.input.parse({ codes: ['99999', 'ZZ999'] });
@@ -119,6 +130,16 @@ describe('medcode_search_codes', () => {
     expect(getEnrichment(ctx)?.notice).toMatch(/no codes matched/i);
   });
 
+  it('names the system filter in the empty-result notice so the caller can widen it', async () => {
+    const ctx = createMockContext();
+    const out = await searchCodesTool.handler(
+      searchCodesTool.input.parse({ query: 'diabetes', system: 'HCPCS' }),
+      ctx,
+    );
+    expect(out.codes).toEqual([]);
+    expect(getEnrichment(ctx)?.notice).toContain('in HCPCS');
+  });
+
   it('respects the limit and discloses truncation', async () => {
     const ctx = createMockContext();
     const input = searchCodesTool.input.parse({ query: 'diabetes', limit: 1 });
@@ -156,6 +177,15 @@ describe('medcode_check_code', () => {
       checkCodeTool.handler(checkCodeTool.input.parse({ code: '99999' }), ctx),
     );
     expect(err.data?.reason).toBe('unknown_code');
+  });
+
+  it('throws ambiguous_system with the candidate systems for a cross-system code', async () => {
+    const ctx = createMockContext({ errors: checkCodeTool.errors });
+    const err = await caught(() =>
+      checkCodeTool.handler(checkCodeTool.input.parse({ code: 'A0100' }), ctx),
+    );
+    expect(err.data?.reason).toBe('ambiguous_system');
+    expect(err.message).toContain('ICD10CM, HCPCS');
   });
 
   it('explains a numeric out-of-scope code (CPT) as not-in-RxNorm with an out-of-scope hint', async () => {
@@ -268,6 +298,26 @@ describe('medcode_map_codes', () => {
     expect(out.resolvedSystem).toBe('HCPCS');
     expect(out.hits[0]?.value).toBe('J');
   });
+
+  it('throws ambiguous_system rather than guessing which system a cross-system code meant', async () => {
+    const ctx = createMockContext({ errors: mapCodesTool.errors });
+    const err = await caught(() =>
+      mapCodesTool.handler(mapCodesTool.input.parse({ from: 'A0100', direction: 'parents' }), ctx),
+    );
+    expect(err.data?.reason).toBe('ambiguous_system');
+    expect(err.message).toContain('ICD10CM, HCPCS');
+  });
+
+  it('throws no_mapping when a resolvable RXCUI has no packages in the requested direction', async () => {
+    const ctx = createMockContext({ errors: mapCodesTool.errors });
+    const err = await caught(() =>
+      mapCodesTool.handler(
+        mapCodesTool.input.parse({ from: '161', direction: 'rxcui_to_ndc' }),
+        ctx,
+      ),
+    );
+    expect(err.data?.reason).toBe('no_mapping');
+  });
 });
 
 describe('medcode_browse_hierarchy', () => {
@@ -321,6 +371,18 @@ describe('medcode_browse_hierarchy', () => {
     );
     expect(out.kind).toBe('codes');
     expect(out.codes.map((c) => c.code)).toContain('J0120');
+  });
+
+  it('steers back to the top level when a leaf node has no children', async () => {
+    const ctx = createMockContext();
+    const out = await browseHierarchyTool.handler(
+      browseHierarchyTool.input.parse({ system: 'HCPCS', node: 'A0100' }),
+      ctx,
+    );
+    expect(out.codes).toEqual([]);
+    const notice = getEnrichment(ctx)?.notice;
+    expect(notice).toContain('No children under "A0100" in HCPCS');
+    expect(notice).toMatch(/leaf code/i);
   });
 
   it('returns empty axes plus a context-dependent notice for a partial ICD-10-PCS node', async () => {
@@ -530,7 +592,55 @@ describe('medcode_get_code — childrenTruncated (#16)', () => {
   });
 });
 
-describe('medcode_map_codes — pagination (#16 children, #18 name_to_rxcui)', () => {
+describe('medcode_map_codes — pagination (#16 children, #18 name_to_rxcui, #20 rxcui_to_ndc)', () => {
+  it('paginates rxcui_to_ndc via nextCursor and reconstructs by NDC identity', async () => {
+    const full = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: '1049640', direction: 'rxcui_to_ndc', limit: 50 }),
+      createMockContext(),
+    );
+    const fullValues = full.hits.map((h) => h.value);
+    expect(fullValues).toHaveLength(5);
+
+    const walked: string[] = [];
+    let cursor: string | undefined;
+    const truncatedFlags: (boolean | undefined)[] = [];
+    do {
+      const ctx = createMockContext();
+      const page = await mapCodesTool.handler(
+        mapCodesTool.input.parse({ from: '1049640', direction: 'rxcui_to_ndc', limit: 2, cursor }),
+        ctx,
+      );
+      const e = getEnrichment(ctx);
+      expect(e?.cap).toBe(2);
+      expect(e?.shown).toBe(page.hits.length);
+      truncatedFlags.push(e?.truncated as boolean | undefined);
+      walked.push(...page.hits.map((h) => h.value));
+      cursor = e?.nextCursor as string | undefined;
+    } while (cursor);
+
+    expect(truncatedFlags).toEqual([true, true, false]);
+    expect(walked).toEqual(fullValues);
+  });
+
+  it('carries the rxcui_to_ndc continuation disclosure on both client paths', async () => {
+    // Through the full contract boundary: structuredContent (Claude Code) carries
+    // the merged enrichment, content[] (text-only clients) carries the trailer.
+    const result = await runToolContract(mapCodesTool, {
+      from: '1049640',
+      direction: 'rxcui_to_ndc',
+      limit: 2,
+    });
+    expect(result.structuredContent).toMatchObject({ truncated: true, shown: 2, cap: 2 });
+    const cursor = (result.structuredContent as { nextCursor?: string }).nextCursor;
+    expect(typeof cursor).toBe('string');
+
+    const text = (result.content as { text?: string; type: string }[])
+      .flatMap((block) => (block.type === 'text' ? [block.text ?? ''] : []))
+      .join('\n');
+    expect(text).toContain('00904516140');
+    expect(text).toContain(cursor as string);
+  });
+
   it('paginates the children direction via nextCursor and reconstructs by code identity', async () => {
     const ctx1 = createMockContext();
     const p1 = await mapCodesTool.handler(

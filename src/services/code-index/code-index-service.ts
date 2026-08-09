@@ -25,7 +25,6 @@ import {
   type MapDirection,
   type Page,
   type PcsAxisRow,
-  type RxNormRelRow,
   SYSTEM_IDS,
   type SystemId,
 } from './types.js';
@@ -698,23 +697,39 @@ export class CodeIndexService {
         };
       }
       case 'rxcui_to_ndc': {
-        const rows = this.db.query('SELECT ndc FROM ndc_map WHERE rxcui = ?').all(value) as {
-          ndc: string;
-        }[];
+        // A single product can carry thousands of package NDCs (the bundled corpus
+        // tops out near 3,500 for one RXCUI), so this direction paginates like the
+        // drug-name crosswalk. `ORDER BY ndc` is a total order over the returned
+        // column, so offset pages neither skip nor repeat a package.
+        const { rows, hasMore } = this.fetchPage(
+          'SELECT ndc FROM ndc_map WHERE rxcui = ? ORDER BY ndc',
+          [value],
+          page,
+        );
         if (rows.length === 0) return { kind: 'source_not_found' };
         return {
           kind: 'ok',
           resolvedSystem: 'RXNORM',
-          hasMore: false,
-          hits: rows.map((r) => ({ source: 'NDC', system: null, value: r.ndc })),
+          hasMore,
+          hits: rows.map((r) => ({ source: 'NDC', system: null, value: r.ndc as string })),
         };
       }
       case 'rxcui_to_ingredients':
       case 'rxcui_to_brands': {
+        // Join each edge's target back to its RXNORM concept row so the hit carries
+        // the official RxNorm NAME. The edge's own `target_type` is a concept type
+        // (`IN`/`PIN`/`MIN` for ingredients, `BN` for brands), not a description, so
+        // it cannot stand in for one; it has no output field of its own today.
         const rel = direction === 'rxcui_to_ingredients' ? 'has_ingredient' : 'has_tradename';
         const rows = this.db
-          .query('SELECT rel, target, target_type FROM rxnorm_rel WHERE rxcui = ? AND rel = ?')
-          .all(value, rel) as RxNormRelRow[];
+          .query(
+            `SELECT r.rel AS rel, r.target AS target, c.long_desc AS long_desc
+               FROM rxnorm_rel r
+               LEFT JOIN codes c ON c.system = 'RXNORM' AND c.code = r.target
+              WHERE r.rxcui = ? AND r.rel = ?
+              ORDER BY r.target`,
+          )
+          .all(value, rel) as { long_desc: string | null; rel: string; target: string }[];
         if (rows.length === 0) return { kind: 'source_not_found' };
         return {
           kind: 'ok',
@@ -724,7 +739,7 @@ export class CodeIndexService {
             source: r.rel,
             system: 'RXNORM' as const,
             value: r.target,
-            ...(r.targetType ? { description: r.targetType } : {}),
+            ...(r.long_desc ? { description: r.long_desc } : {}),
           })),
         };
       }
