@@ -242,6 +242,215 @@ describe('crosswalk completeness and known output defects', () => {
     expect(plainText).not.toMatch(/complete/i);
   });
 
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/27
+  it('names the decoded product on an ndc_to_rxcui hit, on both client paths', async () => {
+    const out = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: '11111-2222-33', direction: 'ndc_to_rxcui' }),
+      createMockContext(),
+    );
+    expect(out.hits).toContainEqual(
+      expect.objectContaining({
+        value: '198440',
+        source: 'NDC',
+        description: 'Acetaminophen 500 MG Oral Tablet',
+      }),
+    );
+    // Without this the text client sees a bare RXCUI and has to spend a second
+    // medcode_get_code call to learn what the package actually is.
+    expect(renderText(mapCodesTool.format!(out))).toContain('Acetaminophen 500 MG Oral Tablet');
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/28
+  it('tags ingredient and brand hits with their RxNorm concept type, on both client paths', async () => {
+    const ingredients = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: '198440', direction: 'rxcui_to_ingredients' }),
+      createMockContext(),
+    );
+    expect(ingredients.hits).toContainEqual(
+      expect.objectContaining({ value: '161', conceptType: 'IN' }),
+    );
+    expect(renderText(mapCodesTool.format!(ingredients))).toContain(
+      '- **161** (RXNORM) via has_ingredient [IN]: acetaminophen',
+    );
+
+    const brands = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: '198440', direction: 'rxcui_to_brands' }),
+      createMockContext(),
+    );
+    expect(brands.hits).toContainEqual(
+      expect.objectContaining({ value: '202433', conceptType: 'BN' }),
+    );
+    expect(renderText(mapCodesTool.format!(brands))).toContain('[BN]');
+
+    // A hierarchy hit has no RxNorm concept type, so neither surface may show one.
+    const parents = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: 'E11.9', direction: 'parents' }),
+      createMockContext(),
+    );
+    // Length first: `hits[0]?.conceptType` and a not.toMatch over the render both
+    // pass on an empty hit list, so neither says anything until there is a hit.
+    expect(parents.hits).toHaveLength(1);
+    expect(parents.hits[0]?.conceptType).toBeUndefined();
+    expect(renderText(mapCodesTool.format!(parents))).not.toMatch(/\[[A-Z]{2,4}\]/);
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/26
+  it('reports a cursor past the last page as an empty page, not an unmapped source', async () => {
+    // A hand-built or stale cursor whose offset outruns the set. `children` is the
+    // reference: it confirms the row before paging, so it has always answered this
+    // correctly — the drug directions must now agree with it.
+    const pastEnd = Buffer.from(JSON.stringify({ offset: 999_999, limit: 2 })).toString(
+      'base64url',
+    );
+
+    for (const [from, direction] of [
+      ['a', 'name_to_rxcui'],
+      ['1049640', 'rxcui_to_ndc'],
+      ['A00', 'children'],
+    ] as const) {
+      const firstCtx = createMockContext({ errors: mapCodesTool.errors });
+      const first = await mapCodesTool.handler(
+        mapCodesTool.input.parse({ from, direction, limit: 2 }),
+        firstCtx,
+      );
+      expect(first.hits.length).toBeGreaterThan(0);
+
+      const ctx = createMockContext({ errors: mapCodesTool.errors });
+      const out = await mapCodesTool.handler(
+        mapCodesTool.input.parse({ from, direction, limit: 2, cursor: pastEnd }),
+        ctx,
+      );
+      expect(out.hits).toEqual([]);
+      expect(out.resolvedSystem).toBe(first.resolvedSystem);
+
+      const meta = getEnrichment(ctx);
+      expect(meta).toMatchObject({ truncated: false, shown: 0, cap: 2 });
+      expect(meta?.nextCursor).toBeUndefined();
+      // The notice has to name the page, not invent a missing edge — "leaf code
+      // with no children" would be as wrong here as "no bundled code matches".
+      expect(meta?.notice).toMatch(/page starts past the last/i);
+      expect(meta?.notice).toContain('cursor');
+    }
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/26
+  it('still throws no_mapping for a source that resolves to nothing at any offset', async () => {
+    const pastEnd = Buffer.from(JSON.stringify({ offset: 999_999, limit: 2 })).toString(
+      'base64url',
+    );
+    for (const [from, direction] of [
+      ['zzznotadrug', 'name_to_rxcui'],
+      ['999999999', 'rxcui_to_ndc'],
+    ] as const) {
+      const err = await caught(() =>
+        mapCodesTool.handler(
+          mapCodesTool.input.parse({ from, direction, limit: 2, cursor: pastEnd }),
+          createMockContext({ errors: mapCodesTool.errors }),
+        ),
+      );
+      expect(err.data?.reason).toBe('no_mapping');
+    }
+  });
+
+  it('returns an empty result for a resolvable concept with no edges, on every direction', async () => {
+    // 161 decodes through medcode_get_code, so `no_mapping` — whose message is
+    // "No bundled code matches" and whose own recovery hint says a resolvable
+    // source with no edge is an empty result — would contradict both.
+    for (const direction of ['rxcui_to_ndc', 'rxcui_to_ingredients', 'rxcui_to_brands'] as const) {
+      const ctx = createMockContext({ errors: mapCodesTool.errors });
+      const out = await mapCodesTool.handler(
+        mapCodesTool.input.parse({ from: '161', direction }),
+        ctx,
+      );
+      expect(out.hits).toEqual([]);
+      expect(out.resolvedSystem).toBe('RXNORM');
+
+      // The notice names the direction's own cause. "Leaf code with no children"
+      // and "top-level code with no parent" are both false facts about an RXCUI.
+      const notice = getEnrichment(ctx)?.notice ?? '';
+      expect(notice).toContain(direction);
+      expect(notice).not.toMatch(/leaf code|no parent|starts past the last/i);
+    }
+  });
+
+  it('does not blame the cursor when a childless source is paged past zero', async () => {
+    // The empty page and the non-zero offset are both present, but nothing was
+    // skipped — steering the caller back to page one would return the same
+    // nothing. Only a source that HAS results can be paged past their end.
+    const cursor = Buffer.from(JSON.stringify({ offset: 5, limit: 2 })).toString('base64url');
+    const ctx = createMockContext({ errors: mapCodesTool.errors });
+    const out = await mapCodesTool.handler(
+      mapCodesTool.input.parse({
+        from: 'E11.40',
+        direction: 'children',
+        system: 'ICD10CM',
+        cursor,
+      }),
+      ctx,
+    );
+    expect(out.hits).toEqual([]);
+    const notice = getEnrichment(ctx)?.notice ?? '';
+    expect(notice).toMatch(/leaf code with no children/i);
+    expect(notice).not.toMatch(/starts past the last/i);
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/29
+  it('decodes a materialized header row through every tool that auto-detects', async () => {
+    // `J` is a HCPCS letter bucket browse and search both hand back. resolveSystems
+    // is the single choke point all three tools share, so a header row that fails
+    // detection fails all three — and passing `system` masks it in all three.
+    const decoded = await getCodeTool.handler(
+      getCodeTool.input.parse({ codes: ['J'] }),
+      createMockContext({ errors: getCodeTool.errors }),
+    );
+    expect(decoded.notFound).toEqual([]);
+    expect(decoded.found[0]).toMatchObject({ system: 'HCPCS', code: 'J', header: true });
+
+    const checked = await checkCodeTool.handler(
+      checkCodeTool.input.parse({ code: 'J' }),
+      createMockContext({ errors: checkCodeTool.errors }),
+    );
+    expect(checked).toMatchObject({ system: 'HCPCS', code: 'J', status: 'valid_header' });
+
+    const mapped = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: 'J', direction: 'children' }),
+      createMockContext({ errors: mapCodesTool.errors }),
+    );
+    expect(mapped.resolvedSystem).toBe('HCPCS');
+    expect(mapped.hits.map((hit) => hit.value)).toContain('J0120');
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/30
+  it('matches a chapter filter case-insensitively while echoing the value that ran', async () => {
+    const upperCtx = createMockContext();
+    const upper = await searchCodesTool.handler(
+      searchCodesTool.input.parse({ query: 'diabetes', system: 'ICD10CM', chapter: 'E' }),
+      upperCtx,
+    );
+    expect(upper.codes.length).toBeGreaterThan(0);
+
+    const lowerCtx = createMockContext();
+    const lower = await searchCodesTool.handler(
+      searchCodesTool.input.parse({ query: 'diabetes', system: 'ICD10CM', chapter: 'e' }),
+      lowerCtx,
+    );
+    expect(lower.codes.map((code) => code.code)).toEqual(upper.codes.map((code) => code.code));
+
+    // The 0.2.5 invariant: the echo names the filter that actually ran against the
+    // index, so a caller reading `appliedFilters` can reproduce the query exactly.
+    expect(getEnrichment(lowerCtx)?.appliedFilters).toMatchObject({ chapter: 'E' });
+    expect(getEnrichment(upperCtx)?.appliedFilters).toMatchObject({ chapter: 'E' });
+
+    // Normalizing case must not widen the filter into a no-op.
+    const wrongCtx = createMockContext();
+    const wrong = await searchCodesTool.handler(
+      searchCodesTool.input.parse({ query: 'diabetes', system: 'ICD10CM', chapter: 'a' }),
+      wrongCtx,
+    );
+    expect(wrong.codes).toEqual([]);
+    expect(getEnrichment(wrongCtx)?.appliedFilters).toMatchObject({ chapter: 'A' });
+  });
+
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/22
   it('treats a blank chapter filter as omitted and applies a padded one trimmed', async () => {
     const baseCtx = createMockContext();

@@ -111,11 +111,32 @@ export interface CheckResult {
 
 /** One crosswalk hit with the edge/provenance that produced it. */
 export interface MapHit {
+  /**
+   * The target's RxNorm concept type, carried straight off the edge's
+   * `rxnorm_rel.target_type`: `IN` / `PIN` / `MIN` on ingredient hits, `BN` on
+   * brand hits. Absent on every other direction — hierarchy targets are codes,
+   * which have no RxNorm concept type.
+   */
+  conceptType?: string;
   description?: string;
   /** The system or relationship that answered (e.g. 'ICD10CM', 'has_ingredient'). */
   source: string;
   system: SystemId | null;
   value: string;
+}
+
+/**
+ * A resolved crosswalk page. `pastEnd` marks the one empty page that is NOT a
+ * source without edges: the direction does have results, but this page's offset
+ * starts beyond the last of them. It is absent on a source whose edge set is
+ * genuinely empty, so the two cannot be worded alike.
+ */
+export interface MapPage {
+  hasMore: boolean;
+  hits: MapHit[];
+  kind: 'ok';
+  pastEnd?: boolean;
+  resolvedSystem: SystemId | null;
 }
 
 /** A FTS search hit. */
@@ -231,11 +252,31 @@ export class CodeIndexService {
    * may overlap (a letter+4-digit code is shaped like both ICD-10-CM and HCPCS);
    * DB membership is the real disambiguator — a code present in exactly one
    * system is unambiguous regardless of shape overlap.
+   *
+   * The shape filter narrows, it does not decide: {@link detectSystems} describes
+   * COMPLETE codes, while the index also materializes header rows that no complete
+   * shape matches — the HCPCS letter buckets (`J`) and the 3-character ICD-10-PCS
+   * table rows (`001`, `00B`). Those are real rows that browse and search hand
+   * back, so when the shape-narrowed candidates yield no member the search widens
+   * to every bundled system and lets membership alone answer. Widening only ever
+   * turns a not-found into an answer: a value the shape pass can already answer
+   * never reaches it, so no existing resolution is re-routed. Where the widened
+   * set holds two systems the caller gets `ambiguous`, the same verdict the
+   * overlapping-shape case produces.
+   *
+   * Note the shape pass still decides when it matches only ONE of several member
+   * systems: the 60 three-character ICD-10-PCS table rows that collide with an
+   * ICD-10-CM category (`B00`) resolve as ICD-10-CM, since only that shape
+   * matches. Reaching the PCS row there needs an explicit `system`.
+   *
+   * An explicit `system` bypasses both steps — it is authoritative.
    */
   private resolveSystems(rawCode: string, explicit?: SystemId): SystemId[] {
     const code = storageCode(rawCode);
-    const candidates = explicit ? [explicit] : detectSystems(rawCode);
-    return candidates.filter((sys) => this.getRow(code, sys) !== null);
+    if (explicit) return this.getRow(code, explicit) !== null ? [explicit] : [];
+    const shaped = detectSystems(rawCode).filter((sys) => this.getRow(code, sys) !== null);
+    if (shaped.length > 0) return shaped;
+    return SYSTEM_IDS.filter((sys) => this.getRow(code, sys) !== null);
   }
 
   /**
@@ -335,6 +376,18 @@ export class CodeIndexService {
       .all(...params, page.limit + 1, page.offset) as Record<string, unknown>[];
     const hasMore = rows.length > page.limit;
     return { rows: hasMore ? rows.slice(0, page.limit) : rows, hasMore };
+  }
+
+  /**
+   * Whether a query matches at least one row, ignoring any page window. The
+   * existence probe that separates "this source has no mapping at all" from "the
+   * requested page starts past the end of a mapping that does exist" — an empty
+   * page alone cannot tell those apart, and reporting the second as the first
+   * makes a paginated direction contradict the unpaginated call before it. Only
+   * runs on an empty page, so a page with hits costs nothing extra.
+   */
+  private hasAnyRow(sql: string, params: readonly unknown[]): boolean {
+    return !!this.db.query(`${sql} LIMIT 1`).get(...params);
   }
 
   /**
@@ -576,10 +629,7 @@ export class CodeIndexService {
     direction: MapDirection,
     system?: SystemId,
     page: Page = { offset: 0, limit: getServerConfig().maxResults },
-  ):
-    | { kind: 'ok'; hits: MapHit[]; resolvedSystem: SystemId | null; hasMore: boolean }
-    | { kind: 'ambiguous'; systems: SystemId[] }
-    | { kind: 'source_not_found' } {
+  ): MapPage | { kind: 'ambiguous'; systems: SystemId[] } | { kind: 'source_not_found' } {
     if (direction === 'parents' || direction === 'children') {
       const present = this.resolveSystems(from, system);
       const [sys] = present;
@@ -595,6 +645,15 @@ export class CodeIndexService {
           kind: 'ok',
           resolvedSystem: sys,
           hasMore,
+          // An empty page is past-the-end only when the code HAS children the
+          // offset skipped; a leaf's empty page must keep reading as "no children".
+          pastEnd:
+            children.length === 0 &&
+            page.offset > 0 &&
+            this.hasAnyRow('SELECT 1 AS hit FROM codes WHERE system = ? AND parent = ?', [
+              sys,
+              code,
+            ]),
           hits: children.map((k) => ({
             source: sys,
             system: sys,
@@ -636,14 +695,21 @@ export class CodeIndexService {
     return (row?.n ?? 0) > 0;
   }
 
-  /** RxNorm crosswalk resolution. */
+  /**
+   * RxNorm crosswalk resolution. `source_not_found` means the SOURCE did not
+   * resolve — a name matching no concept, an NDC absent from the map, an RXCUI
+   * that is not a bundled concept. It never means the source resolved and simply
+   * has no edges: an ingredient, precise-ingredient, multiple-ingredient, or
+   * brand-name concept carries no `has_ingredient` edge and no package NDC, and
+   * those are empty results with a notice, exactly as a leaf code's children are.
+   * Nor does it mean the requested page came back empty, which the paginated
+   * directions separate out as {@link MapPage.pastEnd}.
+   */
   private mapDrug(
     from: string,
     direction: MapDirection,
     page: Page,
-  ):
-    | { kind: 'ok'; hits: MapHit[]; resolvedSystem: SystemId | null; hasMore: boolean }
-    | { kind: 'source_not_found' } {
+  ): MapPage | { kind: 'source_not_found' } {
     const value = from.trim();
     switch (direction) {
       case 'name_to_rxcui': {
@@ -655,18 +721,25 @@ export class CodeIndexService {
         // unique (many RXCUIs share a string length), so `, code` makes the total
         // order deterministic — offset pages would otherwise skip or repeat rows.
         const term = `%${escapeLike(value)}%`;
+        const match = `system = 'RXNORM' AND (long_desc LIKE ? ESCAPE '\\' OR short_desc LIKE ? ESCAPE '\\')`;
         const { rows, hasMore } = this.fetchPage(
           `SELECT code, long_desc, short_desc FROM codes
-             WHERE system = 'RXNORM' AND (long_desc LIKE ? ESCAPE '\\' OR short_desc LIKE ? ESCAPE '\\')
+             WHERE ${match}
              ORDER BY length(code), code`,
           [term, term],
           page,
         );
-        if (rows.length === 0) return { kind: 'source_not_found' };
+        // An empty page is only an unmapped source when the name matches nothing
+        // at any offset; past the last page it is a successful empty result.
+        const pastEnd =
+          rows.length === 0 &&
+          this.hasAnyRow(`SELECT 1 AS hit FROM codes WHERE ${match}`, [term, term]);
+        if (rows.length === 0 && !pastEnd) return { kind: 'source_not_found' };
         return {
           kind: 'ok',
           resolvedSystem: 'RXNORM',
           hasMore,
+          pastEnd,
           hits: rows.map((r) => ({
             source: 'RXNORM',
             system: 'RXNORM' as const,
@@ -689,11 +762,19 @@ export class CodeIndexService {
           kind: 'ok',
           resolvedSystem: 'RXNORM',
           hasMore: false,
-          hits: [...rxcuis].map((rxcui) => ({
-            source: 'NDC',
-            system: 'RXNORM' as const,
-            value: rxcui,
-          })),
+          // Project each mapped RXCUI back through its RXNORM concept row so a
+          // decoded package carries the product's name, not a bare identifier the
+          // caller has to spend a second decode on.
+          hits: [...rxcuis].map((rxcui) => {
+            const row = this.getRow(rxcui, 'RXNORM');
+            const desc = row?.longDesc ?? row?.shortDesc;
+            return {
+              source: 'NDC',
+              system: 'RXNORM' as const,
+              value: rxcui,
+              ...(desc ? { description: desc } : {}),
+            };
+          }),
         };
       }
       case 'rxcui_to_ndc': {
@@ -706,11 +787,20 @@ export class CodeIndexService {
           [value],
           page,
         );
-        if (rows.length === 0) return { kind: 'source_not_found' };
+        // Three causes reach an empty page and only the last is an unmapped
+        // source: an offset past the last package, a real concept that carries no
+        // packages at all (every IN/PIN/MIN/BN, plus generics with none listed),
+        // and an RXCUI absent from the index.
+        const pastEnd =
+          rows.length === 0 &&
+          this.hasAnyRow('SELECT 1 AS hit FROM ndc_map WHERE rxcui = ?', [value]);
+        if (rows.length === 0 && !pastEnd && !this.getRow(storageCode(value), 'RXNORM'))
+          return { kind: 'source_not_found' };
         return {
           kind: 'ok',
           resolvedSystem: 'RXNORM',
           hasMore,
+          pastEnd,
           hits: rows.map((r) => ({ source: 'NDC', system: null, value: r.ndc as string })),
         };
       }
@@ -719,18 +809,31 @@ export class CodeIndexService {
         // Join each edge's target back to its RXNORM concept row so the hit carries
         // the official RxNorm NAME. The edge's own `target_type` is a concept type
         // (`IN`/`PIN`/`MIN` for ingredients, `BN` for brands), not a description, so
-        // it cannot stand in for one; it has no output field of its own today.
+        // it cannot stand in for one — it rides alongside as `conceptType`, which is
+        // what separates the substances of a combination product from the `MIN`
+        // grouping concept that names the combination itself.
         const rel = direction === 'rxcui_to_ingredients' ? 'has_ingredient' : 'has_tradename';
         const rows = this.db
           .query(
-            `SELECT r.rel AS rel, r.target AS target, c.long_desc AS long_desc
+            `SELECT r.rel AS rel, r.target AS target, r.target_type AS target_type, c.long_desc AS long_desc
                FROM rxnorm_rel r
                LEFT JOIN codes c ON c.system = 'RXNORM' AND c.code = r.target
               WHERE r.rxcui = ? AND r.rel = ?
               ORDER BY r.target`,
           )
-          .all(value, rel) as { long_desc: string | null; rel: string; target: string }[];
-        if (rows.length === 0) return { kind: 'source_not_found' };
+          .all(value, rel) as {
+          long_desc: string | null;
+          rel: string;
+          target: string;
+          target_type: string | null;
+        }[];
+        // No edges of this relation. Only an RXCUI that is not a bundled concept
+        // is an unmapped source — every IN/PIN/MIN/BN concept legitimately has no
+        // ingredients of its own, and a generic product often has no branded form.
+        if (rows.length === 0)
+          return this.getRow(storageCode(value), 'RXNORM')
+            ? { kind: 'ok', resolvedSystem: 'RXNORM', hasMore: false, hits: [] }
+            : { kind: 'source_not_found' };
         return {
           kind: 'ok',
           resolvedSystem: 'RXNORM',
@@ -740,6 +843,7 @@ export class CodeIndexService {
             system: 'RXNORM' as const,
             value: r.target,
             ...(r.long_desc ? { description: r.long_desc } : {}),
+            ...(r.target_type ? { conceptType: r.target_type } : {}),
           })),
         };
       }

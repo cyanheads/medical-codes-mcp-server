@@ -308,15 +308,25 @@ describe('medcode_map_codes', () => {
     expect(err.message).toContain('ICD10CM, HCPCS');
   });
 
-  it('throws no_mapping when a resolvable RXCUI has no packages in the requested direction', async () => {
+  it('throws no_mapping only when the RXCUI is not a bundled concept', async () => {
     const ctx = createMockContext({ errors: mapCodesTool.errors });
     const err = await caught(() =>
       mapCodesTool.handler(
-        mapCodesTool.input.parse({ from: '161', direction: 'rxcui_to_ndc' }),
+        mapCodesTool.input.parse({ from: '999999999', direction: 'rxcui_to_ndc' }),
         ctx,
       ),
     );
     expect(err.data?.reason).toBe('no_mapping');
+
+    // A concept that IS bundled but carries no packages is an empty result — the
+    // error means the source did not resolve, never that it has no edges.
+    const okCtx = createMockContext({ errors: mapCodesTool.errors });
+    const out = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: '161', direction: 'rxcui_to_ndc' }),
+      okCtx,
+    );
+    expect(out.hits).toEqual([]);
+    expect(out.resolvedSystem).toBe('RXNORM');
   });
 });
 
@@ -639,6 +649,37 @@ describe('medcode_map_codes — pagination (#16 children, #18 name_to_rxcui, #20
       .join('\n');
     expect(text).toContain('00904516140');
     expect(text).toContain(cursor as string);
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/27
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/28
+  it('carries the target name and concept type across the full contract boundary', async () => {
+    // Calling the handler directly skips output validation, so it cannot tell a
+    // declared field from an undeclared one the wire would drop. Through the
+    // contract, structuredContent only carries what the output schema declares.
+    const ingredients = await runToolContract(mapCodesTool, {
+      from: '198440',
+      direction: 'rxcui_to_ingredients',
+    });
+    expect(ingredients.structuredContent).toMatchObject({
+      hits: [
+        { value: '161', source: 'has_ingredient', description: 'acetaminophen', conceptType: 'IN' },
+      ],
+    });
+
+    const decoded = await runToolContract(mapCodesTool, {
+      from: '11111-2222-33',
+      direction: 'ndc_to_rxcui',
+    });
+    expect(decoded.structuredContent).toMatchObject({
+      hits: [
+        {
+          value: '198440',
+          source: 'NDC',
+          description: 'Acetaminophen 500 MG Oral Tablet',
+        },
+      ],
+    });
   });
 
   it('paginates the children direction via nextCursor and reconstructs by code identity', async () => {

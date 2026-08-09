@@ -41,10 +41,35 @@ const PAGINATED_DIRECTIONS: ReadonlySet<MapDirection> = new Set([
   'rxcui_to_ndc',
 ]);
 
+/**
+ * The notice for a resolvable source that has no edges in `direction`. Every
+ * direction states its own cause and next move, because the causes are not
+ * interchangeable facts: an ingredient concept has no ingredients of its own, an
+ * ICD-10-PCS code has no prefix parent, and wording either as "a leaf code with
+ * no children" would tell the caller something untrue about its input.
+ */
+function noEdgeNotice(from: string, direction: MapDirection, system: string | null): string {
+  const head = `"${from}" resolved in ${system} but has no ${direction}`;
+  switch (direction) {
+    case 'children':
+      return `${head} — it is a leaf code with no children. Decode it with medcode_get_code, or map the opposite direction.`;
+    case 'rxcui_to_ndc':
+      return `${head} — no package in the bundled prescribable set lists it. Ingredient and brand-name concepts carry no packages; map a drug product's RXCUI instead.`;
+    case 'rxcui_to_ingredients':
+      return `${head} — ingredient, precise-ingredient, multiple-ingredient, and brand-name concepts carry no ingredient edges. Map a drug product's RXCUI instead, or decode this one with medcode_get_code.`;
+    case 'rxcui_to_brands':
+      return `${head} — no branded form of it is in the bundled prescribable set. Decode it with medcode_get_code.`;
+    default:
+      return system === 'ICD10PCS'
+        ? `${head} — ICD-10-PCS codes are axis-based and have no prefix parent. Decode it with medcode_get_code.`
+        : `${head} — it is a top-level code with no parent. Decode it with medcode_get_code, or map the opposite direction.`;
+  }
+}
+
 export const mapCodesTool = tool('medcode_map_codes', {
   title: 'medical-codes-mcp-server',
   description:
-    "Crosswalk a US medical code or drug across systems and within a hierarchy. Hierarchy directions: `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full ancestor or descendant path (ICD-10-CM/HCPCS; ICD-10-PCS codes have no prefix parent). A resolvable code with no edge in the requested direction is a successful empty result with a notice, not an error. Drug directions (RxNorm): `name_to_rxcui` (drug name → RXCUI), `ndc_to_rxcui` and `rxcui_to_ndc` (NDC ↔ RXCUI; NDCs accepted hyphenated in an FDA segment configuration — 4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2 — or as bare 10/11 digits), `rxcui_to_ingredients` and `rxcui_to_brands` (RXCUI → ingredient/brand RXCUIs, each with the target's RxNorm name). Every result carries `source` provenance (which system or edge answered) so a chained call (e.g. into openfda with a resolved NDC) uses the right identifier. The `children`, `name_to_rxcui`, and `rxcui_to_ndc` directions can return large sets and paginate: a `nextCursor` in the response is passed back as `cursor` (with an optional `limit` page size) to walk the full set; the point directions ignore both.",
+    "Crosswalk a US medical code or drug across systems and within a hierarchy. Hierarchy directions: `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full ancestor or descendant path (ICD-10-CM/HCPCS; ICD-10-PCS codes have no prefix parent). A resolvable source with no edge in the requested direction is a successful empty result with a notice, not an error. Drug directions (RxNorm): `name_to_rxcui` (drug name → RXCUI), `ndc_to_rxcui` and `rxcui_to_ndc` (NDC ↔ RXCUI; NDCs accepted hyphenated in an FDA segment configuration — 4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2 — or as bare 10/11 digits; `ndc_to_rxcui` names the product it decoded to), `rxcui_to_ingredients` and `rxcui_to_brands` (RXCUI → ingredient/brand RXCUIs, each with the target's RxNorm name and its `conceptType` — read that before counting a combination product's ingredients). Every result carries `source` provenance (which system or edge answered) so a chained call (e.g. into openfda with a resolved NDC) uses the right identifier. The `children`, `name_to_rxcui`, and `rxcui_to_ndc` directions can return large sets and paginate: a `nextCursor` in the response is passed back as `cursor` (with an optional `limit` page size) to walk the full set; the point directions ignore both.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -107,7 +132,13 @@ export const mapCodesTool = tool('medcode_map_codes', {
               .string()
               .optional()
               .describe(
-                'Description of the target when available: the code description for hierarchy hits, the official RxNorm name for `name_to_rxcui`, `rxcui_to_ingredients`, and `rxcui_to_brands` hits. Absent for `rxcui_to_ndc` (NDCs are package identifiers with no description) and for the RXCUIs `ndc_to_rxcui` returns.',
+                'Description of the target when available: the code description for hierarchy hits, the official RxNorm name for the `name_to_rxcui`, `ndc_to_rxcui`, `rxcui_to_ingredients`, and `rxcui_to_brands` drug concepts. Absent for `rxcui_to_ndc`, whose targets are package identifiers with no description of their own.',
+              ),
+            conceptType: z
+              .string()
+              .optional()
+              .describe(
+                'The target concept\'s RxNorm type, present on `rxcui_to_ingredients` and `rxcui_to_brands` hits only: "IN" (ingredient), "PIN" (precise ingredient — a specific salt, ester, or isomer of an ingredient), "MIN" (multiple ingredients — a concept naming a combination, never a substance within it), or "BN" (brand name). Ingredient hits mix the first three, so the hit count is not the substance count: a "MIN" hit is the grouping concept and never counts, and a "PIN" names a form of a substance rather than an extra one — usually alongside the "IN" it refines, though two "PIN" esters can share a single "IN". Counting the "IN" hits is the closest reading, and under-counts those shared cases.',
               ),
           })
           .describe('One crosswalk result tagged with the edge that produced it.'),
@@ -140,7 +171,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
       .string()
       .optional()
       .describe(
-        'Guidance when a resolvable code has no edge in the requested direction (e.g. a top-level code has no parent; a leaf has no children; ICD-10-PCS codes have no prefix parent).',
+        'Guidance whenever a resolvable source returns no hits, naming which of the two causes applies: it has no edge in the requested direction (a top-level code has no parent; a leaf has no children; ICD-10-PCS codes have no prefix parent), or the `cursor` starts past the last page of a direction that does have results.',
       ),
   },
 
@@ -203,22 +234,24 @@ export const mapCodesTool = tool('medcode_map_codes', {
     }
 
     if (result.hits.length === 0) {
-      // Resolved, but no edge in this direction — a successful empty result with a
-      // notice, consistent with search_codes / browse_hierarchy. Only `parents` and
-      // `children` reach this branch (drug directions return source_not_found).
-      const reason =
-        input.direction === 'children'
-          ? 'it is a leaf code with no children'
-          : result.resolvedSystem === 'ICD10PCS'
-            ? 'ICD-10-PCS codes are axis-based and have no prefix parent'
-            : 'it is a top-level code with no parent';
+      // Resolved, but nothing on this page — a successful empty result with a
+      // notice, consistent with search_codes / browse_hierarchy. Two distinct
+      // causes reach here and the notice must not conflate them: a source with no
+      // edge at all, or a cursor whose offset starts past the last page of a
+      // source that does have edges. Only the service can tell them apart — an
+      // offset alone cannot, since a childless code paged at any offset is still
+      // childless — so `pastEnd` is read off the result, never re-derived here.
+      const pastEnd = result.pastEnd === true;
       ctx.enrich.notice(
-        `"${input.from.trim()}" resolved in ${result.resolvedSystem} but has no ${input.direction} — ${reason}. Decode it with medcode_get_code, or map the opposite direction.`,
+        pastEnd
+          ? `"${input.from.trim()}" resolved in ${result.resolvedSystem}, but this page starts past the last ${input.direction} result. Re-call without a \`cursor\` to start from the first page.`
+          : noEdgeNotice(input.from.trim(), input.direction, result.resolvedSystem),
       );
       ctx.log.info('Mapped code (no edge)', {
         from: input.from,
         direction: input.direction,
         resolvedSystem: result.resolvedSystem,
+        pastEnd,
       });
       return {
         from: input.from.trim(),
@@ -242,6 +275,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
         system: h.system,
         value: h.value,
         ...(h.description ? { description: h.description } : {}),
+        ...(h.conceptType ? { conceptType: h.conceptType } : {}),
       })),
     };
   },
@@ -253,8 +287,12 @@ export const mapCodesTool = tool('medcode_map_codes', {
       '',
     ].filter(Boolean);
     for (const h of result.hits) {
+      // conceptType renders alongside the edge, not folded into the description —
+      // a text-only client has no structuredContent to read it from, and without it
+      // a combination product's `MIN` grouping hit is indistinguishable from the
+      // ingredients it groups.
       lines.push(
-        `- **${h.value}**${h.system ? ` (${h.system})` : ''} via ${h.source}${h.description ? `: ${h.description}` : ''}`,
+        `- **${h.value}**${h.system ? ` (${h.system})` : ''} via ${h.source}${h.conceptType ? ` [${h.conceptType}]` : ''}${h.description ? `: ${h.description}` : ''}`,
       );
     }
     return [{ type: 'text', text: lines.join('\n') }];

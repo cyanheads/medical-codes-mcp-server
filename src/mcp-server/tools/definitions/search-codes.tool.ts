@@ -39,7 +39,7 @@ export const searchCodesTool = tool('medcode_search_codes', {
       .string()
       .optional()
       .describe(
-        "Restrict to a chapter/range bucket (the value from a code's `chapter` field). Surrounding whitespace is trimmed; a blank or whitespace-only value carries no filtering intent and is treated as omitted, which the response discloses as `appliedFilters.chapter: null`.",
+        "Restrict to a chapter/range bucket (the value from a code's `chapter` field). Case-insensitive: surrounding whitespace is trimmed and the value is upper-cased to match how chapters are stored, and `appliedFilters.chapter` echoes the upper-cased value that actually ran. A blank or whitespace-only value carries no filtering intent and is treated as omitted, which the response discloses as `appliedFilters.chapter: null`.",
       ),
     limit: z
       .number()
@@ -122,8 +122,12 @@ export const searchCodesTool = tool('medcode_search_codes', {
     // is omitted rather than rejected: `chapter` is an optional filter, so a value
     // with no content states no filtering intent, and dropping it is disclosed by
     // the echoed `chapter: null` — unlike `node`, where a normalized-away value
-    // would silently change which subtree was walked.
-    const chapter = input.chapter?.trim() || undefined;
+    // would silently change which subtree was walked. Upper-casing joins the trim
+    // for the same reason `storageCode` upper-cases a code before comparison: the
+    // predicate is an exact `chapter = ?`, and every stored chapter is derived at
+    // build time from an upper-case code character or an RxNorm term type — so a
+    // lower-cased chapter matches nothing and zero-hits a valid search in silence.
+    const chapter = input.chapter?.trim().toUpperCase() || undefined;
     const { codes, hasMore } = getCodeIndexService().searchFts(input.query, {
       ...(input.system && { system: input.system }),
       billableOnly: input.billableOnly,

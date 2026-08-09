@@ -54,6 +54,66 @@ describe('system auto-detection against real overlaps', () => {
     ]);
   });
 
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/29
+  it('decodes the header rows the index materializes without an explicit system', async () => {
+    // Every one of these is a real row browse and search hand back: the HCPCS
+    // letter bucket, and two of the 914 three-character ICD-10-PCS table rows.
+    const out = await getCodeTool.handler(
+      getCodeTool.input.parse({ codes: ['J', '001', '00B'] }),
+      createMockContext(),
+    );
+    expect(out.notFound).toEqual([]);
+    expect(out.found.map(({ code, system }) => ({ code, system }))).toEqual([
+      { code: 'J', system: 'HCPCS' },
+      { code: '001', system: 'ICD10PCS' },
+      { code: '00B', system: 'ICD10PCS' },
+    ]);
+    expect(out.found[1]?.description).toBe('Central Nervous System and Cranial Nerves, Bypass');
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/29
+  it('decodes release codes whose leading characters no complete shape admits', async () => {
+    // The ICD-10-CM shape excludes a leading `U` and requires a digit in position
+    // 2, so the emergency-use COVID-19 chapters and the FY2026 `QA0…` genetic
+    // codes match no complete shape at all — `QA00101` is even seven characters,
+    // so it reads as ICD-10-PCS-shaped and resolves in ICD-10-CM only by membership.
+    const out = await getCodeTool.handler(
+      getCodeTool.input.parse({ codes: ['U07.1', 'U09.9', 'QA00101'] }),
+      createMockContext(),
+    );
+    expect(out.notFound).toEqual([]);
+    expect(
+      out.found.map(({ code, system, description }) => ({ code, system, description })),
+    ).toEqual([
+      { code: 'U07.1', system: 'ICD10CM', description: 'COVID-19' },
+      { code: 'U09.9', system: 'ICD10CM', description: 'Post COVID-19 condition, unspecified' },
+      {
+        // Display form re-inserts the ICD-10-CM dot after the 3-char category.
+        code: 'QA0.0101',
+        system: 'ICD10CM',
+        description: 'SCN2A-related neurodevelopmental disorder',
+      },
+    ]);
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/29
+  it('keeps check_code and map_codes in step with get_code on a header row', async () => {
+    // resolveSystems is shared, so the fix has to land on all three tools at once.
+    const checked = await checkCodeTool.handler(
+      checkCodeTool.input.parse({ code: 'J' }),
+      createMockContext({ errors: checkCodeTool.errors }),
+    );
+    expect(checked).toMatchObject({ system: 'HCPCS', code: 'J', status: 'valid_header' });
+
+    const mapped = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: 'J', direction: 'children', limit: 5 }),
+      createMockContext({ errors: mapCodesTool.errors }),
+    );
+    expect(mapped.resolvedSystem).toBe('HCPCS');
+    expect(mapped.hits.length).toBeGreaterThan(0);
+    expect(mapped.hits.every((hit) => hit.value.startsWith('J'))).toBe(true);
+  });
+
   it('uses an explicit system to resolve both meanings of an ambiguous code', async () => {
     const diagnosis = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['A0100'], system: 'ICD10CM' }),
@@ -137,6 +197,120 @@ describe('one-to-many crosswalk completeness', () => {
       createMockContext(),
     );
     expect(new Set(out.hits.map((hit) => hit.value))).toEqual(new Set(['161', '5640', '818102']));
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/28
+  it('separates the substances of a combination product from the MIN concept grouping them', async () => {
+    // 250085 is a two-substance product, but it carries three has_ingredient edges:
+    // acetaminophen and ibuprofen, plus the `acetaminophen / ibuprofen` MIN concept
+    // for the pair. Read flat, that is a three-ingredient product.
+    const out = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: '250085', direction: 'rxcui_to_ingredients' }),
+      createMockContext(),
+    );
+    expect(
+      out.hits
+        .map(({ value, conceptType }) => ({ value, conceptType }))
+        .sort((a, b) => a.value.localeCompare(b.value)),
+    ).toEqual([
+      { value: '161', conceptType: 'IN' },
+      { value: '5640', conceptType: 'IN' },
+      { value: '818102', conceptType: 'MIN' },
+    ]);
+    expect(out.hits.filter((hit) => hit.conceptType === 'IN')).toHaveLength(2);
+
+    // The text client gets the same separation — it has no structuredContent to
+    // fall back on, so a missing tag there is a silent over-count.
+    const text = (mapCodesTool.format?.(out) ?? [])
+      .flatMap((block) => (block.type === 'text' ? [block.text ?? ''] : []))
+      .join('\n');
+    expect(text).toContain('[MIN]');
+    expect(text.match(/\[IN\]/g)).toHaveLength(2);
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/28
+  it('distinguishes a precise ingredient from the base ingredient it refines', async () => {
+    // 1000000 carries all three ingredient types at once: three IN substances, the
+    // MIN naming the triple, and a PIN (`olmesartan medoxomil`) for the salt form of
+    // an olmesartan the product ALSO lists as IN. Read flat that is five ingredients
+    // for a three-substance product.
+    const out = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: '1000000', direction: 'rxcui_to_ingredients' }),
+      createMockContext(),
+    );
+    const byType = new Map(out.hits.map((hit) => [hit.value, hit.conceptType]));
+    expect(byType.get('321064')).toBe('IN'); // olmesartan
+    expect(byType.get('118463')).toBe('PIN'); // olmesartan medoxomil
+    expect(byType.get('1008801')).toBe('MIN'); // the three-way combination
+    expect(out.hits.filter((hit) => hit.conceptType === 'IN')).toHaveLength(3);
+    expect(out.hits).toHaveLength(5);
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/28
+  it('does not let the IN hits stand as a substance count on their own', async () => {
+    // 103462 is a two-substance ointment whose substances are both esters of one
+    // base: two PIN hits share the single `fluocortolone` IN. Counting the IN hits
+    // yields 1, so the field description must not sell that as the substance list
+    // — 130 bundled products carry more PIN hits than IN hits this way.
+    const out = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: '103462', direction: 'rxcui_to_ingredients' }),
+      createMockContext(),
+    );
+    const byType = (t: string) => out.hits.filter((hit) => hit.conceptType === t);
+    expect(byType('IN').map((hit) => hit.description)).toEqual(['fluocortolone']);
+    expect(byType('PIN').map((hit) => hit.description)).toEqual([
+      'fluocortolone caproate',
+      'fluocortolone pivalate',
+    ]);
+    expect(byType('MIN')).toHaveLength(1);
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/27
+  it('names the product a package NDC decodes to', async () => {
+    const out = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: '0777-3105-02', direction: 'ndc_to_rxcui' }),
+      createMockContext(),
+    );
+    expect(out.hits).toEqual([
+      {
+        source: 'NDC',
+        system: 'RXNORM',
+        value: '104849',
+        description: 'fluoxetine 20 MG Oral Capsule [Prozac]',
+      },
+    ]);
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/26
+  it('answers an out-of-range cursor with an empty page rather than an unmapped source', async () => {
+    // Reachable when a cursor outlives an index rebuild that shrank the set, or is
+    // hand-built — the token is base64url of `{ offset, limit }`.
+    const pastEnd = Buffer.from(JSON.stringify({ offset: 999_999, limit: 2 })).toString(
+      'base64url',
+    );
+
+    for (const [from, direction] of [
+      ['acetaminophen 500 MG Oral Tablet', 'name_to_rxcui'],
+      ['104849', 'rxcui_to_ndc'],
+    ] as const) {
+      const firstCtx = createMockContext({ errors: mapCodesTool.errors });
+      const first = await mapCodesTool.handler(
+        mapCodesTool.input.parse({ from, direction, limit: 2 }),
+        firstCtx,
+      );
+      expect(first.hits.length).toBeGreaterThan(0);
+
+      const ctx = createMockContext({ errors: mapCodesTool.errors });
+      const out = await mapCodesTool.handler(
+        mapCodesTool.input.parse({ from, direction, limit: 2, cursor: pastEnd }),
+        ctx,
+      );
+      expect(out.hits).toEqual([]);
+      const meta = getEnrichment(ctx);
+      expect(meta).toMatchObject({ truncated: false, shown: 0, cap: 2 });
+      expect(meta?.nextCursor).toBeUndefined();
+      expect(meta?.notice).toMatch(/page starts past the last/i);
+    }
   });
 
   it('returns every brand edge for a product instead of selecting one', async () => {

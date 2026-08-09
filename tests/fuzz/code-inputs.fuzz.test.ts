@@ -144,6 +144,56 @@ describe('index query fuzz', () => {
     }
   });
 
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/26
+  it('never converts an out-of-range page into a claim about the source', () => {
+    // Offsets a caller can reach by holding a cursor across an index rebuild, or by
+    // hand. Whatever the offset, the outcome must depend only on whether the source
+    // maps to anything — never on whether this particular window happened to be empty.
+    const sources = [
+      ['a', 'name_to_rxcui'],
+      ['acetaminophen', 'name_to_rxcui'],
+      ['1049640', 'rxcui_to_ndc'],
+      ['198440', 'rxcui_to_ndc'],
+      ['A00', 'children'],
+      ['E11', 'children'],
+    ] as const;
+
+    for (const [from, direction] of sources) {
+      const grounded = svc.mapCode(from, direction, undefined, { offset: 0, limit: 200 });
+      expect(grounded.kind).toBe('ok');
+      for (const offset of [1, 7, 999, 1_000_000, Number.MAX_SAFE_INTEGER]) {
+        const page = svc.mapCode(from, direction, undefined, { offset, limit: 3 });
+        expect(page.kind).toBe('ok');
+        if (page.kind === 'ok') expect(page.hits.length).toBeLessThanOrEqual(3);
+      }
+    }
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/30
+  it('matches every stored chapter regardless of the case the caller sent', async () => {
+    const chapters = new Set(
+      svc
+        .searchFts('a', { limit: 200 })
+        .codes.flatMap((code) => (code.chapter ? [code.chapter] : [])),
+    );
+    expect(chapters.size).toBeGreaterThan(0);
+
+    for (const chapter of chapters) {
+      const canonical = svc.searchFts('a', { limit: 200, chapter }).codes;
+      for (const spelling of [chapter.toLowerCase(), ` ${chapter.toLowerCase()} `]) {
+        const ctx = createMockContext();
+        const out = await searchCodesTool.handler(
+          searchCodesTool.input.parse({ query: 'a', limit: 200, chapter: spelling }),
+          ctx,
+        );
+        expect(out.codes.map((code) => code.code)).toEqual(canonical.map((code) => code.code));
+        // The echo names the filter that ran, so it is the canonical value, not
+        // the spelling the caller happened to send.
+        expect(getEnrichment(ctx)?.appliedFilters).toMatchObject({ chapter });
+      }
+    }
+  });
+
   it('keeps adversarial full-text queries bounded and duplicate-free in every system', () => {
     const systems: SystemId[] = ['ICD10CM', 'ICD10PCS', 'HCPCS', 'RXNORM'];
     for (const query of SEARCH_CORPUS) {

@@ -53,6 +53,40 @@ describe('getByCode', () => {
     expect(svc.getByCode('Z9999').kind).toBe('not_found');
   });
 
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/29
+  it('resolves a materialized header row whose shape no complete pattern matches', () => {
+    // `J` is a HCPCS letter bucket the index materializes: browse returns it and
+    // map_codes walks its children, but detectSystems only describes complete
+    // codes, so shape alone reports it as not a code at all.
+    expect(svc.detectSystem('J')).toEqual([]);
+    const r = svc.getByCode('J');
+    expect(r.kind).toBe('found');
+    if (r.kind === 'found') expect(r.row).toMatchObject({ system: 'HCPCS', code: 'J', header: 1 });
+
+    // Lower case reaches the same row — storageCode normalizes before membership.
+    expect(svc.getByCode('j').kind).toBe('found');
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/29
+  it('widens past a wrong shape verdict rather than asserting absence in that system', () => {
+    // A0100 is shaped as both ICD-10-CM and HCPCS and is a member of both, so the
+    // shape-narrowed pass answers and the widening must not fire — the widened set
+    // would be identical here, but a code the shape pass CAN answer must never
+    // reach it, or a fourth-system collision would start reporting as ambiguous.
+    const shaped = svc.getByCode('A0100');
+    expect(shaped.kind).toBe('ambiguous');
+    if (shaped.kind === 'ambiguous') expect(shaped.systems).toEqual(['ICD10CM', 'HCPCS']);
+
+    // An explicit system stays authoritative and is never widened past.
+    expect(svc.getByCode('J', 'ICD10CM').kind).toBe('not_found');
+    expect(svc.getByCode('J', 'HCPCS').kind).toBe('found');
+
+    // A value absent from every system is still not_found — widening rescues real
+    // rows, it does not manufacture hits.
+    expect(svc.getByCode('ZZZ').kind).toBe('not_found');
+    expect(svc.getByCode('!!').kind).toBe('not_found');
+  });
+
   it('attaches parent and children with includeHierarchy', () => {
     const r = svc.getByCode('E11');
     expect(r.kind).toBe('found');
@@ -525,13 +559,116 @@ describe('mapCode (RxNorm drug directions)', () => {
   it('source_not_found for an NDC absent from the map', () => {
     expect(svc.mapCode('99999-8888-77', 'ndc_to_rxcui').kind).toBe('source_not_found');
   });
-  it('source_not_found for a product with no packages or no edges', () => {
-    // 161 is an ingredient concept: no NDC packages, no ingredient/brand edges of
-    // its own. Each direction reports a missing source rather than an empty hit list.
-    expect(svc.mapCode('161', 'rxcui_to_ndc').kind).toBe('source_not_found');
-    expect(svc.mapCode('161', 'rxcui_to_ingredients').kind).toBe('source_not_found');
-    expect(svc.mapCode('161', 'rxcui_to_brands').kind).toBe('source_not_found');
+  it('ok-empty for a resolvable concept with no packages and no edges', () => {
+    // 161 is an ingredient concept: no NDC packages, no ingredient or brand edges
+    // of its own. It is still a bundled concept, so each direction is an empty
+    // result — calling it a missing source would deny a code get_code decodes.
+    for (const direction of ['rxcui_to_ndc', 'rxcui_to_ingredients', 'rxcui_to_brands'] as const) {
+      const r = svc.mapCode('161', direction);
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') {
+        expect(r.hits).toEqual([]);
+        expect(r.resolvedSystem).toBe('RXNORM');
+        // Not a paged-past-the-end empty — the concept has no edges at any offset.
+        expect(r.pastEnd).toBeFalsy();
+      }
+    }
   });
+
+  it('source_not_found for an RXCUI absent from the index', () => {
+    // What source_not_found still means on the RXCUI-source directions: the value
+    // is not a bundled concept at all.
+    for (const direction of ['rxcui_to_ndc', 'rxcui_to_ingredients', 'rxcui_to_brands'] as const) {
+      expect(svc.mapCode('999999999', direction).kind).toBe('source_not_found');
+    }
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/27
+  it('names the product an NDC decoded to instead of returning a bare RXCUI', () => {
+    const r = svc.mapCode('11111-2222-33', 'ndc_to_rxcui');
+    expect(r.kind === 'ok' && r.hits[0]).toMatchObject({
+      value: '198440',
+      source: 'NDC',
+      description: 'Acetaminophen 500 MG Oral Tablet',
+    });
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/28
+  it('carries the RxNorm concept type of each ingredient and brand target', () => {
+    const ingredients = svc.mapCode('198440', 'rxcui_to_ingredients');
+    expect(ingredients.kind === 'ok' && ingredients.hits[0]).toMatchObject({
+      value: '161',
+      conceptType: 'IN',
+    });
+
+    const brands = svc.mapCode('198440', 'rxcui_to_brands');
+    expect(brands.kind === 'ok' && brands.hits[0]).toMatchObject({
+      value: '202433',
+      conceptType: 'BN',
+    });
+
+    // The concept type belongs to the drug graph alone — a hierarchy target is a
+    // code, so tagging it with one would invent a fact the index does not carry.
+    const parents = svc.mapCode('E11.9', 'parents');
+    expect(parents.kind === 'ok' && parents.hits).toHaveLength(1);
+    expect(parents.kind === 'ok' && parents.hits[0]?.conceptType).toBeUndefined();
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/26
+describe('mapCode — a page past the end is not an unmapped source', () => {
+  const beyond = { offset: 999_999, limit: 2 };
+
+  it.each([
+    ['name_to_rxcui', 'a'],
+    ['rxcui_to_ndc', '1049640'],
+    ['children', 'A00'],
+  ] as const)('returns ok-empty for %s past the last page', (direction, from) => {
+    // The same source one call earlier returns hits, so reporting the out-of-range
+    // window as source_not_found makes the tool contradict itself.
+    const firstPage = svc.mapCode(from, direction, undefined, { offset: 0, limit: 2 });
+    expect(firstPage.kind === 'ok' && firstPage.hits.length).toBeGreaterThan(0);
+
+    const past = svc.mapCode(from, direction, undefined, beyond);
+    expect(past.kind).toBe('ok');
+    if (past.kind === 'ok') {
+      expect(past.hits).toEqual([]);
+      expect(past.hasMore).toBe(false);
+      expect(past.resolvedSystem).toBe(firstPage.kind === 'ok' ? firstPage.resolvedSystem : null);
+      // The flag, not the offset, is what lets the tool word the notice — an empty
+      // page at a non-zero offset is past-the-end only when results exist to pass.
+      expect(past.pastEnd).toBe(true);
+    }
+  });
+
+  it.each([
+    ['children', 'E1140'],
+    ['rxcui_to_ndc', '161'],
+  ] as const)('does not call %s past-the-end when the source has no edges at all', (d, from) => {
+    // Same out-of-range offset, opposite cause: nothing was skipped, because there
+    // was nothing to skip. Flagging these as past-the-end would send the caller
+    // back for a first page that is equally empty.
+    const past = svc.mapCode(from, d, d === 'children' ? 'ICD10CM' : undefined, beyond);
+    expect(past.kind).toBe('ok');
+    if (past.kind === 'ok') {
+      expect(past.hits).toEqual([]);
+      expect(past.pastEnd).toBeFalsy();
+    }
+  });
+
+  it('still reports a genuinely unmapped source at any offset', () => {
+    // The probe must confirm the source, not merely wave every empty page through:
+    // a name and an RXCUI that resolve to nothing stay source_not_found off page one.
+    expect(svc.mapCode('zzznotadrug', 'name_to_rxcui', undefined, beyond).kind).toBe(
+      'source_not_found',
+    );
+    expect(svc.mapCode('999999999', 'rxcui_to_ndc', undefined, beyond).kind).toBe(
+      'source_not_found',
+    );
+  });
+});
+
+describe('mapCode (hierarchy resolution)', () => {
   it('ambiguous for a hierarchy source present in two systems', () => {
     const r = svc.mapCode('A0100', 'parents');
     expect(r.kind).toBe('ambiguous');
