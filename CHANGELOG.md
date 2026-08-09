@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.7](changelog/0.2.x/0.2.7.md) — 2026-08-09
+
+medcode_get_code, medcode_check_code, and medcode_map_codes carry an optional alsoInSystems disclosure when a resolved code also exists in another bundled system; not-found reasons now name membership, not shape, as the arbiter; a test-fixture race across parallel Vitest workers is fixed.
+
 ## [0.2.6](changelog/0.2.x/0.2.6.md) — 2026-08-09
 
 medcode_map_codes distinguishes IN/PIN/MIN ingredient concepts, names ndc_to_rxcui targets, no longer misreports a past-the-end cursor or a resolvable RXCUI with no edges as an unmapped source; medcode_get_code decodes materialized header rows; medcode_search_codes matches chapter filters case-insensitively.
