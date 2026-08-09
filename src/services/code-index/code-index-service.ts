@@ -103,6 +103,12 @@ export interface DecodedCodeWithHierarchy extends DecodedCode {
 
 /** Result of a validity check — discriminated status plus optional why-not. */
 export interface CheckResult {
+  /**
+   * Other bundled systems that also contain this exact code string, absent when
+   * there are none. See {@link Resolution.alsoIn} — the same disclosure, carried
+   * onto a successful check so a caller who meant the other system can see it.
+   */
+  alsoIn?: SystemId[];
   code: string;
   status: CheckStatus;
   system: SystemId;
@@ -132,6 +138,12 @@ export interface MapHit {
  * genuinely empty, so the two cannot be worded alike.
  */
 export interface MapPage {
+  /**
+   * Other bundled systems the SOURCE value also exists in, absent when there are
+   * none. See {@link Resolution.alsoIn}. Only the hierarchy directions resolve a
+   * source through the system path, so the drug directions never carry it.
+   */
+  alsoIn?: SystemId[];
   hasMore: boolean;
   hits: MapHit[];
   kind: 'ok';
@@ -141,6 +153,21 @@ export interface MapPage {
 
 /** A FTS search hit. */
 export interface SearchHit extends DecodedCode {}
+
+/**
+ * What {@link CodeIndexService.resolveSystems} decided for one code string.
+ *
+ * `systems` is the resolution itself — empty (not found), one (unambiguous), or
+ * several (ambiguous). `alsoIn` names the bundled systems that hold the same code
+ * string but were NOT chosen, and is empty unless `systems` holds exactly one
+ * entry that the shape narrowing (or an explicit `system`) selected over other
+ * members. It is a disclosure, never an input to the choice: the resolution is
+ * identical with and without it, so no lookup that succeeds today changes.
+ */
+interface Resolution {
+  alsoIn: SystemId[];
+  systems: SystemId[];
+}
 
 const FALLBACK_DB_FILENAME = 'medical-codes.db';
 
@@ -264,40 +291,62 @@ export class CodeIndexService {
    * set holds two systems the caller gets `ambiguous`, the same verdict the
    * overlapping-shape case produces.
    *
-   * Note the shape pass still decides when it matches only ONE of several member
-   * systems: the 60 three-character ICD-10-PCS table rows that collide with an
-   * ICD-10-CM category (`B00`) resolve as ICD-10-CM, since only that shape
-   * matches. Reaching the PCS row there needs an explicit `system`.
+   * The shape pass still DECIDES when it matches only one of several member
+   * systems, and `alsoIn` exists to disclose exactly that. 60 code strings in the
+   * shipped index land there: the 3-character ICD-10-PCS table rows that are also
+   * ICD-10-CM categories (`B00` is Plain Radiography of the central nervous system
+   * AND herpesviral infections), where only the ICD-10-CM pattern admits a
+   * 3-character letter+2-digit value. Widening those would turn 60 working single
+   * answers into `ambiguous`, so the resolution stays as it is and the excluded
+   * member rides alongside it — all three callers carry `alsoIn` out to their tool
+   * surface, so a successful answer names the other system holding the string.
    *
-   * An explicit `system` bypasses both steps — it is authoritative.
+   * An explicit `system` is authoritative for the choice, but membership is still
+   * evaluated across every system so `alsoIn` means the same thing on both paths.
    */
-  private resolveSystems(rawCode: string, explicit?: SystemId): SystemId[] {
+  private resolveSystems(rawCode: string, explicit?: SystemId): Resolution {
     const code = storageCode(rawCode);
-    if (explicit) return this.getRow(code, explicit) !== null ? [explicit] : [];
-    const shaped = detectSystems(rawCode).filter((sys) => this.getRow(code, sys) !== null);
-    if (shaped.length > 0) return shaped;
-    return SYSTEM_IDS.filter((sys) => this.getRow(code, sys) !== null);
+    const members = SYSTEM_IDS.filter((sys) => this.getRow(code, sys) !== null);
+
+    let systems: SystemId[];
+    if (explicit) {
+      systems = members.includes(explicit) ? [explicit] : [];
+    } else {
+      const shaped = detectSystems(rawCode).filter((sys) => members.includes(sys));
+      systems = shaped.length > 0 ? shaped : members;
+    }
+
+    // Nothing resolved ⇒ nothing to disclose: `alsoIn` qualifies an answer, and
+    // without one there is no answer to qualify (an explicit `system` the value is
+    // absent from is a not-found, not a hit with a footnote). When the resolution
+    // is already `ambiguous` every member is named as a candidate, so the filter
+    // leaves alsoIn empty on its own.
+    const alsoIn = systems.length > 0 ? members.filter((sys) => !systems.includes(sys)) : [];
+    return { systems, alsoIn };
   }
 
   /**
    * Decode one code. Returns `{ kind: 'found' }` with the row, `'ambiguous'`
    * with the colliding systems, or `'not_found'`. When `system` is given it is
-   * authoritative; otherwise membership across detected systems decides.
+   * authoritative; otherwise membership across detected systems decides. A found
+   * row carries {@link Resolution.alsoIn} — the other bundled systems holding the
+   * same code string, which the caller must surface so a single answer to a
+   * colliding string is not read as the only meaning.
    */
   getByCode(
     rawCode: string,
     system?: SystemId,
   ):
-    | { kind: 'found'; row: CodeRow }
+    | { kind: 'found'; row: CodeRow; alsoIn: SystemId[] }
     | { kind: 'ambiguous'; systems: SystemId[] }
     | { kind: 'not_found' } {
     const code = storageCode(rawCode);
-    const present = this.resolveSystems(rawCode, system);
-    const [sys] = present;
+    const { systems, alsoIn } = this.resolveSystems(rawCode, system);
+    const [sys] = systems;
     if (!sys) return { kind: 'not_found' };
-    if (present.length > 1) return { kind: 'ambiguous', systems: present };
+    if (systems.length > 1) return { kind: 'ambiguous', systems };
     const row = this.getRow(code, sys);
-    return row ? { kind: 'found', row } : { kind: 'not_found' };
+    return row ? { kind: 'found', row, alsoIn } : { kind: 'not_found' };
   }
 
   /**
@@ -538,7 +587,7 @@ export class CodeIndexService {
     system?: SystemId,
   ): { kind: 'resolved'; result: CheckResult } | { kind: 'ambiguous'; systems: SystemId[] } {
     const code = storageCode(rawCode);
-    const present = this.resolveSystems(rawCode, system);
+    const { systems: present, alsoIn } = this.resolveSystems(rawCode, system);
     if (present.length > 1) return { kind: 'ambiguous', systems: present };
 
     if (present.length === 0) {
@@ -557,7 +606,7 @@ export class CodeIndexService {
             : `"${trimmed}" looks like an RxNorm RXCUI or a CPT / HCPCS Level I code. RxNorm is not present in this build, and CPT / HCPCS Level I are out of scope — this build carries ICD-10-CM, ICD-10-PCS, and HCPCS Level II.`
           : detected
             ? `No ${detected} code matches "${trimmed}" in the bundled release.`
-            : `"${trimmed}" does not match the shape of any bundled code system.`;
+            : `"${trimmed}" is not present in any bundled code system (ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm), and matches no bundled code shape.`;
       return {
         kind: 'resolved',
         result: {
@@ -575,14 +624,20 @@ export class CodeIndexService {
     const row = sys ? this.getRow(code, sys) : null;
     if (!row)
       return { kind: 'resolved', result: { system: sys ?? 'ICD10CM', code, status: 'unknown' } };
-    const display = displayCode(row.system, row.code);
+
+    // Identity + the cross-system disclosure, shared by all four verdicts — the
+    // status is what differs between them, not who answered.
+    const base = {
+      system: row.system,
+      code: displayCode(row.system, row.code),
+      ...(alsoIn.length > 0 ? { alsoIn } : {}),
+    };
 
     if (row.terminated) {
       return {
         kind: 'resolved',
         result: {
-          system: row.system,
-          code: display,
+          ...base,
           status: 'terminated',
           whyNot: `Code terminated effective ${formatDate(row.terminated)}; no longer valid for current claims.`,
         },
@@ -592,8 +647,7 @@ export class CodeIndexService {
       return {
         kind: 'resolved',
         result: {
-          system: row.system,
-          code: display,
+          ...base,
           status: 'valid_header',
           whyNot:
             'Valid category/header, but not billable — submit a more specific child code instead.',
@@ -601,16 +655,12 @@ export class CodeIndexService {
       };
     }
     if (row.billable === 1) {
-      return {
-        kind: 'resolved',
-        result: { system: row.system, code: display, status: 'valid_billable' },
-      };
+      return { kind: 'resolved', result: { ...base, status: 'valid_billable' } };
     }
     return {
       kind: 'resolved',
       result: {
-        system: row.system,
-        code: display,
+        ...base,
         status: 'valid_not_billable',
         whyNot:
           'Valid code, but not flagged billable in this release — verify a more specific code is not required before submitting.',
@@ -631,18 +681,22 @@ export class CodeIndexService {
     page: Page = { offset: 0, limit: getServerConfig().maxResults },
   ): MapPage | { kind: 'ambiguous'; systems: SystemId[] } | { kind: 'source_not_found' } {
     if (direction === 'parents' || direction === 'children') {
-      const present = this.resolveSystems(from, system);
+      const { systems: present, alsoIn } = this.resolveSystems(from, system);
       const [sys] = present;
       if (!sys) return { kind: 'source_not_found' };
       if (present.length > 1) return { kind: 'ambiguous', systems: present };
       const code = storageCode(from);
       const row = this.getRow(code, sys);
       if (!row) return { kind: 'source_not_found' };
+      // Carried onto every hierarchy page: the crosswalk walked ONE system's
+      // hierarchy, and a caller who meant the other one gets nothing else to see.
+      const disclosure = alsoIn.length > 0 ? { alsoIn } : {};
 
       if (direction === 'children') {
         const { children, hasMore } = this.childrenOf(sys, code, page);
         return {
           kind: 'ok',
+          ...disclosure,
           resolvedSystem: sys,
           hasMore,
           // An empty page is past-the-end only when the code HAS children the
@@ -662,24 +716,27 @@ export class CodeIndexService {
           })),
         };
       }
-      // parents — single immediate parent for prefix systems; PCS has none.
+      // parents — single immediate parent for prefix systems; PCS has none. A
+      // missing parent code and a parent code with no row are the same outcome
+      // (this code has no reachable parent), so both fall through to no hits.
       const parentStorage = sys === 'ICD10CM' ? icd10cmParent(code) : row.parent;
-      if (!parentStorage) return { kind: 'ok', resolvedSystem: sys, hasMore: false, hits: [] };
-      const parentRow = this.getRow(parentStorage, sys);
-      if (!parentRow) return { kind: 'ok', resolvedSystem: sys, hasMore: false, hits: [] };
-      const parentDesc = parentRow.longDesc ?? parentRow.shortDesc;
+      const parentRow = parentStorage ? this.getRow(parentStorage, sys) : null;
+      const parentDesc = parentRow ? (parentRow.longDesc ?? parentRow.shortDesc) : null;
       return {
         kind: 'ok',
+        ...disclosure,
         resolvedSystem: sys,
         hasMore: false,
-        hits: [
-          {
-            source: sys,
-            system: sys,
-            value: displayCode(sys, parentRow.code),
-            ...(parentDesc ? { description: parentDesc } : {}),
-          },
-        ],
+        hits: parentRow
+          ? [
+              {
+                source: sys,
+                system: sys,
+                value: displayCode(sys, parentRow.code),
+                ...(parentDesc ? { description: parentDesc } : {}),
+              },
+            ]
+          : [],
       };
     }
 

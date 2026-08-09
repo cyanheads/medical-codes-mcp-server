@@ -420,6 +420,91 @@ describe('crosswalk completeness and known output defects', () => {
     expect(mapped.hits.map((hit) => hit.value)).toContain('J0120');
   });
 
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/32
+  it('discloses the other system holding a shared code string, through every auto-detecting tool', async () => {
+    // `B00` decodes as herpesviral infections while an ICD-10-PCS imaging table row
+    // of the same name exists behind it. Answering with one meaning and no signal
+    // is the silent wrong subject: browse(ICD10PCS) hands the caller this code.
+    const decoded = await getCodeTool.handler(
+      getCodeTool.input.parse({ codes: ['B00'] }),
+      createMockContext({ errors: getCodeTool.errors }),
+    );
+    expect(decoded.found[0]).toMatchObject({
+      system: 'ICD10CM',
+      code: 'B00',
+      description: 'Herpesviral [herpes simplex] infections',
+      alsoInSystems: ['ICD10PCS'],
+    });
+
+    const checked = await checkCodeTool.handler(
+      checkCodeTool.input.parse({ code: 'B00' }),
+      createMockContext({ errors: checkCodeTool.errors }),
+    );
+    expect(checked).toMatchObject({ system: 'ICD10CM', alsoInSystems: ['ICD10PCS'] });
+
+    const mapped = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: 'B00', direction: 'children' }),
+      createMockContext({ errors: mapCodesTool.errors }),
+    );
+    expect(mapped).toMatchObject({ resolvedSystem: 'ICD10CM', alsoInSystems: ['ICD10PCS'] });
+
+    // The text client has no structuredContent to read the field from, so a render
+    // that drops it hands that client one meaning as if it were the only one.
+    for (const text of [
+      renderText(getCodeTool.format?.(decoded) ?? []),
+      renderText(checkCodeTool.format?.(checked) ?? []),
+      renderText(mapCodesTool.format?.(mapped) ?? []),
+    ]) {
+      expect(text).toContain('ICD10PCS');
+      expect(text).toMatch(/also in/i);
+      expect(text).toMatch(/`system`/);
+    }
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/32
+  it('reaches the shadowed row with an explicit system and points back at the other', async () => {
+    const pcs = await getCodeTool.handler(
+      getCodeTool.input.parse({ codes: ['B00'], system: 'ICD10PCS' }),
+      createMockContext({ errors: getCodeTool.errors }),
+    );
+    expect(pcs.notFound).toEqual([]);
+    expect(pcs.found[0]).toMatchObject({
+      system: 'ICD10PCS',
+      description: 'Imaging, Central Nervous System, Plain Radiography',
+      alsoInSystems: ['ICD10CM'],
+    });
+
+    // A code in exactly one system carries no disclosure, so its presence means
+    // something rather than decorating every result.
+    const single = await getCodeTool.handler(
+      getCodeTool.input.parse({ codes: ['E11.9'] }),
+      createMockContext({ errors: getCodeTool.errors }),
+    );
+    expect(single.found[0]).not.toHaveProperty('alsoInSystems');
+    expect(renderText(getCodeTool.format?.(single) ?? [])).not.toMatch(/also in/i);
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/32
+  it('reports an unresolvable code as absent rather than as an unmatched shape', async () => {
+    // Membership, not shape, has been the arbiter since #29 — the old reason
+    // asserted the value was not a code at all, which the widening made false.
+    const out = await getCodeTool.handler(
+      getCodeTool.input.parse({ codes: ['E11.9', '!!'] }),
+      createMockContext({ errors: getCodeTool.errors }),
+    );
+    expect(out.notFound[0]?.reason).toMatch(/not present in any bundled code system/i);
+    expect(out.notFound[0]?.reason).not.toMatch(/does not match the shape/i);
+
+    const err = await caught(() =>
+      checkCodeTool.handler(
+        checkCodeTool.input.parse({ code: '!!' }),
+        createMockContext({ errors: checkCodeTool.errors }),
+      ),
+    );
+    expect(err.data?.reason).toBe('unknown_code');
+    expect(err.message).not.toMatch(/does not match the shape/i);
+  });
+
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/30
   it('matches a chapter filter case-insensitively while echoing the value that ran', async () => {
     const upperCtx = createMockContext();

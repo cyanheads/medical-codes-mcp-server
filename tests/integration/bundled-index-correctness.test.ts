@@ -114,6 +114,86 @@ describe('system auto-detection against real overlaps', () => {
     expect(mapped.hits.every((hit) => hit.value.startsWith('J'))).toBe(true);
   });
 
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/32
+  describe('code strings the shape pass narrows past a second real member', () => {
+    // Derived from the shipped corpus, not hardcoded: every ICD-10-CM top-level
+    // category (all three characters, so all roots) that is ALSO an ICD-10-PCS
+    // table row. Only the ICD-10-CM pattern admits a 3-character letter+2-digit
+    // value, so these resolve single while a second real row sits behind them.
+    let shared: string[] = [];
+
+    beforeAll(async () => {
+      const svc = await ensureBundledIndex();
+      const roots: string[] = [];
+      for (let offset = 0; ; offset += 200) {
+        const page = svc.browse('ICD10CM', undefined, { offset, limit: 200 });
+        if (page.kind !== 'codes') break;
+        roots.push(...page.codes.map((entry) => entry.code));
+        if (!page.hasMore) break;
+      }
+      shared = roots.filter((code) => svc.getByCode(code, 'ICD10PCS').kind === 'found');
+    });
+
+    it('finds the collision set the release actually carries', () => {
+      expect(shared).toHaveLength(60);
+      expect(shared.slice(0, 3)).toEqual(['B00', 'B01', 'B02']);
+    });
+
+    // The load-bearing constraint: the fix is a disclosure, so no lookup that
+    // works today may change. Widening these to full membership instead would
+    // convert all 60 into `ambiguous_system` and break every caller who meant the
+    // diagnosis — which is why the resolution is pinned here, not just the notice.
+    it('still resolves every one as ICD-10-CM, with none turned ambiguous', async () => {
+      for (let start = 0; start < shared.length; start += 50) {
+        const batch = shared.slice(start, start + 50);
+        const out = await getCodeTool.handler(
+          getCodeTool.input.parse({ codes: batch }),
+          createMockContext({ errors: getCodeTool.errors }),
+        );
+        // An ambiguous code lands in notFound with candidateSystems — an empty
+        // notFound is the direct assertion that none of them became one.
+        expect(out.notFound).toEqual([]);
+        expect(out.found.map((entry) => entry.code)).toEqual(batch);
+        expect(out.found.map((entry) => entry.system)).toEqual(batch.map(() => 'ICD10CM'));
+        expect(out.found.map((entry) => entry.alsoInSystems)).toEqual(
+          batch.map(() => ['ICD10PCS']),
+        );
+      }
+    });
+
+    it('keeps check_code answering rather than throwing ambiguous_system', async () => {
+      for (const code of shared) {
+        const out = await checkCodeTool.handler(
+          checkCodeTool.input.parse({ code }),
+          createMockContext({ errors: checkCodeTool.errors }),
+        );
+        expect(out).toMatchObject({ system: 'ICD10CM', code, alsoInSystems: ['ICD10PCS'] });
+      }
+    });
+
+    it('separates the two real meanings of B00 once the caller knows to ask', async () => {
+      const diagnosis = await getCodeTool.handler(
+        getCodeTool.input.parse({ codes: ['B00'] }),
+        createMockContext(),
+      );
+      expect(diagnosis.found[0]).toMatchObject({
+        system: 'ICD10CM',
+        description: 'Herpesviral [herpes simplex] infections',
+        alsoInSystems: ['ICD10PCS'],
+      });
+
+      const imaging = await getCodeTool.handler(
+        getCodeTool.input.parse({ codes: ['B00'], system: 'ICD10PCS' }),
+        createMockContext(),
+      );
+      expect(imaging.found[0]).toMatchObject({
+        system: 'ICD10PCS',
+        description: 'Imaging, Central Nervous System, Plain Radiography',
+        alsoInSystems: ['ICD10CM'],
+      });
+    });
+  });
+
   it('uses an explicit system to resolve both meanings of an ambiguous code', async () => {
     const diagnosis = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['A0100'], system: 'ICD10CM' }),

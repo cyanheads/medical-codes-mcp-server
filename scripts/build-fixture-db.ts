@@ -36,7 +36,10 @@ interface CmSpec {
  * real edges. E11 (diabetes) and its children; I10 (hypertension); A00 cholera;
  * the A01 → A01.0 → A01.00 typhoid chain, whose leaf collides with the HCPCS
  * transport code `A0100` so the cross-system ambiguity contract has a fixture
- * case (the shipped corpus carries the same collision).
+ * case (the shipped corpus carries the same collision); and `B00`, which collides
+ * with the ICD-10-PCS imaging table row of the same name below — the OTHER kind of
+ * collision, where only one member matches a code shape, so the resolution stays
+ * single and the excluded member is disclosed rather than reported as ambiguous.
  */
 const ICD10CM: CmSpec[] = [
   {
@@ -104,9 +107,21 @@ const ICD10CM: CmSpec[] = [
     billable: true,
     header: false,
   },
+  {
+    code: 'B00',
+    short: 'Herpesviral [herpes simplex] infections',
+    long: 'Herpesviral [herpes simplex] infections',
+    billable: false,
+    header: true,
+  },
 ];
 
-/** ICD-10-PCS rows (every complete 7-char code is billable; parent stays NULL). */
+/**
+ * ICD-10-PCS rows (parent stays NULL — the hierarchy is axis-based). Only a
+ * complete 7-character code is billable, exactly as `parseIcd10pcsOrder` derives
+ * it: the shorter entries are the table rows the order file also carries, and
+ * `B00` is one of the 60 that share a code string with an ICD-10-CM category.
+ */
 const ICD10PCS: { code: string; short: string; long: string }[] = [
   {
     code: '0DTJ4ZZ',
@@ -122,6 +137,11 @@ const ICD10PCS: { code: string; short: string; long: string }[] = [
     code: '02703DZ',
     short: 'Dilation of Cor Art, One Site w Intralum Dev',
     long: 'Dilation of Coronary Artery, One Site with Intraluminal Device, Percutaneous Approach',
+  },
+  {
+    code: 'B00',
+    short: 'Imaging, Central Nervous System, Plain Radiography',
+    long: 'Imaging, Central Nervous System, Plain Radiography',
   },
 ];
 
@@ -267,7 +287,7 @@ function main(): void {
       code: pcs.code,
       shortDesc: pcs.short,
       longDesc: pcs.long,
-      billable: true,
+      billable: pcs.code.length === 7,
       header: false,
       chapter: pcs.code.charAt(0),
       parent: null,

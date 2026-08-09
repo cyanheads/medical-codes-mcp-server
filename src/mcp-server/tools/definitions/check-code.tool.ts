@@ -21,7 +21,7 @@ const SOURCE_URL =
 export const checkCodeTool = tool('medcode_check_code', {
   title: 'medical-codes-mcp-server',
   description:
-    'Validate whether a US medical code exists, is current, and is billable in the active bundled release. Returns a discriminated status — valid_billable, valid_not_billable, valid_header, or terminated — with a `whyNot` explaining non-billable and terminated cases (e.g. "valid ICD-10-CM category but not billable — submit a more specific child code"). This is the detail a coder needs before submitting a claim. Auto-detects the system from the code\'s shape; pass an explicit `system` to disambiguate. A non-billable or terminated code is a successful result with a whyNot, not an error — only a code that exists in no bundled system raises unknown_code.',
+    'Validate whether a US medical code exists, is current, and is billable in the active bundled release. Returns a discriminated status — valid_billable, valid_not_billable, valid_header, or terminated — with a `whyNot` explaining non-billable and terminated cases (e.g. "valid ICD-10-CM category but not billable — submit a more specific child code"). This is the detail a coder needs before submitting a claim. Auto-detects the system from the code\'s shape; pass an explicit `system` to disambiguate. A non-billable or terminated code is a successful result with a whyNot, not an error — only a code that exists in no bundled system raises unknown_code. A code string that also exists in another bundled system carries `alsoInSystems` naming it, since the verdict applies only to the system that answered.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -48,6 +48,12 @@ export const checkCodeTool = tool('medcode_check_code', {
       .string()
       .nullable()
       .describe('Explanation for non-billable/terminated statuses, or null when valid_billable.'),
+    alsoInSystems: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Other bundled systems holding this same code string, present only when there is at least one. The verdict above is for the system this code resolved in; the code is a DIFFERENT code in each system listed here, with its own billability — "B00" is the ICD-10-CM category "Herpesviral [herpes simplex] infections" and also the ICD-10-PCS table row "Imaging, Central Nervous System, Plain Radiography". Re-call with `system` set to one of these values to validate it there.',
+      ),
   }),
 
   errors: [
@@ -90,6 +96,7 @@ export const checkCodeTool = tool('medcode_check_code', {
       status: r.status,
       billable: r.status === 'valid_billable',
       whyNot: r.whyNot ?? null,
+      ...(r.alsoIn?.length ? { alsoInSystems: r.alsoIn } : {}),
     };
   },
 
@@ -107,6 +114,13 @@ export const checkCodeTool = tool('medcode_check_code', {
       `**Billable:** ${result.billable ? 'Yes' : 'No'}`,
     ];
     if (result.whyNot) lines.push('', result.whyNot);
+    // The verdict is system-specific, so a text-only client must see that another
+    // system holds the same string — otherwise this reads as the code's only status.
+    if (result.alsoInSystems?.length)
+      lines.push(
+        '',
+        `**Also in:** ${result.alsoInSystems.join(', ')} — the same code string is a different code there, with its own billability; re-call with that \`system\` to validate it.`,
+      );
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

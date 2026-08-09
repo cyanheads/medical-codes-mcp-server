@@ -69,7 +69,7 @@ function noEdgeNotice(from: string, direction: MapDirection, system: string | nu
 export const mapCodesTool = tool('medcode_map_codes', {
   title: 'medical-codes-mcp-server',
   description:
-    "Crosswalk a US medical code or drug across systems and within a hierarchy. Hierarchy directions: `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full ancestor or descendant path (ICD-10-CM/HCPCS; ICD-10-PCS codes have no prefix parent). A resolvable source with no edge in the requested direction is a successful empty result with a notice, not an error. Drug directions (RxNorm): `name_to_rxcui` (drug name → RXCUI), `ndc_to_rxcui` and `rxcui_to_ndc` (NDC ↔ RXCUI; NDCs accepted hyphenated in an FDA segment configuration — 4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2 — or as bare 10/11 digits; `ndc_to_rxcui` names the product it decoded to), `rxcui_to_ingredients` and `rxcui_to_brands` (RXCUI → ingredient/brand RXCUIs, each with the target's RxNorm name and its `conceptType` — read that before counting a combination product's ingredients). Every result carries `source` provenance (which system or edge answered) so a chained call (e.g. into openfda with a resolved NDC) uses the right identifier. The `children`, `name_to_rxcui`, and `rxcui_to_ndc` directions can return large sets and paginate: a `nextCursor` in the response is passed back as `cursor` (with an optional `limit` page size) to walk the full set; the point directions ignore both.",
+    "Crosswalk a US medical code or drug across systems and within a hierarchy. Hierarchy directions: `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full ancestor or descendant path (ICD-10-CM/HCPCS; ICD-10-PCS codes have no prefix parent). A resolvable source with no edge in the requested direction is a successful empty result with a notice, not an error. A source code string that also exists in another bundled system carries `alsoInSystems` naming it, since only the resolved system's hierarchy was walked. Drug directions (RxNorm): `name_to_rxcui` (drug name → RXCUI), `ndc_to_rxcui` and `rxcui_to_ndc` (NDC ↔ RXCUI; NDCs accepted hyphenated in an FDA segment configuration — 4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2 — or as bare 10/11 digits; `ndc_to_rxcui` names the product it decoded to), `rxcui_to_ingredients` and `rxcui_to_brands` (RXCUI → ingredient/brand RXCUIs, each with the target's RxNorm name and its `conceptType` — read that before counting a combination product's ingredients). Every result carries `source` provenance (which system or edge answered) so a chained call (e.g. into openfda with a resolved NDC) uses the right identifier. The `children`, `name_to_rxcui`, and `rxcui_to_ndc` directions can return large sets and paginate: a `nextCursor` in the response is passed back as `cursor` (with an optional `limit` page size) to walk the full set; the point directions ignore both.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -112,6 +112,12 @@ export const mapCodesTool = tool('medcode_map_codes', {
       .string()
       .nullable()
       .describe('The system the source resolved in, or null when not system-scoped.'),
+    alsoInSystems: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Other bundled systems holding the same `from` code string, present only when there is at least one (hierarchy directions only — a drug name, NDC, or RXCUI is not system-scoped). The hits above were walked in `resolvedSystem` alone; the code is a DIFFERENT code with a different hierarchy in each system listed here — "B00" is the ICD-10-CM category "Herpesviral [herpes simplex] infections" and also the ICD-10-PCS table row "Imaging, Central Nervous System, Plain Radiography". Re-call with `system` set to one of these values to walk it there.',
+      ),
     hits: z
       .array(
         z
@@ -225,6 +231,11 @@ export const mapCodesTool = tool('medcode_map_codes', {
       });
     }
 
+    // The source resolved in one system while the same code string exists in
+    // another — the hits below walk only the resolved one, so name the other on
+    // every return path rather than letting a hierarchy read as the code's only one.
+    const disclosure = result.alsoIn?.length ? { alsoInSystems: result.alsoIn } : {};
+
     // Disclose truncation + continuation for the paginated directions (even at zero
     // hits — a leaf's empty children page is still "complete"). The point directions
     // ignore the page and carry no continuation metadata.
@@ -258,6 +269,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
         direction: input.direction,
         resolvedSystem: result.resolvedSystem,
         hits: [],
+        ...disclosure,
       };
     }
 
@@ -277,6 +289,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
         ...(h.description ? { description: h.description } : {}),
         ...(h.conceptType ? { conceptType: h.conceptType } : {}),
       })),
+      ...disclosure,
     };
   },
 
@@ -284,6 +297,11 @@ export const mapCodesTool = tool('medcode_map_codes', {
     const lines = [
       `## ${result.direction}: ${result.from}`,
       result.resolvedSystem ? `**Resolved system:** ${result.resolvedSystem}` : '',
+      // Text-only clients read this instead of structuredContent — without it the
+      // walked hierarchy reads as the code's only one.
+      result.alsoInSystems?.length
+        ? `**Also in:** ${result.alsoInSystems.join(', ')} — the same code string is a different code with its own hierarchy there; re-call with that \`system\` to walk it.`
+        : '',
       '',
     ].filter(Boolean);
     for (const h of result.hits) {

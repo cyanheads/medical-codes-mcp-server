@@ -87,6 +87,55 @@ describe('getByCode', () => {
     expect(svc.getByCode('!!').kind).toBe('not_found');
   });
 
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/32
+  it('names the member the shape narrowing excluded instead of re-routing the answer', () => {
+    // `B00` is an ICD-10-CM category AND an ICD-10-PCS table row. Only the CM shape
+    // admits a 3-character letter+2-digit value, so the shape pass picks CM over a
+    // second real member — the one case where narrowing decides rather than narrows.
+    expect(svc.detectSystem('B00')).toEqual(['ICD10CM']);
+
+    const auto = svc.getByCode('B00');
+    expect(auto.kind).toBe('found');
+    if (auto.kind !== 'found') return;
+    // The resolution is untouched — widening it would cost a working single answer.
+    expect(auto.row).toMatchObject({
+      system: 'ICD10CM',
+      code: 'B00',
+      longDesc: 'Herpesviral [herpes simplex] infections',
+    });
+    // …and the excluded member rides along, so the caller can reach the other row.
+    expect(auto.alsoIn).toEqual(['ICD10PCS']);
+
+    // The disclosure is symmetric: an explicit system is still authoritative for
+    // the choice, and names the system it was chosen over.
+    const forced = svc.getByCode('B00', 'ICD10PCS');
+    expect(forced.kind).toBe('found');
+    if (forced.kind !== 'found') return;
+    expect(forced.row).toMatchObject({
+      system: 'ICD10PCS',
+      longDesc: 'Imaging, Central Nervous System, Plain Radiography',
+    });
+    expect(forced.alsoIn).toEqual(['ICD10CM']);
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/32
+  it('leaves alsoIn empty for a single-system code and for an ambiguous one', () => {
+    // A code present in exactly one system has nothing to disclose.
+    const single = svc.getByCode('E11.9');
+    expect(single.kind === 'found' && single.alsoIn).toEqual([]);
+
+    // A0100 is a member of two systems the SHAPE pass admits both of, so it is
+    // still `ambiguous` — every member is already named as a candidate there, and
+    // demoting one to a footnote would hide half the answer.
+    const both = svc.getByCode('A0100');
+    expect(both.kind).toBe('ambiguous');
+    expect(both).not.toHaveProperty('alsoIn');
+
+    // A code absent from every system stays not_found — a disclosure qualifies an
+    // answer, and an explicit system the value is absent from produces no answer.
+    expect(svc.getByCode('B00', 'HCPCS').kind).toBe('not_found');
+  });
+
   it('attaches parent and children with includeHierarchy', () => {
     const r = svc.getByCode('E11');
     expect(r.kind).toBe('found');
@@ -169,6 +218,39 @@ describe('checkCode', () => {
     const transport = svc.checkCode('A0100', 'HCPCS');
     expect(transport.kind === 'resolved' && transport.result.code).toBe('A0100');
   });
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/32
+  it('carries the excluded member onto the verdict, whichever verdict it is', () => {
+    // The verdict is system-specific: B00 is a non-billable CM header and a
+    // non-billable PCS table row, and neither reading is the other's answer.
+    const cm = svc.checkCode('B00');
+    expect(cm.kind === 'resolved' && cm.result).toMatchObject({
+      system: 'ICD10CM',
+      status: 'valid_header',
+      alsoIn: ['ICD10PCS'],
+    });
+
+    const pcs = svc.checkCode('B00', 'ICD10PCS');
+    expect(pcs.kind === 'resolved' && pcs.result).toMatchObject({
+      system: 'ICD10PCS',
+      status: 'valid_not_billable',
+      alsoIn: ['ICD10CM'],
+    });
+
+    // A code in one system carries no disclosure at all, rather than an empty array.
+    const single = svc.checkCode('E11.9');
+    expect(single.kind === 'resolved' && single.result).not.toHaveProperty('alsoIn');
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/32
+  it('stops asserting a shape verdict on a value that is simply absent', () => {
+    // Membership has been the arbiter since #29, so "matches no shape" cannot be
+    // the reason a lookup failed — the value is absent from every system.
+    const r = svc.checkCode('!!!');
+    expect(r.kind === 'resolved' && r.result.status).toBe('unknown');
+    expect(r.kind === 'resolved' && r.result.whyNot).toMatch(/not present in any bundled/i);
+    expect(r.kind === 'resolved' && r.result.whyNot).not.toMatch(/does not match the shape/i);
+  });
+
   it('explains a numeric out-of-scope code (e.g. CPT) as not-in-RxNorm with an out-of-scope hint', () => {
     const r = svc.checkCode('99213'); // a CPT code — out of scope, RxNorm-shaped (bare integer)
     expect(r.kind).toBe('resolved');
@@ -205,6 +287,24 @@ describe('mapCode', () => {
   it('returns ok-empty for a HCPCS leaf with no children', () => {
     const r = svc.mapCode('J0120', 'children');
     expect(r.kind === 'ok' && r.hits).toEqual([]);
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/32
+  it('names the excluded member on a hierarchy page, since only one was walked', () => {
+    // Both hierarchy directions resolve the source through resolveSystems, and both
+    // walk the resolved system alone — the PCS row's neighbours are not in here.
+    for (const direction of ['children', 'parents'] as const) {
+      const r = svc.mapCode('B00', direction);
+      expect(r.kind).toBe('ok');
+      if (r.kind !== 'ok') continue;
+      expect(r.resolvedSystem).toBe('ICD10CM');
+      expect(r.alsoIn).toEqual(['ICD10PCS']);
+    }
+
+    // A source in one system has nothing to disclose, and the drug directions
+    // resolve no system at all, so neither carries the field.
+    expect(svc.mapCode('E11', 'children')).not.toHaveProperty('alsoIn');
+    expect(svc.mapCode('161', 'rxcui_to_brands')).not.toHaveProperty('alsoIn');
   });
 });
 

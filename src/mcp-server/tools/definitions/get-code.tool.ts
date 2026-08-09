@@ -82,6 +82,12 @@ const FoundCodeSchema = DecodedCodeSchema.extend({
     .describe(
       'Resolution provenance when the input was not a direct code: "NDC" when an NDC was decoded to its RxNorm product via the NDC↔RxNorm map. Omitted for direct code lookups.',
     ),
+  alsoInSystems: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Other bundled systems holding this same code string, present only when there is at least one. The result above is the system this code resolved in; the code is a DIFFERENT code in each system listed here — "B00" is the ICD-10-CM category "Herpesviral [herpes simplex] infections" and also the ICD-10-PCS table row "Imaging, Central Nervous System, Plain Radiography". Re-call with `system` set to one of these values to decode it there.',
+    ),
 }).describe('A decoded code, optionally with its parent/children and resolution source.');
 
 /** A code that did not resolve, with a per-code reason. */
@@ -91,7 +97,7 @@ const NotFoundCodeSchema = z
     reason: z
       .string()
       .describe(
-        'Why it could not be resolved (unknown shape, not in the bundled release, or ambiguous).',
+        'Why it could not be resolved (absent from every bundled system, a well-formed NDC nothing maps to, or ambiguous across systems).',
       ),
     candidateSystems: z
       .array(z.string())
@@ -108,7 +114,7 @@ type NotFoundCode = z.infer<typeof NotFoundCodeSchema>;
 export const getCodeTool = tool('medcode_get_code', {
   title: 'medical-codes-mcp-server',
   description:
-    'Decode one or more US medical codes to their official descriptions across ICD-10-CM (diagnoses), ICD-10-PCS (inpatient procedures), HCPCS Level II (supplies/drugs/services), and RxNorm (drugs, by RXCUI). Also decodes a National Drug Code (NDC) directly to its RxNorm product offline, tagged `source: "NDC"` — hyphenated in an FDA segment configuration (4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2) or as bare 10/11 digits; any other segment widths are malformed and stay unresolved. Auto-detects the system from each code\'s shape; pass an explicit `system` only when a value is genuinely ambiguous. Accepts 1–50 codes and returns partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason, so one bad code never fails the batch. Set `includeHierarchy` to attach each code\'s parent and immediate children (with a `childrenTruncated` flag when a code has more children than the cap returns — walk the full set via medcode_browse_hierarchy or medcode_map_codes). The resolved `system` is echoed on every result for chaining into medcode_map_codes or a billability check.',
+    'Decode one or more US medical codes to their official descriptions across ICD-10-CM (diagnoses), ICD-10-PCS (inpatient procedures), HCPCS Level II (supplies/drugs/services), and RxNorm (drugs, by RXCUI). Also decodes a National Drug Code (NDC) directly to its RxNorm product offline, tagged `source: "NDC"` — hyphenated in an FDA segment configuration (4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2) or as bare 10/11 digits; any other segment widths are malformed and stay unresolved. Auto-detects the system from each code\'s shape; pass an explicit `system` only when a value is genuinely ambiguous. Accepts 1–50 codes and returns partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason, so one bad code never fails the batch. Set `includeHierarchy` to attach each code\'s parent and immediate children (with a `childrenTruncated` flag when a code has more children than the cap returns — walk the full set via medcode_browse_hierarchy or medcode_map_codes). The resolved `system` is echoed on every result for chaining into medcode_map_codes or a billability check; a code string that also exists in another bundled system carries `alsoInSystems` naming it, so a single answer to a colliding code is never mistaken for the only one.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -179,12 +185,15 @@ export const getCodeTool = tool('medcode_get_code', {
 
       const result = svc.getByCode(raw, input.system);
       if (result.kind === 'not_found') {
+        // DB membership is the arbiter (not the shape), so an unresolved code is
+        // absent from every bundled system either way; the shape list is a hint
+        // about what the value looks like, never the reason it failed.
         const shapes = svc.detectSystem(raw);
         notFound.push({
           code: raw,
           reason:
             shapes.length === 0
-              ? `"${raw}" does not match the shape of any bundled code system.`
+              ? `"${raw}" is not present in any bundled code system, and matches no bundled code shape.`
               : `"${raw}" is not present in the bundled release (matched shape: ${shapes.join(', ')}).`,
         });
       } else if (result.kind === 'ambiguous') {
@@ -193,10 +202,14 @@ export const getCodeTool = tool('medcode_get_code', {
           reason: `"${raw}" matches multiple systems — re-call with an explicit \`system\` to disambiguate.`,
           candidateSystems: result.systems,
         });
-      } else if (input.includeHierarchy) {
-        found.push(svc.getByCodeWithHierarchy(result.row));
       } else {
-        found.push(CodeIndexService.project(result.row));
+        const decoded = input.includeHierarchy
+          ? svc.getByCodeWithHierarchy(result.row)
+          : CodeIndexService.project(result.row);
+        found.push({
+          ...decoded,
+          ...(result.alsoIn.length > 0 ? { alsoInSystems: result.alsoIn } : {}),
+        });
       }
     }
 
@@ -222,6 +235,12 @@ export const getCodeTool = tool('medcode_get_code', {
     for (const c of result.found) {
       lines.push(...renderCodeBlock(c));
       if (c.source) lines.push(`**Resolved via:** ${c.source}`);
+      // A text-only client has no structuredContent to read alsoInSystems from,
+      // and without this line the one meaning it was handed reads as the only one.
+      if (c.alsoInSystems?.length)
+        lines.push(
+          `**Also in:** ${c.alsoInSystems.join(', ')} — the same code string is a different code there; re-call with that \`system\` to decode it.`,
+        );
       // Each hierarchy field renders on presence, not on truthiness: an empty child
       // list and a `childrenTruncated: false` are facts the caller asked for, and
       // gating them on content would render them exactly like the absent hierarchy
