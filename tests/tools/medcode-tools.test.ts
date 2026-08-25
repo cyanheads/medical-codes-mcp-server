@@ -50,7 +50,7 @@ describe('medcode_list_systems', () => {
 
 describe('medcode_get_code', () => {
   it('decodes a batch with partial success', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getCodeTool.errors });
     const input = getCodeTool.input.parse({ codes: ['E11.9', '0DTJ4ZZ', '99999'] });
     const out = await getCodeTool.handler(input, ctx);
     expect(out.found.map((f) => f.code)).toEqual(['E11.9', '0DTJ4ZZ']);
@@ -59,7 +59,7 @@ describe('medcode_get_code', () => {
   });
 
   it('attaches hierarchy when requested', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getCodeTool.errors });
     const input = getCodeTool.input.parse({ codes: ['E11'], includeHierarchy: true });
     const out = await getCodeTool.handler(input, ctx);
     expect(out.found[0]?.children?.map((c) => c.code)).toContain('E11.9');
@@ -68,7 +68,7 @@ describe('medcode_get_code', () => {
   it('attaches the stored parent for a non-prefix system', async () => {
     // HCPCS parents come from the stored `parent` column (the letter bucket), not
     // from the ICD-10-CM prefix rule.
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getCodeTool.errors });
     const out = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['J0120'], includeHierarchy: true }),
       ctx,
@@ -84,7 +84,7 @@ describe('medcode_get_code', () => {
   });
 
   it('decodes an NDC to its RxNorm product, tagged source NDC', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getCodeTool.errors });
     const out = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['11111-2222-33'] }),
       ctx,
@@ -93,14 +93,14 @@ describe('medcode_get_code', () => {
   });
 
   it('decodes a bare RXCUI directly, with no NDC source tag', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getCodeTool.errors });
     const out = await getCodeTool.handler(getCodeTool.input.parse({ codes: ['161'] }), ctx);
     expect(out.found[0]).toMatchObject({ system: 'RXNORM', code: '161' });
     expect(out.found[0]?.source).toBeUndefined();
   });
 
   it('reports an unknown hyphenated NDC as a valid-format NDC miss', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getCodeTool.errors });
     const out = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['11111-2222-33', '99999-8888-77'] }),
       ctx,
@@ -151,7 +151,7 @@ describe('medcode_search_codes', () => {
 
 describe('medcode_check_code', () => {
   it('returns valid_billable as a success', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: checkCodeTool.errors });
     const out = await checkCodeTool.handler(checkCodeTool.input.parse({ code: 'E11.9' }), ctx);
     expect(out.status).toBe('valid_billable');
     expect(out.billable).toBe(true);
@@ -159,14 +159,14 @@ describe('medcode_check_code', () => {
   });
 
   it('returns valid_header with a why-not (not an error)', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: checkCodeTool.errors });
     const out = await checkCodeTool.handler(checkCodeTool.input.parse({ code: 'E11' }), ctx);
     expect(out.status).toBe('valid_header');
     expect(out.whyNot).toBeTruthy();
   });
 
   it('returns terminated with a why-not', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: checkCodeTool.errors });
     const out = await checkCodeTool.handler(checkCodeTool.input.parse({ code: 'K0552' }), ctx);
     expect(out.status).toBe('terminated');
   });
@@ -201,7 +201,7 @@ describe('medcode_check_code', () => {
 
 describe('medcode_map_codes', () => {
   it('maps a code to its parent', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: mapCodesTool.errors });
     const out = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: 'E11.9', direction: 'parents' }),
       ctx,
@@ -211,7 +211,7 @@ describe('medcode_map_codes', () => {
   });
 
   it('resolves the name_to_rxcui drug direction against bundled RxNorm', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: mapCodesTool.errors });
     const out = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: 'aspirin', direction: 'name_to_rxcui' }),
       ctx,
@@ -221,7 +221,7 @@ describe('medcode_map_codes', () => {
   });
 
   it('resolves ndc_to_rxcui for a hyphenated NDC, tagged source NDC', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: mapCodesTool.errors });
     const out = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '11111-2222-33', direction: 'ndc_to_rxcui' }),
       ctx,
@@ -233,18 +233,18 @@ describe('medcode_map_codes', () => {
   it('resolves rxcui_to_ingredients and rxcui_to_brands edges', async () => {
     const ing = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '198440', direction: 'rxcui_to_ingredients' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(ing.hits.map((h) => h.value)).toContain('161');
     const brands = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '198440', direction: 'rxcui_to_brands' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(brands.hits.map((h) => h.value)).toContain('202433');
   });
 
   it('returns ok-empty with a notice for a top-level code with no parent', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: mapCodesTool.errors });
     const out = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: 'E11', direction: 'parents' }),
       ctx,
@@ -257,7 +257,7 @@ describe('medcode_map_codes', () => {
   });
 
   it('returns ok-empty with a PCS-specific notice for an ICD-10-PCS code with no parent', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: mapCodesTool.errors });
     const out = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '0DTJ4ZZ', direction: 'parents' }),
       ctx,
@@ -268,7 +268,7 @@ describe('medcode_map_codes', () => {
   });
 
   it('returns ok-empty with a notice for a leaf with no children (not the parents wording)', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: mapCodesTool.errors });
     const out = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: 'J0120', direction: 'children' }),
       ctx,
@@ -290,7 +290,7 @@ describe('medcode_map_codes', () => {
   });
 
   it('maps a HCPCS code to its seeded letter-bucket parent', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: mapCodesTool.errors });
     const out = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: 'J0120', direction: 'parents' }),
       ctx,
@@ -332,7 +332,7 @@ describe('medcode_map_codes', () => {
 
 describe('medcode_browse_hierarchy', () => {
   it('returns child codes for ICD-10-CM', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: browseHierarchyTool.errors });
     const out = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'ICD10CM', node: 'E11' }),
       ctx,
@@ -342,7 +342,7 @@ describe('medcode_browse_hierarchy', () => {
   });
 
   it('returns axis values for ICD-10-PCS', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: browseHierarchyTool.errors });
     const out = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'ICD10PCS' }),
       ctx,
@@ -363,7 +363,7 @@ describe('medcode_browse_hierarchy', () => {
   });
 
   it('returns HCPCS letter buckets at the top level (no node)', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: browseHierarchyTool.errors });
     const out = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'HCPCS' }),
       ctx,
@@ -374,7 +374,7 @@ describe('medcode_browse_hierarchy', () => {
   });
 
   it('returns the codes under a HCPCS bucket node', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: browseHierarchyTool.errors });
     const out = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'HCPCS', node: 'J' }),
       ctx,
@@ -384,7 +384,7 @@ describe('medcode_browse_hierarchy', () => {
   });
 
   it('steers back to the top level when a leaf node has no children', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: browseHierarchyTool.errors });
     const out = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'HCPCS', node: 'A0100' }),
       ctx,
@@ -396,7 +396,7 @@ describe('medcode_browse_hierarchy', () => {
   });
 
   it('returns empty axes plus a context-dependent notice for a partial ICD-10-PCS node', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: browseHierarchyTool.errors });
     const out = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'ICD10PCS', node: '0D' }),
       ctx,
@@ -407,7 +407,7 @@ describe('medcode_browse_hierarchy', () => {
   });
 
   it('steers to search/get_code/map_codes when browsing the flat RXNORM vocabulary', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: browseHierarchyTool.errors });
     const out = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'RXNORM' }),
       ctx,
@@ -418,7 +418,7 @@ describe('medcode_browse_hierarchy', () => {
   });
 
   it('returns empty axes with a complete-code notice for a complete ICD-10-PCS code (#13)', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: browseHierarchyTool.errors });
     const out = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'ICD10PCS', node: '0DTJ4ZZ' }),
       ctx,
@@ -535,7 +535,7 @@ describe('medcode_search_codes — pagination (#17)', () => {
 describe('medcode_browse_hierarchy — pagination (#16)', () => {
   // Fixture: ICD-10-CM A00 has exactly two children A00.0/A00.1.
   it('honors the node-path limit with correct metadata (limit:1 → shown:1, cap:1, not shown:50/cap:1)', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: browseHierarchyTool.errors });
     const out = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'ICD10CM', node: 'A00', limit: 1 }),
       ctx,
@@ -550,14 +550,14 @@ describe('medcode_browse_hierarchy — pagination (#16)', () => {
   });
 
   it('paginates children via nextCursor and reconstructs by code identity', async () => {
-    const ctx1 = createMockContext();
+    const ctx1 = createMockContext({ errors: browseHierarchyTool.errors });
     const p1 = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'ICD10CM', node: 'A00', limit: 1 }),
       ctx1,
     );
     const cursor = getEnrichment(ctx1)?.nextCursor as string;
 
-    const ctx2 = createMockContext();
+    const ctx2 = createMockContext({ errors: browseHierarchyTool.errors });
     const p2 = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'ICD10CM', node: 'A00', limit: 1, cursor }),
       ctx2,
@@ -571,7 +571,7 @@ describe('medcode_browse_hierarchy — pagination (#16)', () => {
   });
 
   it('reports complete (truncated:false) at the exact child count', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: browseHierarchyTool.errors });
     const out = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'ICD10CM', node: 'A00', limit: 2 }),
       ctx,
@@ -587,7 +587,7 @@ describe('medcode_browse_hierarchy — pagination (#16)', () => {
 
 describe('medcode_get_code — childrenTruncated (#16)', () => {
   it('discloses childrenTruncated:false when children fit the cap', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getCodeTool.errors });
     const out = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['E11'], includeHierarchy: true }),
       ctx,
@@ -596,7 +596,7 @@ describe('medcode_get_code — childrenTruncated (#16)', () => {
   });
 
   it('omits childrenTruncated when hierarchy is not requested', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getCodeTool.errors });
     const out = await getCodeTool.handler(getCodeTool.input.parse({ codes: ['E11'] }), ctx);
     expect(out.found[0]?.childrenTruncated).toBeUndefined();
   });
@@ -606,7 +606,7 @@ describe('medcode_map_codes — pagination (#16 children, #18 name_to_rxcui, #20
   it('paginates rxcui_to_ndc via nextCursor and reconstructs by NDC identity', async () => {
     const full = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '1049640', direction: 'rxcui_to_ndc', limit: 50 }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     const fullValues = full.hits.map((h) => h.value);
     expect(fullValues).toHaveLength(5);
@@ -615,7 +615,7 @@ describe('medcode_map_codes — pagination (#16 children, #18 name_to_rxcui, #20
     let cursor: string | undefined;
     const truncatedFlags: (boolean | undefined)[] = [];
     do {
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: mapCodesTool.errors });
       const page = await mapCodesTool.handler(
         mapCodesTool.input.parse({ from: '1049640', direction: 'rxcui_to_ndc', limit: 2, cursor }),
         ctx,
@@ -683,7 +683,7 @@ describe('medcode_map_codes — pagination (#16 children, #18 name_to_rxcui, #20
   });
 
   it('paginates the children direction via nextCursor and reconstructs by code identity', async () => {
-    const ctx1 = createMockContext();
+    const ctx1 = createMockContext({ errors: mapCodesTool.errors });
     const p1 = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: 'A00', direction: 'children', system: 'ICD10CM', limit: 1 }),
       ctx1,
@@ -694,7 +694,7 @@ describe('medcode_map_codes — pagination (#16 children, #18 name_to_rxcui, #20
     expect(e1?.shown).toBe(1);
     expect(typeof e1?.nextCursor).toBe('string');
 
-    const ctx2 = createMockContext();
+    const ctx2 = createMockContext({ errors: mapCodesTool.errors });
     const p2 = await mapCodesTool.handler(
       mapCodesTool.input.parse({
         from: 'A00',
@@ -716,12 +716,12 @@ describe('medcode_map_codes — pagination (#16 children, #18 name_to_rxcui, #20
   it('paginates name_to_rxcui via nextCursor and reconstructs by RXCUI identity', async () => {
     const full = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: 'a', direction: 'name_to_rxcui', limit: 50 }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     const fullValues = full.hits.map((h) => h.value);
     expect(fullValues).toEqual(['161', '1191', '198440', '1049640']);
 
-    const ctx1 = createMockContext();
+    const ctx1 = createMockContext({ errors: mapCodesTool.errors });
     const p1 = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: 'a', direction: 'name_to_rxcui', limit: 2 }),
       ctx1,
@@ -731,7 +731,7 @@ describe('medcode_map_codes — pagination (#16 children, #18 name_to_rxcui, #20
     expect(e1?.truncated).toBe(true);
     expect(typeof e1?.nextCursor).toBe('string');
 
-    const ctx2 = createMockContext();
+    const ctx2 = createMockContext({ errors: mapCodesTool.errors });
     const p2 = await mapCodesTool.handler(
       mapCodesTool.input.parse({
         from: 'a',

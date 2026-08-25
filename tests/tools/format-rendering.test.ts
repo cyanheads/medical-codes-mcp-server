@@ -30,7 +30,7 @@ describe('medcode_get_code format', () => {
   it('renders a root code with its hierarchy, flags, and both descriptions', async () => {
     const out = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['E11'], includeHierarchy: true }),
-      createMockContext(),
+      createMockContext({ errors: getCodeTool.errors }),
     );
     const text = textOf(getCodeTool.format!(out));
 
@@ -49,7 +49,7 @@ describe('medcode_get_code format', () => {
   it('names the immediate parent of a non-root code', async () => {
     const out = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['E11.9'], includeHierarchy: true }),
-      createMockContext(),
+      createMockContext({ errors: getCodeTool.errors }),
     );
     const text = textOf(getCodeTool.format!(out));
     expect(text).toContain('**Parent:** E11');
@@ -61,7 +61,7 @@ describe('medcode_get_code format', () => {
   it('discloses the NDC resolution path and the unresolved codes with their reasons', async () => {
     const out = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['11111-2222-33', 'A0100', '99999-8888-77'] }),
-      createMockContext(),
+      createMockContext({ errors: getCodeTool.errors }),
     );
     const text = textOf(getCodeTool.format!(out));
 
@@ -183,7 +183,7 @@ describe('medcode_check_code format', () => {
   it('renders the verdict, billability, and the why-not for a non-billable code', async () => {
     const out = await checkCodeTool.handler(
       checkCodeTool.input.parse({ code: 'E11' }),
-      createMockContext(),
+      createMockContext({ errors: checkCodeTool.errors }),
     );
     const text = textOf(checkCodeTool.format!(out));
     expect(text).toContain('## E11 — ICD-10-CM');
@@ -195,7 +195,7 @@ describe('medcode_check_code format', () => {
   it('renders a billable verdict with no why-not paragraph', async () => {
     const out = await checkCodeTool.handler(
       checkCodeTool.input.parse({ code: 'E11.9' }),
-      createMockContext(),
+      createMockContext({ errors: checkCodeTool.errors }),
     );
     const text = textOf(checkCodeTool.format!(out));
     expect(text).toContain('**Billable:** Yes');
@@ -208,7 +208,7 @@ describe('medcode_browse_hierarchy format', () => {
   it('renders child codes under a node', async () => {
     const out = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'ICD10CM', node: 'A00' }),
-      createMockContext(),
+      createMockContext({ errors: browseHierarchyTool.errors }),
     );
     const text = textOf(browseHierarchyTool.format!(out));
     expect(text).toContain('## Browse result (codes)');
@@ -220,7 +220,7 @@ describe('medcode_browse_hierarchy format', () => {
   it('renders PCS axis values as a position/value/meaning table', async () => {
     const out = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'ICD10PCS' }),
-      createMockContext(),
+      createMockContext({ errors: browseHierarchyTool.errors }),
     );
     const text = textOf(browseHierarchyTool.format!(out));
     expect(text).toContain('### ICD-10-PCS axis values');
@@ -232,7 +232,7 @@ describe('medcode_map_codes format', () => {
   it('renders each hit with its value, system, and edge', async () => {
     const out = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: 'E11.9', direction: 'parents' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     const text = textOf(mapCodesTool.format!(out));
     expect(text).toContain('## parents: E11.9');

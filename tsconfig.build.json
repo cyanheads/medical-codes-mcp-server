@@ -1,4 +1,13 @@
 {
   "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "noEmit": false,
+    // Emit requires it off; src/ carries no `.ts`-specifier imports (the SQLite
+    // driver is resolved through a runtime dynamic import, not a static one).
+    "allowImportingTsExtensions": false,
+    "types": ["node"]
+  },
+  "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.spec.ts"]
 }

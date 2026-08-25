@@ -33,7 +33,7 @@ it('executes and renders all six tools against the shipped index', async () => {
 
   const decoded = await getCodeTool.handler(
     getCodeTool.input.parse({ codes: ['E11.9'] }),
-    createMockContext(),
+    createMockContext({ errors: getCodeTool.errors }),
   );
   expect(decoded).toEqual(expect.schemaMatching(getCodeTool.output));
   expect(textOf(getCodeTool.format!(decoded))).toContain('E11.9');
@@ -53,14 +53,14 @@ it('executes and renders all six tools against the shipped index', async () => {
 
   const checked = await checkCodeTool.handler(
     checkCodeTool.input.parse({ code: 'E11.9' }),
-    createMockContext(),
+    createMockContext({ errors: checkCodeTool.errors }),
   );
   expect(checked).toEqual(expect.schemaMatching(checkCodeTool.output));
   expect(textOf(checkCodeTool.format!(checked))).toContain('Valid and billable');
 
   const mapped = await mapCodesTool.handler(
     mapCodesTool.input.parse({ from: '0002-0152-01', direction: 'ndc_to_rxcui' }),
-    createMockContext(),
+    createMockContext({ errors: mapCodesTool.errors }),
   );
   expect(mapped).toEqual(expect.schemaMatching(mapCodesTool.output));
   expect(mapped.hits.map((hit) => hit.value)).toEqual(['2679323']);
@@ -68,7 +68,7 @@ it('executes and renders all six tools against the shipped index', async () => {
 
   const browsed = await browseHierarchyTool.handler(
     browseHierarchyTool.input.parse({ system: 'ICD10PCS' }),
-    createMockContext(),
+    createMockContext({ errors: browseHierarchyTool.errors }),
   );
   expect(browsed).toEqual(expect.schemaMatching(browseHierarchyTool.output));
   expect(browsed.axes).toContainEqual({

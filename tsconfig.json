@@ -1,12 +1,21 @@
 {
   "extends": "@cyanheads/mcp-ts-core/tsconfig.base.json",
   "compilerOptions": {
-    "rootDir": "src",
+    "rootDir": ".",
     "outDir": "dist",
+    "noEmit": true,
+    "tsBuildInfoFile": ".tsbuildinfo",
+    // tests/ reach the Bun-only build scripts (scripts/ingest/parsers.ts,
+    // scripts/_db-writer.ts) by their `.ts` specifier, the way Bun runs them, and
+    // _db-writer.ts imports `bun:sqlite`. Both are typecheck-only concerns — this
+    // config never emits, and tsconfig.build.json (src/ only, emitting) turns
+    // allowImportingTsExtensions back off.
+    "allowImportingTsExtensions": true,
+    "types": ["node", "bun"],
     "paths": {
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "tests/**/*"],
   "exclude": ["node_modules", "dist"]
 }

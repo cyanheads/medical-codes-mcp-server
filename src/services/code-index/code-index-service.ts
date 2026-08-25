@@ -224,8 +224,7 @@ export class CodeIndexService {
       'Code index opened',
       requestContextService.createRequestContext({
         operation: 'CodeIndexOpen',
-        dbPath,
-        systems: meta.n,
+        additionalContext: { dbPath, systems: meta.n },
       }),
     );
     return new CodeIndexService(db, dbPath);

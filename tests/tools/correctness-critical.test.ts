@@ -42,7 +42,7 @@ describe('system provenance', () => {
   it('echoes the independently resolved system for every code in a mixed batch', async () => {
     const out = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['E11.9', '0dtj4zz', ' j0120 ', '161'] }),
-      createMockContext(),
+      createMockContext({ errors: getCodeTool.errors }),
     );
 
     expect(out.notFound).toEqual([]);
@@ -110,14 +110,14 @@ describe('NDC normalization', () => {
     for (const ndc of forms) {
       const decoded = await getCodeTool.handler(
         getCodeTool.input.parse({ codes: [ndc] }),
-        createMockContext(),
+        createMockContext({ errors: getCodeTool.errors }),
       );
       expect(decoded.found[0]).toMatchObject({ code: '198440', system: 'RXNORM', source: 'NDC' });
     }
 
     const reverse = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '198440', direction: 'rxcui_to_ndc' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(reverse.hits.map((hit) => hit.value)).toContain('11111222233');
   });
@@ -126,7 +126,7 @@ describe('NDC normalization', () => {
     for (const ndc of ['0904-5161-60', '0904516160', '00904516160']) {
       const out = await mapCodesTool.handler(
         mapCodesTool.input.parse({ from: ndc, direction: 'ndc_to_rxcui' }),
-        createMockContext(),
+        createMockContext({ errors: mapCodesTool.errors }),
       );
       expect(out.hits.map((hit) => hit.value)).toContain('1049640');
     }
@@ -137,7 +137,7 @@ describe('billability verdicts', () => {
   it('keeps billable, parent, non-billable, terminated, and absent outcomes distinct', async () => {
     const billable = await checkCodeTool.handler(
       checkCodeTool.input.parse({ code: 'E11.9' }),
-      createMockContext(),
+      createMockContext({ errors: checkCodeTool.errors }),
     );
     expect(billable).toMatchObject({
       status: 'valid_billable',
@@ -147,21 +147,21 @@ describe('billability verdicts', () => {
 
     const parent = await checkCodeTool.handler(
       checkCodeTool.input.parse({ code: 'E11' }),
-      createMockContext(),
+      createMockContext({ errors: checkCodeTool.errors }),
     );
     expect(parent).toMatchObject({ status: 'valid_header', billable: false });
     expect(parent.whyNot).toMatch(/more specific child code/i);
 
     const nonBillable = await checkCodeTool.handler(
       checkCodeTool.input.parse({ code: '161' }),
-      createMockContext(),
+      createMockContext({ errors: checkCodeTool.errors }),
     );
     expect(nonBillable).toMatchObject({ status: 'valid_not_billable', billable: false });
     expect(nonBillable.whyNot).toBeTruthy();
 
     const terminated = await checkCodeTool.handler(
       checkCodeTool.input.parse({ code: 'K0552' }),
-      createMockContext(),
+      createMockContext({ errors: checkCodeTool.errors }),
     );
     expect(terminated).toMatchObject({ status: 'terminated', billable: false });
     expect(terminated.whyNot).toMatch(/2019-12-31/);
@@ -180,13 +180,13 @@ describe('crosswalk completeness and known output defects', () => {
   it('round-trips a child through its parent without losing the child', async () => {
     const parent = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: 'E11.9', direction: 'parents' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(parent.hits.map((hit) => hit.value)).toEqual(['E11']);
 
     const children = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: parent.hits[0]!.value, direction: 'children' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(children.hits.map((hit) => hit.value)).toContain('E11.9');
   });
@@ -195,7 +195,7 @@ describe('crosswalk completeness and known output defects', () => {
   it('includes official target names on ingredient and brand crosswalk hits', async () => {
     const ingredients = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '198440', direction: 'rxcui_to_ingredients' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(ingredients.hits).toContainEqual(
       expect.objectContaining({ value: '161', description: 'acetaminophen' }),
@@ -203,7 +203,7 @@ describe('crosswalk completeness and known output defects', () => {
 
     const brands = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '198440', direction: 'rxcui_to_brands' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(brands.hits).toContainEqual(
       expect.objectContaining({ value: '202433', description: 'Tylenol' }),
@@ -221,7 +221,7 @@ describe('crosswalk completeness and known output defects', () => {
   it('renders an explicitly empty and complete hierarchy on the text client path', async () => {
     const out = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['E11.9'], includeHierarchy: true }),
-      createMockContext(),
+      createMockContext({ errors: getCodeTool.errors }),
     );
     expect(out.found[0]).toMatchObject({ children: [], childrenTruncated: false });
 
@@ -234,7 +234,7 @@ describe('crosswalk completeness and known output defects', () => {
     // apart if the no-hierarchy render carries neither line.
     const plain = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['E11.9'] }),
-      createMockContext(),
+      createMockContext({ errors: getCodeTool.errors }),
     );
     expect(plain.found[0]).not.toHaveProperty('children');
     const plainText = renderText(getCodeTool.format!(plain));
@@ -246,7 +246,7 @@ describe('crosswalk completeness and known output defects', () => {
   it('names the decoded product on an ndc_to_rxcui hit, on both client paths', async () => {
     const out = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '11111-2222-33', direction: 'ndc_to_rxcui' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(out.hits).toContainEqual(
       expect.objectContaining({
@@ -264,7 +264,7 @@ describe('crosswalk completeness and known output defects', () => {
   it('tags ingredient and brand hits with their RxNorm concept type, on both client paths', async () => {
     const ingredients = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '198440', direction: 'rxcui_to_ingredients' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(ingredients.hits).toContainEqual(
       expect.objectContaining({ value: '161', conceptType: 'IN' }),
@@ -275,7 +275,7 @@ describe('crosswalk completeness and known output defects', () => {
 
     const brands = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '198440', direction: 'rxcui_to_brands' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(brands.hits).toContainEqual(
       expect.objectContaining({ value: '202433', conceptType: 'BN' }),
@@ -285,7 +285,7 @@ describe('crosswalk completeness and known output defects', () => {
     // A hierarchy hit has no RxNorm concept type, so neither surface may show one.
     const parents = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: 'E11.9', direction: 'parents' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     // Length first: `hits[0]?.conceptType` and a not.toMatch over the render both
     // pass on an empty hit list, so neither says anything until there is a hit.

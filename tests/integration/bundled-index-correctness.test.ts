@@ -37,7 +37,7 @@ describe('system auto-detection against real overlaps', () => {
   it('reports a genuinely ambiguous code while preserving a mixed-system batch', async () => {
     const out = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['E11.9', 'A0100', '0dtj4zz', ' e0110 ', '161'] }),
-      createMockContext(),
+      createMockContext({ errors: getCodeTool.errors }),
     );
 
     expect(out.found.map(({ code, system }) => ({ code, system }))).toEqual([
@@ -60,7 +60,7 @@ describe('system auto-detection against real overlaps', () => {
     // letter bucket, and two of the 914 three-character ICD-10-PCS table rows.
     const out = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['J', '001', '00B'] }),
-      createMockContext(),
+      createMockContext({ errors: getCodeTool.errors }),
     );
     expect(out.notFound).toEqual([]);
     expect(out.found.map(({ code, system }) => ({ code, system }))).toEqual([
@@ -79,7 +79,7 @@ describe('system auto-detection against real overlaps', () => {
     // so it reads as ICD-10-PCS-shaped and resolves in ICD-10-CM only by membership.
     const out = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['U07.1', 'U09.9', 'QA00101'] }),
-      createMockContext(),
+      createMockContext({ errors: getCodeTool.errors }),
     );
     expect(out.notFound).toEqual([]);
     expect(
@@ -174,7 +174,7 @@ describe('system auto-detection against real overlaps', () => {
     it('separates the two real meanings of B00 once the caller knows to ask', async () => {
       const diagnosis = await getCodeTool.handler(
         getCodeTool.input.parse({ codes: ['B00'] }),
-        createMockContext(),
+        createMockContext({ errors: getCodeTool.errors }),
       );
       expect(diagnosis.found[0]).toMatchObject({
         system: 'ICD10CM',
@@ -184,7 +184,7 @@ describe('system auto-detection against real overlaps', () => {
 
       const imaging = await getCodeTool.handler(
         getCodeTool.input.parse({ codes: ['B00'], system: 'ICD10PCS' }),
-        createMockContext(),
+        createMockContext({ errors: getCodeTool.errors }),
       );
       expect(imaging.found[0]).toMatchObject({
         system: 'ICD10PCS',
@@ -197,7 +197,7 @@ describe('system auto-detection against real overlaps', () => {
   it('uses an explicit system to resolve both meanings of an ambiguous code', async () => {
     const diagnosis = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['A0100'], system: 'ICD10CM' }),
-      createMockContext(),
+      createMockContext({ errors: getCodeTool.errors }),
     );
     expect(diagnosis.found[0]).toMatchObject({
       code: 'A01.00',
@@ -207,7 +207,7 @@ describe('system auto-detection against real overlaps', () => {
 
     const transport = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['A0100'], system: 'HCPCS' }),
-      createMockContext(),
+      createMockContext({ errors: getCodeTool.errors }),
     );
     expect(transport.found[0]).toMatchObject({
       code: 'A0100',
@@ -230,7 +230,7 @@ describe('real NDC format permutations', () => {
   ])('maps %s to the expected RxNorm product', async (ndc, rxcui) => {
     const out = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: [ndc] }),
-      createMockContext(),
+      createMockContext({ errors: getCodeTool.errors }),
     );
     expect(out.notFound).toEqual([]);
     expect(out.found[0]).toMatchObject({ code: rxcui, system: 'RXNORM', source: 'NDC' });
@@ -256,13 +256,13 @@ describe('real NDC format permutations', () => {
   it('round-trips a label NDC through RXCUI without losing the original package', async () => {
     const forward = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '0002-0152-01', direction: 'ndc_to_rxcui' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(forward.hits.map((hit) => hit.value)).toEqual(['2679323']);
 
     const reverse = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '2679323', direction: 'rxcui_to_ndc' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(new Set(reverse.hits.map((hit) => hit.value))).toEqual(
       new Set(['00002015201', '00002015204', '00002015261']),
@@ -274,7 +274,7 @@ describe('one-to-many crosswalk completeness', () => {
   it('returns every ingredient edge for a combination product', async () => {
     const out = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '250085', direction: 'rxcui_to_ingredients' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(new Set(out.hits.map((hit) => hit.value))).toEqual(new Set(['161', '5640', '818102']));
   });
@@ -286,7 +286,7 @@ describe('one-to-many crosswalk completeness', () => {
     // for the pair. Read flat, that is a three-ingredient product.
     const out = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '250085', direction: 'rxcui_to_ingredients' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(
       out.hits
@@ -316,7 +316,7 @@ describe('one-to-many crosswalk completeness', () => {
     // for a three-substance product.
     const out = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '1000000', direction: 'rxcui_to_ingredients' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     const byType = new Map(out.hits.map((hit) => [hit.value, hit.conceptType]));
     expect(byType.get('321064')).toBe('IN'); // olmesartan
@@ -334,7 +334,7 @@ describe('one-to-many crosswalk completeness', () => {
     // — 130 bundled products carry more PIN hits than IN hits this way.
     const out = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '103462', direction: 'rxcui_to_ingredients' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     const byType = (t: string) => out.hits.filter((hit) => hit.conceptType === t);
     expect(byType('IN').map((hit) => hit.description)).toEqual(['fluocortolone']);
@@ -349,7 +349,7 @@ describe('one-to-many crosswalk completeness', () => {
   it('names the product a package NDC decodes to', async () => {
     const out = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '0777-3105-02', direction: 'ndc_to_rxcui' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(out.hits).toEqual([
       {
@@ -396,7 +396,7 @@ describe('one-to-many crosswalk completeness', () => {
   it('returns every brand edge for a product instead of selecting one', async () => {
     const out = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '198440', direction: 'rxcui_to_brands' }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(new Set(out.hits.map((hit) => hit.value))).toEqual(
       new Set(['1100002', '1293937', '1358830', '202432', '202433', '215257', '218205']),
@@ -410,14 +410,14 @@ describe('one-to-many crosswalk completeness', () => {
         direction: 'name_to_rxcui',
         limit: 200,
       }),
-      createMockContext(),
+      createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(out.hits.map((hit) => hit.value)).toContain('198440');
   });
 
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/20
   it('paginates the high-fanout RXCUI-to-NDC direction', async () => {
-    const firstCtx = createMockContext();
+    const firstCtx = createMockContext({ errors: mapCodesTool.errors });
     const first = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '198440', direction: 'rxcui_to_ndc', limit: 2 }),
       firstCtx,
@@ -427,7 +427,7 @@ describe('one-to-many crosswalk completeness', () => {
     expect(firstMeta).toMatchObject({ truncated: true, shown: 2, cap: 2 });
     expect(firstMeta?.nextCursor).toEqual(expect.any(String));
 
-    const secondCtx = createMockContext();
+    const secondCtx = createMockContext({ errors: mapCodesTool.errors });
     const second = await mapCodesTool.handler(
       mapCodesTool.input.parse({
         from: '198440',
@@ -446,7 +446,7 @@ describe('one-to-many crosswalk completeness', () => {
   // page but fewer than the 200 ceiling, so one maxed-out call is a provably
   // COMPLETE reference (truncated:false) to diff a cursor walk against.
   it('reconstructs the complete NDC set by walking only the emitted cursors', async () => {
-    const wholeCtx = createMockContext();
+    const wholeCtx = createMockContext({ errors: mapCodesTool.errors });
     const whole = await mapCodesTool.handler(
       mapCodesTool.input.parse({ from: '310384', direction: 'rxcui_to_ndc', limit: 200 }),
       wholeCtx,
@@ -460,7 +460,7 @@ describe('one-to-many crosswalk completeness', () => {
     const pageSizes: number[] = [];
     let cursor: string | undefined;
     for (let page = 0; page < 100; page++) {
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: mapCodesTool.errors });
       const out = await mapCodesTool.handler(
         mapCodesTool.input.parse({ from: '310384', direction: 'rxcui_to_ndc', limit: 7, cursor }),
         ctx,
@@ -490,14 +490,14 @@ describe('hierarchy algorithms', () => {
   it('walks ICD-10-CM and HCPCS prefix children', async () => {
     const cm = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'ICD10CM', node: 'E11', limit: 200 }),
-      createMockContext(),
+      createMockContext({ errors: browseHierarchyTool.errors }),
     );
     expect(cm.kind).toBe('codes');
     expect(cm.codes.map((code) => code.code)).toContain('E11.9');
 
     const hcpcs = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'HCPCS', node: 'J', limit: 200 }),
-      createMockContext(),
+      createMockContext({ errors: browseHierarchyTool.errors }),
     );
     expect(hcpcs.kind).toBe('codes');
     expect(hcpcs.codes.map((code) => code.code)).toContain('J0120');
@@ -506,7 +506,7 @@ describe('hierarchy algorithms', () => {
   it('returns the PCS section axis and distinguishes a valid partial path', async () => {
     const top = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'ICD10PCS' }),
-      createMockContext(),
+      createMockContext({ errors: browseHierarchyTool.errors }),
     );
     expect(top.kind).toBe('axes');
     expect(top.axes.every((axis) => axis.position === 1)).toBe(true);
@@ -518,7 +518,7 @@ describe('hierarchy algorithms', () => {
       ]),
     );
 
-    const partialCtx = createMockContext();
+    const partialCtx = createMockContext({ errors: browseHierarchyTool.errors });
     const partial = await browseHierarchyTool.handler(
       browseHierarchyTool.input.parse({ system: 'ICD10PCS', node: '0D' }),
       partialCtx,
@@ -626,7 +626,7 @@ describe('release provenance and current-code status', () => {
   it('returns a terminated code as a successful non-billable verdict, not unknown', async () => {
     const out = await checkCodeTool.handler(
       checkCodeTool.input.parse({ code: 'C5271', system: 'HCPCS' }),
-      createMockContext(),
+      createMockContext({ errors: checkCodeTool.errors }),
     );
     expect(out).toMatchObject({
       system: 'HCPCS',
