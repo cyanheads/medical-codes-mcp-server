@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.8](changelog/0.2.x/0.2.8.md) — 2026-08-25
+
+Adopts @cyanheads/mcp-ts-core 0.12.3 and the MCP SDK v2 line: tool inputs are strict, so an argument key a tool does not declare is rejected by name instead of dropped, and every HTTP endpoint serves protocol revision 2026-07-28 alongside the 2025 era.
+
 ## [0.2.7](changelog/0.2.x/0.2.7.md) — 2026-08-09
 
 medcode_get_code, medcode_check_code, and medcode_map_codes carry an optional alsoInSystems disclosure when a resolved code also exists in another bundled system; not-found reasons now name membership, not shape, as the arbiter; a test-fixture race across parallel Vitest workers is fixed.

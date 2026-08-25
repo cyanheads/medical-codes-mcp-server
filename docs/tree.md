@@ -1,10 +1,9 @@
 # medical-codes-mcp-server - Directory Structure
 
-Generated on: 2026-08-09 11:48:53
+Generated on: 2026-08-25 07:10:06
 
 ```text
 medical-codes-mcp-server/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
@@ -15,9 +14,10 @@ medical-codes-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
-├── .sources/
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
@@ -25,7 +25,6 @@ medical-codes-mcp-server/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
 │   └── template.md
-├── data/
 ├── docs/
 │   └── design.md
 ├── scripts/
@@ -182,7 +181,9 @@ medical-codes-mcp-server/
 │   └── tools/
 │       ├── correctness-critical.test.ts
 │       ├── format-rendering.test.ts
-│       └── medcode-tools.test.ts
+│       ├── hierarchy-traversal.test.ts
+│       ├── medcode-tools.test.ts
+│       └── strict-inputs.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes
