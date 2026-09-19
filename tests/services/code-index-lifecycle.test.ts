@@ -72,12 +72,18 @@ describe('CodeIndexService shutdown', () => {
     );
 
     await initCodeIndexService();
-    expect(getCodeIndexService().listSystems().length).toBeGreaterThan(0);
+    const service = getCodeIndexService();
+    expect(service.listSystems().length).toBeGreaterThan(0);
 
     closeCodeIndexService();
 
-    // The handle is gone, so the accessor must refuse rather than hand back a
-    // service whose every query would fail against a closed database.
+    // Asserted on the reference captured before the close, because that is the
+    // only way to tell a released driver handle from a dropped one: a query
+    // through it reaches a closed database and throws. Checking the accessor
+    // alone would stay green against a close() that did nothing.
+    expect(() => service.listSystems()).toThrow();
+    // And the accessor refuses rather than hand back a service whose every
+    // query would now fail.
     expect(() => getCodeIndexService()).toThrow(/not initialized/i);
   });
 
