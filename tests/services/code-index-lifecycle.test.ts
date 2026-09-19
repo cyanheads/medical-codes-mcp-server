@@ -1,7 +1,8 @@
 /**
- * @fileoverview Startup contract of the code-index service: the accessor guard
- * before `setup()` runs, the fail-fast on a missing bundle, and the default
- * bundled path when no override is set. (The Node/`better-sqlite3` driver arm is
+ * @fileoverview Startup and shutdown contract of the code-index service: the
+ * accessor guard before `setup()` runs, the fail-fast on a missing bundle, the
+ * default bundled path when no override is set, and the `teardown()` close that
+ * releases the SQLite file handle. (The Node/`better-sqlite3` driver arm is
  * not exercised here — the Vitest workers run under Bun, where loading that
  * native addon aborts the process.)
  *
@@ -59,5 +60,68 @@ describe('CodeIndexService lifecycle', () => {
     const svc = await CodeIndexService.open();
     expect(svc.dbPath).toMatch(/data\/medical-codes\.db$/);
     expect(svc.listSystems().map((s) => s.system)).toContain('ICD10CM');
+  });
+});
+
+describe('CodeIndexService shutdown', () => {
+  it('releases the handle and clears the accessor', async () => {
+    vi.resetModules();
+    delete process.env.MEDCODE_DB_PATH;
+    const { closeCodeIndexService, getCodeIndexService, initCodeIndexService } = await import(
+      '@/services/code-index/code-index-service.js'
+    );
+
+    await initCodeIndexService();
+    expect(getCodeIndexService().listSystems().length).toBeGreaterThan(0);
+
+    closeCodeIndexService();
+
+    // The handle is gone, so the accessor must refuse rather than hand back a
+    // service whose every query would fail against a closed database.
+    expect(() => getCodeIndexService()).toThrow(/not initialized/i);
+  });
+
+  it('is a no-op when setup() never opened the index', async () => {
+    vi.resetModules();
+    const { closeCodeIndexService, getCodeIndexService } = await import(
+      '@/services/code-index/code-index-service.js'
+    );
+
+    // The hook runs on every shutdown path, including one that follows a
+    // startup failure before the index was opened.
+    expect(() => closeCodeIndexService()).not.toThrow();
+    expect(() => getCodeIndexService()).toThrow(/not initialized/i);
+  });
+
+  it('is idempotent across repeated shutdowns', async () => {
+    vi.resetModules();
+    delete process.env.MEDCODE_DB_PATH;
+    const { closeCodeIndexService, initCodeIndexService } = await import(
+      '@/services/code-index/code-index-service.js'
+    );
+
+    await initCodeIndexService();
+    closeCodeIndexService();
+    // A second close must not reach the already-closed driver handle.
+    expect(() => closeCodeIndexService()).not.toThrow();
+  });
+
+  it('reopens cleanly after a close', async () => {
+    vi.resetModules();
+    delete process.env.MEDCODE_DB_PATH;
+    const { closeCodeIndexService, getCodeIndexService, initCodeIndexService } = await import(
+      '@/services/code-index/code-index-service.js'
+    );
+
+    await initCodeIndexService();
+    closeCodeIndexService();
+    await initCodeIndexService();
+
+    expect(
+      getCodeIndexService()
+        .listSystems()
+        .map((s) => s.system),
+    ).toContain('ICD10CM');
+    closeCodeIndexService();
   });
 });

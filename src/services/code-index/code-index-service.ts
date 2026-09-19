@@ -230,6 +230,22 @@ export class CodeIndexService {
     return new CodeIndexService(db, dbPath);
   }
 
+  /**
+   * Release the SQLite file handle. Called from `createApp({ teardown })` — the
+   * driver holds the bundled DB open for the process lifetime, and a shutdown
+   * that exits explicitly cuts the handle rather than closing it.
+   */
+  close(): void {
+    this.db.close();
+    logger.info(
+      'Code index closed',
+      requestContextService.createRequestContext({
+        operation: 'CodeIndexClose',
+        additionalContext: { dbPath: this.dbPath },
+      }),
+    );
+  }
+
   /** Map a raw `codes` row (snake_case, 0/1 ints) to a typed CodeRow. */
   private static toCodeRow(raw: Record<string, unknown>): CodeRow {
     return {
@@ -1147,6 +1163,16 @@ let _service: CodeIndexService | undefined;
 /** Open the bundled index and cache the handle. Called once from `setup()`. */
 export async function initCodeIndexService(): Promise<void> {
   _service = await CodeIndexService.open();
+}
+
+/**
+ * Close the cached handle and clear it. Called once from `teardown()`; a
+ * shutdown that never opened the index is a no-op, so it is safe on the
+ * startup-failure path too.
+ */
+export function closeCodeIndexService(): void {
+  _service?.close();
+  _service = undefined;
 }
 
 /** Return the initialized service, throwing if `setup()` hasn't run. */

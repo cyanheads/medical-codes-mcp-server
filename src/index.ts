@@ -14,11 +14,18 @@ import { getCodeTool } from './mcp-server/tools/definitions/get-code.tool.js';
 import { listSystemsTool } from './mcp-server/tools/definitions/list-systems.tool.js';
 import { mapCodesTool } from './mcp-server/tools/definitions/map-codes.tool.js';
 import { searchCodesTool } from './mcp-server/tools/definitions/search-codes.tool.js';
-import { initCodeIndexService } from './services/code-index/code-index-service.js';
+import {
+  closeCodeIndexService,
+  initCodeIndexService,
+} from './services/code-index/code-index-service.js';
 
 await createApp({
   name: 'medical-codes-mcp-server',
   title: 'medical-codes-mcp-server',
+  // No handler calls ctx.requestInput — every tool answers from the bundled
+  // index in one round — so there is no session to keep and nothing degrades
+  // under stateless. MCP_SESSION_MODE still overrides this for a deployment.
+  sessionMode: 'stateless',
   tools: [
     getCodeTool,
     searchCodesTool,
@@ -54,5 +61,8 @@ await createApp({
   },
   async setup() {
     await initCodeIndexService();
+  },
+  teardown() {
+    closeCodeIndexService();
   },
 });
