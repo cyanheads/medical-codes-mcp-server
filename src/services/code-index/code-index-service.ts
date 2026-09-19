@@ -52,8 +52,9 @@ interface BetterDb {
 
 /**
  * Open the bundled DB read-only with whichever driver the runtime provides, and
- * normalize it to {@link SqliteDb}. Bun uses the built-in `bun:sqlite`; Node and
- * the Vitest worker (which runs as Node) use the `better-sqlite3` optional dep.
+ * normalize it to {@link SqliteDb}. Bun uses the built-in `bun:sqlite`; Node uses
+ * the `better-sqlite3` optional dep. The Vitest workers run under Bun, so the
+ * test suite covers the `bun:sqlite` arm only.
  * Both are loaded via variable-specifier dynamic import so the project typechecks
  * without `bun-types` and builds without `better-sqlite3` resolved at compile time.
  */
