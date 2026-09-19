@@ -123,3 +123,46 @@ describe('medcode_* input strictness', () => {
     expect(message).toContain('maxResults');
   });
 });
+
+/**
+ * The one carve-out in the strict root. Clients attach their own bookkeeping to
+ * a tool call, and a caller cannot drop what its host adds, so a strict schema
+ * that rejected those keys would fail calls whose arguments were correct. The
+ * carve-out is a fixed list plus an underscore heuristic — not a general
+ * loosening — so the tests below pin both halves: what rides through, and that
+ * an ordinary undeclared key alongside it still fails by name.
+ */
+describe('client bookkeeping keys', () => {
+  /** The named list, plus one key the underscore heuristic has to catch. */
+  const BOOKKEEPING = {
+    _meta: { progressToken: 'p-1' },
+    tool_call_description: 'Check whether E11.9 is billable',
+    toolCallId: 'call_01',
+    _clientTrace: 'trace-1',
+  };
+
+  it('ride through the strict root instead of being rejected by name', async () => {
+    const result = await callWithRawArgs(checkCodeTool, { code: 'E11.9', ...BOOKKEEPING });
+
+    expect(result.isError).toBeFalsy();
+    // The call answered normally — the keys were dropped before the parse, not
+    // carried into the handler as arguments.
+    expect(result.structuredContent).toMatchObject({ code: 'E11.9', system: 'ICD10CM' });
+  });
+
+  it('do not license an ordinary undeclared key sent alongside them', async () => {
+    const result = await callWithRawArgs(checkCodeTool, {
+      code: 'E11.9',
+      ...BOOKKEEPING,
+      sytem: 'ICD10CM',
+    });
+
+    expect(result.isError).toBe(true);
+    const envelope = result.structuredContent as { error: { code: number; message: string } };
+    expect(envelope.error.code).toBe(-32602);
+    expect(envelope.error.message).toContain('sytem');
+    // Only the misspelling is named — a dropped bookkeeping key is not an error
+    // to report back.
+    expect(envelope.error.message).not.toContain('toolCallId');
+  });
+});
