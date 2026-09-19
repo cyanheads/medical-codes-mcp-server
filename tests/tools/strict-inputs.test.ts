@@ -82,10 +82,25 @@ describe('medcode_* input strictness', () => {
         expect(result.isError).toBe(true);
         // The key is named, not merely counted — a caller that misspelled one
         // argument has to be able to tell which one from the failure alone.
+        // An argument rejection is InvalidParams (-32602), not ValidationError:
+        // the call never reaches the handler, so nothing this server validated
+        // failed. The envelope is asserted by containment, not byte-exactly —
+        // the framework appends the recovery hint and the reason trailer to the
+        // rendered text, and both grow as it refines the wording.
         expect(result.structuredContent).toMatchObject({
-          error: { message: expect.stringContaining(badKey) },
+          error: {
+            code: -32602,
+            message: expect.stringContaining(badKey),
+            data: {
+              reason: 'invalid_arguments',
+              recovery: { hint: expect.stringContaining(badKey) },
+            },
+          },
         });
-        expect(textOf(result.content)).toContain(badKey);
+        const text = textOf(result.content);
+        expect(text).toContain(badKey);
+        expect(text).toContain('Recovery:');
+        expect(text).toContain('(reason invalid_arguments)');
       });
 
       it('accepts the same call once the undeclared key is dropped', async () => {
