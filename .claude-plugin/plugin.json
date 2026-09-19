@@ -1,13 +1,29 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "medical-codes-mcp-server",
   "version": "0.2.8",
   "description": "Decode, search, validate, and crosswalk US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm — over a bundled offline index.",
   "author": {
-    "name": "cyanheads"
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
   },
   "homepage": "https://github.com/cyanheads/medical-codes-mcp-server#readme",
   "repository": "https://github.com/cyanheads/medical-codes-mcp-server",
   "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "icd-10-cm",
+    "icd-10-pcs",
+    "hcpcs",
+    "rxnorm",
+    "ndc",
+    "medical-codes",
+    "medical-coding",
+    "healthcare"
+  ],
   "mcpServers": {
     "medical-codes-mcp-server": {
       "command": "npx",

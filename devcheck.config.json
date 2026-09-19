@@ -16,6 +16,7 @@
   "outdated": {
     "allowlist": []
   },
+  "lint": {},
   "packaging": {
     "pluginManifests": true
   }
