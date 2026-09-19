@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.9](changelog/0.2.x/0.2.9.md) — 2026-09-19
+
+Adopts @cyanheads/mcp-ts-core 0.13.6: argument rejections carry an InvalidParams envelope with a synthesized recovery hint, client bookkeeping keys and case-varied parameter spellings no longer trip strict inputs, and the server declares a stateless session with a teardown hook that closes its SQLite handle.
+
 ## [0.2.8](changelog/0.2.x/0.2.8.md) — 2026-08-25
 
 Adopts @cyanheads/mcp-ts-core 0.12.3 and the MCP SDK v2 line: tool inputs are strict, so an argument key a tool does not declare is rejected by name instead of dropped, and every HTTP endpoint serves protocol revision 2026-07-28 alongside the 2025 era.

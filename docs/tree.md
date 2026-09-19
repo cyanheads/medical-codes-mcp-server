@@ -1,6 +1,6 @@
 # medical-codes-mcp-server - Directory Structure
 
-Generated on: 2026-08-25 07:10:06
+Generated on: 2026-09-19 17:03:40
 
 ```text
 medical-codes-mcp-server/
@@ -14,6 +14,8 @@ medical-codes-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── workflows/
+│   │   └── codeql.yml
 │   ├── CODE_OF_CONDUCT.md
 │   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
@@ -27,29 +29,7 @@ medical-codes-mcp-server/
 │   └── template.md
 ├── docs/
 │   └── design.md
-├── scripts/
-│   ├── ingest/
-│   │   ├── fetch-rxnav.ts
-│   │   └── parsers.ts
-│   ├── _db-writer.ts
-│   ├── build-changelog.ts
-│   ├── build-fixture-db.ts
-│   ├── build-index.ts
-│   ├── build.ts
-│   ├── check-dependency-specifiers.ts
-│   ├── check-docs-sync.ts
-│   ├── check-framework-antipatterns.ts
-│   ├── check-skill-versions.ts
-│   ├── check-skills-sync.ts
-│   ├── clean-mcpb.ts
-│   ├── clean.ts
-│   ├── devcheck.ts
-│   ├── lint-mcp.ts
-│   ├── lint-packaging.ts
-│   ├── list-skills.ts
-│   ├── release-github.ts
-│   └── tree.ts
-├── skills/
+├── framework-skills/
 │   ├── add-app-tool/
 │   │   └── SKILL.md
 │   ├── add-prompt/
@@ -120,6 +100,8 @@ medical-codes-mcp-server/
 │   │   └── SKILL.md
 │   ├── release-and-publish/
 │   │   └── SKILL.md
+│   ├── release-pr-review/
+│   │   └── SKILL.md
 │   ├── report-issue-framework/
 │   │   └── SKILL.md
 │   ├── report-issue-local/
@@ -134,6 +116,28 @@ medical-codes-mcp-server/
 │   │   └── SKILL.md
 │   └── tool-defs-analysis/
 │       └── SKILL.md
+├── scripts/
+│   ├── ingest/
+│   │   ├── fetch-rxnav.ts
+│   │   └── parsers.ts
+│   ├── _db-writer.ts
+│   ├── build-changelog.ts
+│   ├── build-fixture-db.ts
+│   ├── build-index.ts
+│   ├── build.ts
+│   ├── check-dependency-specifiers.ts
+│   ├── check-docs-sync.ts
+│   ├── check-framework-antipatterns.ts
+│   ├── check-skill-versions.ts
+│   ├── check-skills-sync.ts
+│   ├── clean-mcpb.ts
+│   ├── clean.ts
+│   ├── devcheck.ts
+│   ├── lint-mcp.ts
+│   ├── lint-packaging.ts
+│   ├── list-skills.ts
+│   ├── release-github.ts
+│   └── tree.ts
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -161,6 +165,8 @@ medical-codes-mcp-server/
 │   │       └── types.ts
 │   └── index.ts
 ├── tests/
+│   ├── app/
+│   │   └── server-wiring.test.ts
 │   ├── fixtures/
 │   ├── fuzz/
 │   │   └── code-inputs.fuzz.test.ts
@@ -180,8 +186,10 @@ medical-codes-mcp-server/
 │   │   └── tool-surface.smoke.test.ts
 │   └── tools/
 │       ├── correctness-critical.test.ts
+│       ├── error-envelope.test.ts
 │       ├── format-rendering.test.ts
 │       ├── hierarchy-traversal.test.ts
+│       ├── input-aliases.test.ts
 │       ├── medcode-tools.test.ts
 │       └── strict-inputs.test.ts
 ├── .dockerignore
