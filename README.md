@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.8-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/medical-codes-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/medical-codes-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.8-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/medical-codes-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/medical-codes-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -34,32 +34,11 @@
 > [!NOTE]
 > **Informational, not clinical or coding advice.** This server returns official code descriptions and billable/validity flags from public-domain federal releases to help you decode and look up codes. It is **not** medical advice, and a `valid_billable` result is **not** a coding or reimbursement decision. Always verify codes against the official source releases (CMS, CDC/NCHS, NLM) and your payer's rules before submitting a claim. The bundled data is only as current as the release baked into the build — call `medcode_list_systems` to see exactly which releases are active.
 
-## How it works
+## Overview
 
-The code data is **bundled inside the package** — a single SQLite + FTS5 database (`data/medical-codes.db`) built at package-build time from the canonical federal source files and shipped in the npm tarball and Docker image. The server opens it **read-only** at startup and answers every tool call from disk.
+US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm — from a bundled offline SQLite index built from public-domain CDC/NCHS, CMS, and NLM federal releases. Decode, search, validate billability, and crosswalk codes and drugs (including NDC lookups) from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
-That means the server is **offline, keyless, and deterministic**: no runtime network calls, no API key, no rate limit, single-tenant. The same inputs against the same bundled build always return the same output.
-
-### Bundled code systems
-
-Only freely-redistributable, public-domain US federal code sets are bundled:
-
-| System | Source | Covers |
-|:---|:---|:---|
-| **ICD-10-CM** | [CDC/NCHS](https://www.cdc.gov/nchs/icd/icd-10-cm/index.html) — US federal, public domain | Diagnoses (billable leaf codes + non-billable category headers) |
-| **ICD-10-PCS** | [CMS](https://www.cms.gov/medicare/coding-billing/icd-10-codes) — US federal, public domain | Inpatient procedures (axis-based 7-character codes) |
-| **HCPCS Level II** | [CMS](https://www.cms.gov/medicare/coding-billing/healthcare-common-procedure-system) — US federal, public domain | Supplies, drugs, and non-physician services |
-| **RxNorm** | [NLM RxNav](https://rxnav.nlm.nih.gov/) — public domain | Drugs: name ↔ RXCUI, NDC ↔ RXCUI crosswalk, ingredients, and brands |
-
-**RxNorm** bundles the current RxNorm **normalized** drug vocabulary — ingredients, brand names, clinical & branded drugs, and packs, with their NDC and ingredient/brand crosswalks. It is sourced at build time from the keyless [RxNav REST API](https://rxnav.nlm.nih.gov/), which serves the public-domain normalized layer — never the UMLS-licensed source vocabularies, so it stays freely redistributable in an offline package. (The full UMLS RxNorm release, which pulls in those licensed sources, is intentionally excluded.) This powers `medcode_map_codes`' drug directions and direct NDC → drug decode in `medcode_get_code`.
-
-CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally absent — they are not freely redistributable, so they cannot ship in an offline package.
-
-**US scope.** ICD-10-CM and ICD-10-PCS are the US clinical modifications, not the WHO ICD-10/ICD-11 base or another country's national modification.
-
-## Tools
-
-Six tools organized goal-first — one per user action, with a `system` discriminator instead of a per-system tool for each of the bundled code sets. All are read-only.
+### Tools
 
 | Tool | Description |
 |:---|:---|
@@ -70,80 +49,95 @@ Six tools organized goal-first — one per user action, with a `system` discrimi
 | `medcode_browse_hierarchy` | Walk a system's hierarchy for discovery without a search term. |
 | `medcode_list_systems` | List bundled systems with release identifiers, effective dates, and code counts (provenance). |
 
-### `medcode_get_code`
+## How it works
 
-Decode one or more codes seen in a claim, EHR field, or another health server's output. The 80% entry point.
+Only freely-redistributable, public-domain US federal code sets are bundled, baked into a single SQLite + FTS5 database at package-build time and opened read-only at startup.
+
+### Bundled code systems
+
+| System | Source | Covers |
+|:---|:---|:---|
+| **ICD-10-CM** | [CDC/NCHS](https://www.cdc.gov/nchs/icd/icd-10-cm/index.html) — US federal, public domain | Diagnoses (billable leaf codes + non-billable category headers) |
+| **ICD-10-PCS** | [CMS](https://www.cms.gov/medicare/coding-billing/icd-10-codes) — US federal, public domain | Inpatient procedures (axis-based 7-character codes) |
+| **HCPCS Level II** | [CMS](https://www.cms.gov/medicare/coding-billing/healthcare-common-procedure-system) — US federal, public domain | Supplies, drugs, and non-physician services |
+| **RxNorm** | [NLM RxNav](https://rxnav.nlm.nih.gov/) — public domain | Drugs: name ↔ RXCUI, NDC ↔ RXCUI crosswalk, ingredients, and brands |
+
+**RxNorm** bundles the current normalized drug vocabulary — ingredients, brand names, clinical & branded drugs, and packs, with their NDC and ingredient/brand crosswalks — sourced at build time from the keyless [RxNav REST API](https://rxnav.nlm.nih.gov/), which serves the public-domain normalized layer only. The full UMLS-licensed RxNorm release is intentionally excluded, so the package stays freely redistributable.
+
+CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally absent — not freely redistributable, so they cannot ship in an offline package.
+
+**US scope.** ICD-10-CM and ICD-10-PCS are the US clinical modifications, not the WHO ICD-10/ICD-11 base or another country's national modification.
+
+## Capability reference
+
+### `medcode_get_code` <sub>tool</sub>
 
 - Accepts 1–50 codes; mixed systems are fine — each code's system is detected independently from its shape
-- Decodes a **National Drug Code (NDC)** directly to its RxNorm product — hyphenated in an FDA segment configuration (4-4-2 `0777-3105-02`, 5-3-2, 5-4-1, or the 11-digit 5-4-2) or as bare 10/11 digits — offline via the bundled NDC↔RxNorm map, tagged `source: "NDC"`
-- Partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason, so one bad code never fails the batch
-- An explicit `system` overrides auto-detection when a value is genuinely ambiguous (an ambiguous code lists its `candidateSystems`)
-- `includeHierarchy` attaches each code's parent and immediate children
-- The resolved `system` is echoed on every result for chaining into `medcode_map_codes` or a billability check
+- Decodes a National Drug Code (NDC) directly to its RxNorm product — hyphenated FDA segment configurations (4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2) or bare 10/11 digits — offline via the bundled NDC↔RxNorm map, tagged `source: "NDC"`
+- Partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason
+- An explicit `system` overrides auto-detection when a value is genuinely ambiguous (an ambiguous code lists its `candidateSystems`); `includeHierarchy` attaches each code's parent and immediate children
+- `alsoInSystems` names other bundled systems holding the same code string — it is a different code in each
+- Errors: `no_codes_found` when none of the requested codes resolve in any bundled system
 
 ---
 
-### `medcode_search_codes`
+### `medcode_search_codes` <sub>tool</sub>
 
-Find codes whose official descriptions match a described concept — the reverse of `medcode_get_code`.
-
-- Every search term must appear (prefix-matched), so `"diabetic neuropathy"` returns codes mentioning both
+- Every search term must appear — matched first as a token prefix, then as a substring, so inflected and compound forms are also found
 - Filter by `system`, `billableOnly` (exclude headers/categories), and `chapter`
-- Ranked by full-text relevance; results echo the resolved system per row
-- Discloses truncation when the result hits the cap, and returns an explicit notice (with the parsed query) when nothing matched
+- Ranked by full-text relevance; results echo the resolved `system` per row
+- Paginates via `cursor`/`limit` (default `MEDCODE_MAX_RESULTS`, ceiling 200); discloses `truncated`/`nextCursor`, and returns a notice with the parsed query when nothing matches
 
 ---
 
-### `medcode_check_code`
+### `medcode_check_code` <sub>tool</sub>
 
-Validate whether a code is safe to submit, before a claim goes out.
-
-- Discriminated status: `valid_billable`, `valid_not_billable`, `valid_header`, or `terminated`
-- A `whyNot` string explains the non-billable and terminated cases (e.g. "valid ICD-10-CM category but not billable — submit a more specific child code")
-- Validity vs. existence is split: a non-billable or terminated code is a **successful** result with a `whyNot`, not an error — only a code absent from every bundled system raises `unknown_code`
-
----
-
-### `medcode_map_codes`
-
-Crosswalk a code across systems and within a hierarchy.
-
-- Hierarchy directions: `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full path (ICD-10-CM / HCPCS; ICD-10-PCS codes have no prefix parent)
-- Drug directions (RxNorm): `name_to_rxcui` (drug name → RXCUI), `ndc_to_rxcui` / `rxcui_to_ndc` (NDC ↔ RXCUI; NDCs accepted hyphenated in an FDA segment configuration — 4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2 — or as bare 10/11 digits), `rxcui_to_ingredients` / `rxcui_to_brands` (RXCUI → ingredient/brand RXCUIs, each with the target's RxNorm name)
-- Every result carries `source` provenance (which system or edge answered) so a chained call uses the right identifier
-- `children`, `name_to_rxcui`, and `rxcui_to_ndc` can return large sets and paginate — a product can carry thousands of package NDCs; pass a response's `nextCursor` back as `cursor` (with an optional `limit`) to walk the full set
+- Discriminated `status`: `valid_billable`, `valid_not_billable`, `valid_header`, or `terminated`
+- `whyNot` explains non-billable/terminated cases — a non-billable or terminated code is a successful result, not an error
+- `alsoInSystems` names other bundled systems holding the same code string, since the verdict applies only to the resolved system
+- Errors: `unknown_code` (absent from every bundled system) and `ambiguous_system` (present in multiple systems, no `system` given)
 
 ---
 
-### `medcode_browse_hierarchy`
+### `medcode_map_codes` <sub>tool</sub>
 
-Orient in an unfamiliar system or enumerate a category's specific codes, without a search term.
+- Hierarchy directions `parents`/`children` walk one level per call (depth-1); ICD-10-PCS codes have no prefix parent
+- Drug directions (RxNorm): `name_to_rxcui`, `ndc_to_rxcui`/`rxcui_to_ndc` (NDC accepted hyphenated or as bare 10/11 digits), `rxcui_to_ingredients`/`rxcui_to_brands` (each hit carries `conceptType`: `IN`/`PIN`/`MIN`/`BN`)
+- `children`, `name_to_rxcui`, and `rxcui_to_ndc` paginate via `cursor`/`limit` — one RXCUI can carry thousands of package NDCs
+- Every hit carries `source` provenance so a chained call uses the right identifier; a resolvable source with no edge in the requested direction is a successful empty result with a notice, not an error
+- Errors: `no_mapping` (source doesn't resolve), `direction_unavailable` (RxNorm not bundled in this build), `ambiguous_system`
 
-- With no `node`: top-level entries (ICD-10-CM categories, HCPCS range buckets, or ICD-10-PCS first-axis values)
-- With a `node`: its immediate children
-- ICD-10-CM and HCPCS use a prefix hierarchy (a shorter code is the parent of a longer one); ICD-10-PCS is axis-based — only the top-level Section axis is browsable; positions 2–7 are context-dependent on the preceding axis path and aren't enumerable from a flat partial code
+---
+
+### `medcode_browse_hierarchy` <sub>tool</sub>
+
+- With no `node`: top-level entries (ICD-10-CM categories, HCPCS range buckets, ICD-10-PCS first-axis values); with a `node`: its immediate children
+- ICD-10-CM/HCPCS use a prefix hierarchy; ICD-10-PCS is axis-based and only the top-level Section axis is browsable — positions 2–7 are context-dependent and not enumerable from a flat partial code
+- Paginates via `cursor`/`limit` (default `MEDCODE_MAX_RESULTS`, ceiling 200)
+- Errors: `unknown_node` when the node doesn't exist (or, for ICD-10-PCS, uses an out-of-alphabet character or begins no bundled code)
+
+---
+
+### `medcode_list_systems` <sub>tool</sub>
+
+- No input; returns one entry per bundled system with `releaseId`, `effectiveStart`/`effectiveEnd`, `codeCount`, `sourceUrl`, and `builtAt`
+- Confirms exactly which ICD-10-CM/PCS fiscal year, HCPCS release, and RxNorm snapshot are baked into the running build
 
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
-- Declarative tool definitions — single file per tool, framework handles registration and validation
-- Unified error handling — handlers throw, framework catches, classifies, and formats
-- Typed per-tool error contracts — capable clients preview failure modes from `tools/list`
-- Structured logging with optional OpenTelemetry tracing
-- STDIO and Streamable HTTP transports
-
-Domain-specific:
+ICD-10 / HCPCS / RxNorm-specific:
 
 - Bundled SQLite + FTS5 index — offline, keyless, deterministic; no runtime network I/O, no rate limit
-- Code-shape auto-detection routes a code to its system; an explicit `system` disambiguates collisions
+- Code-shape auto-detection routes a code to its system automatically; an explicit `system` disambiguates collisions
 - Real billable/validity signal from the source releases — the order-file billable flag drives `medcode_check_code`, not a heuristic
 
 Agent-friendly output:
 
-- Provenance on every response — the resolved `system` is echoed for chaining, and `medcode_list_systems` reports exactly which release is baked into the running build
-- Graceful partial failure — `medcode_get_code` returns per-code `found` / `notFound` rows instead of failing the batch
-- Discriminated output contracts — `medcode_check_code`'s typed status and `medcode_map_codes`' `source` let callers branch on data, not string parsing
+- Provenance on every response — the resolved `system` is echoed for chaining, `alsoInSystems` flags a code string that means something different in another bundled system, and `medcode_list_systems` reports exactly which release is baked into the build
+- Graceful partial failure — `medcode_get_code` returns per-code `found`/`notFound` rows instead of failing the batch
+- Discriminated output contracts — `medcode_check_code`'s typed `status` and `medcode_map_codes`' `source` let callers branch on data, not string parsing
 
 ## Getting started
 
@@ -164,7 +158,7 @@ A public instance is available at `https://medical-codes.caseyjhand.com/mcp` —
 }
 ```
 
-### Self-hosted
+### Self-Hosted / Local
 
 Add the following to your MCP client configuration file.
 
@@ -231,7 +225,7 @@ Refer to "your MCP client configuration file" generically — different clients 
 
 ### Prerequisites
 
-- [Bun v1.3](https://bun.sh/) or higher (or Node.js v24+ — the server falls back to the `better-sqlite3` optional dependency when not run under Bun).
+- [Bun v1.4](https://bun.sh/) or higher (or Node.js v24+ — the server falls back to the `better-sqlite3` optional dependency when not run under Bun).
 - No API key, account, or network access required.
 
 ### Installation
@@ -272,7 +266,7 @@ The server is offline and keyless — there are no required variables. Two serve
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |
 | `MCP_HTTP_ENDPOINT_PATH` | Endpoint path where the MCP server is mounted. | `/mcp` |
-| `MCP_SESSION_MODE` | HTTP session handling: `stateless`, `stateful`, or `auto` (which resolves to `stateful`). The published Docker image runs `stateless`. | `auto` |
+| `MCP_SESSION_MODE` | HTTP session handling: `stateless`, `stateful`, or `auto` (which resolves to `stateful`). `src/index.ts` declares `stateless` — no tool asks the caller for input mid-call — and this variable overrides that declaration. | `stateless` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
@@ -345,7 +339,7 @@ See [`CLAUDE.md`/`AGENTS.md`](./CLAUDE.md) for development guidelines and archit
 
 ## Contributing
 
-Issues and pull requests are welcome. Run checks and tests before submitting:
+Issues are welcome. Run checks and tests before submitting:
 
 ```sh
 bun run devcheck
