@@ -8,7 +8,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getCodeIndexService } from '@/services/code-index/code-index-service.js';
-import { SYSTEM_IDS } from '@/services/code-index/types.js';
+import { SYSTEM_IDS, SYSTEM_LABELS, SYSTEM_TRAITS } from '@/services/code-index/types.js';
 import { encodeNextCursor, resolvePage } from './_pagination.js';
 import { renderCodeLine } from './_render.js';
 import { nonBlankString } from './_schema.js';
@@ -17,9 +17,9 @@ const SOURCE_URL =
   'https://github.com/cyanheads/medical-codes-mcp-server/blob/main/src/mcp-server/tools/definitions/search-codes.tool.ts';
 
 export const searchCodesTool = tool('medcode_search_codes', {
-  title: 'medical-codes-mcp-server',
+  title: 'Search Medical Codes',
   description:
-    'Find US medical codes whose official descriptions match a described concept, via full-text search over the bundled index. Every search term must appear — matched first as a token prefix, then as a substring so inflected and compound forms are also found (a "neuropathy" search surfaces "mononeuropathy"/"polyneuropathy" siblings too, not only a standalone "neuropathy" token). Filter by `system` (ICD10CM/ICD10PCS/HCPCS/RXNORM), `billableOnly` to exclude headers/categories, and `chapter`. Use when you have a clinical description and need the code — the reverse of medcode_get_code. Results echo the resolved system per row for chaining, rank exact prefix matches ahead of substring-only matches with a deterministic tie-break, and disclose truncation with a `nextCursor`: pass it back as `cursor` to page through the full ranked set.',
+    'Find US medical codes whose official descriptions match a described concept, via full-text search over the bundled index. Every search term must appear — matched first as a token prefix, then as a substring so inflected and compound forms are also found (a "neuropathy" search surfaces "mononeuropathy"/"polyneuropathy" siblings too, not only a standalone "neuropathy" token). An RxNorm concept matches on its drug name alone, never its term type (SBD, IN, …) — narrow by type with `chapter`. Filter by `system` (ICD10CM/ICD10PCS/HCPCS/RXNORM), `billableOnly` to exclude headers/categories, and `chapter`. Use when you have a clinical description and need the code — the reverse of medcode_get_code. Results echo the resolved system per row for chaining, rank exact prefix matches ahead of substring-only matches with a deterministic tie-break, and disclose truncation with a `nextCursor`: pass it back as `cursor` to page through the full ranked set.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -34,7 +34,9 @@ export const searchCodesTool = tool('medcode_search_codes', {
     billableOnly: z
       .boolean()
       .default(false)
-      .describe('When true, return only billable leaf codes (exclude headers/categories).'),
+      .describe(
+        'When true, return only billable leaf codes (exclude headers/categories). RxNorm has no billing concept, so this excludes every RxNorm concept.',
+      ),
     chapter: z
       .string()
       .optional()
@@ -74,10 +76,22 @@ export const searchCodesTool = tool('medcode_search_codes', {
             shortDescription: z
               .string()
               .nullable()
-              .describe('Official short description, or null when none is on record.'),
-            billable: z.boolean().describe('True when the code is a billable leaf.'),
+              .describe(
+                'Official short description, or null when none is on record. Always null for RxNorm, which publishes a single name.',
+              ),
+            billable: z
+              .boolean()
+              .nullable()
+              .describe(
+                'True when the code is a billable leaf. Null when the system has no billing concept (RxNorm).',
+              ),
             header: z.boolean().describe('True when the code is a non-billable category/header.'),
-            chapter: z.string().nullable().describe('Chapter/range bucket, or null.'),
+            chapter: z
+              .string()
+              .nullable()
+              .describe(
+                'Chapter/range bucket, or null. For RxNorm, the concept term type (IN, PIN, MIN, BN, SCD, SBD, GPCK, BPCK).',
+              ),
           })
           .describe('A code matching the search query.'),
       )
@@ -105,7 +119,9 @@ export const searchCodesTool = tool('medcode_search_codes', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance when nothing matched — echoes the query and suggests how to broaden.'),
+      .describe(
+        'Guidance when nothing matched — echoes the query and suggests how to broaden, or names `billableOnly` as the cause when the searched system has no billing concept.',
+      ),
   },
 
   enrichmentTrailer: {
@@ -149,9 +165,14 @@ export const searchCodesTool = tool('medcode_search_codes', {
     if (hasMore) ctx.enrich({ nextCursor: encodeNextCursor(page) });
 
     if (codes.length === 0) {
+      // billableOnly against a system with no billing concept empties the search by
+      // construction — broader terms cannot help, so name the filter as the cause.
+      const { system } = input;
       ctx.enrich.notice(
-        `No codes matched "${input.query.trim()}"${input.system ? ` in ${input.system}` : ''}. ` +
-          'Broaden the terms, drop the filters, or try clinical synonyms.',
+        input.billableOnly && system && !SYSTEM_TRAITS[system].billing
+          ? `${SYSTEM_LABELS[system]} has no billing concept, so \`billableOnly\` excludes every ${SYSTEM_LABELS[system]} concept. Drop \`billableOnly\` to search ${system}.`
+          : `No codes matched "${input.query.trim()}"${system ? ` in ${system}` : ''}. ` +
+              'Broaden the terms, drop the filters, or try clinical synonyms.',
       );
       ctx.log.info('Search returned no matches', { query: input.query });
       return { codes };

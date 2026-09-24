@@ -103,6 +103,24 @@ describe('NDC normalization', () => {
       ),
     );
     expect(err.data?.reason).toBe('no_codes_found');
+
+    // https://github.com/cyanheads/medical-codes-mcp-server/issues/35
+    // The crosswalk refuses the same spellings. `11-1112-22233` is the 2-4-5 split
+    // of the fixture key 11111222233: its digits alone spell a real package.
+    for (const malformed of ['904-5161-60', '11-1112-22233']) {
+      const mapped = await caught(() =>
+        mapCodesTool.handler(
+          mapCodesTool.input.parse({ from: malformed, direction: 'ndc_to_rxcui' }),
+          createMockContext({ errors: mapCodesTool.errors }),
+        ),
+      );
+      expect(mapped.data?.reason, malformed).toBe('no_mapping');
+    }
+    const wellFormed = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: '11111-2222-33', direction: 'ndc_to_rxcui' }),
+      createMockContext({ errors: mapCodesTool.errors }),
+    );
+    expect(wellFormed.hits.map((hit) => hit.value)).toEqual(['198440']);
   });
 
   it('resolves 10- and 11-digit forms to the same product and round-trips through RXCUI', async () => {
@@ -134,7 +152,7 @@ describe('NDC normalization', () => {
 });
 
 describe('billability verdicts', () => {
-  it('keeps billable, parent, non-billable, terminated, and absent outcomes distinct', async () => {
+  it('keeps billable, parent, non-billable, no-billing-concept, terminated, and absent outcomes distinct', async () => {
     const billable = await checkCodeTool.handler(
       checkCodeTool.input.parse({ code: 'E11.9' }),
       createMockContext({ errors: checkCodeTool.errors }),
@@ -152,12 +170,21 @@ describe('billability verdicts', () => {
     expect(parent).toMatchObject({ status: 'valid_header', billable: false });
     expect(parent.whyNot).toMatch(/more specific child code/i);
 
+    // A 3-character ICD-10-PCS table row is a real, non-billable code.
     const nonBillable = await checkCodeTool.handler(
-      checkCodeTool.input.parse({ code: '161' }),
+      checkCodeTool.input.parse({ code: 'B00', system: 'ICD10PCS' }),
       createMockContext({ errors: checkCodeTool.errors }),
     );
     expect(nonBillable).toMatchObject({ status: 'valid_not_billable', billable: false });
     expect(nonBillable.whyNot).toBeTruthy();
+
+    // https://github.com/cyanheads/medical-codes-mcp-server/issues/37 — RxNorm has
+    // no billing concept, so an RXCUI is valid with no billing verdict at all.
+    const noBillingConcept = await checkCodeTool.handler(
+      checkCodeTool.input.parse({ code: '161' }),
+      createMockContext({ errors: checkCodeTool.errors }),
+    );
+    expect(noBillingConcept).toMatchObject({ status: 'valid', billable: null, whyNot: null });
 
     const terminated = await checkCodeTool.handler(
       checkCodeTool.input.parse({ code: 'K0552' }),

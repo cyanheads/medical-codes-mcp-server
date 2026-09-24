@@ -116,6 +116,8 @@ describe('medcode_get_code format', () => {
   });
 
   it('renders a description-less, chapter-less code without emitting empty fields', () => {
+    // RxNorm has no billing concept, so its `billable` is null — rendered as n/a,
+    // never as the literal `null` and never as a "no" verdict (#37).
     const out = getCodeTool.output.parse({
       found: [
         {
@@ -123,7 +125,7 @@ describe('medcode_get_code format', () => {
           code: '161',
           description: null,
           shortDescription: null,
-          billable: false,
+          billable: null,
           header: false,
           chapter: null,
         },
@@ -133,7 +135,7 @@ describe('medcode_get_code format', () => {
     const text = textOf(getCodeTool.format!(out));
 
     expect(text).toContain('## 161 — RxNorm');
-    expect(text).toContain('billable: no, header: no');
+    expect(text).toContain('billable: n/a, header: no');
     expect(text).toContain('(no description)');
     expect(text).not.toContain('chapter');
     expect(text).not.toContain('undefined');

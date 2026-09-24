@@ -3,8 +3,10 @@
  * and is billable in the active release. Returns a discriminated status with a
  * why-not for non-billable or terminated codes. Validity vs. existence is split:
  * a non-billable or terminated code is a SUCCESS result with a whyNot (the
- * recovery detail a coder needs), not an error. Only a code absent from every
- * detected system is an `unknown_code` failure.
+ * recovery detail a coder needs), not an error. A current RxNorm concept is
+ * `valid` with `billable: null` — RxNorm has no billing concept. Only a code
+ * absent from every detected system is an `unknown_code` failure, and a National
+ * Drug Code that lands there recovers to the tools that decode it.
  * @module mcp-server/tools/definitions/check-code.tool
  */
 
@@ -18,10 +20,18 @@ import { nonBlankString } from './_schema.js';
 const SOURCE_URL =
   'https://github.com/cyanheads/medical-codes-mcp-server/blob/main/src/mcp-server/tools/definitions/check-code.tool.ts';
 
+/**
+ * Recovery for an `unknown_code` whose value is a National Drug Code. It replaces
+ * the contract's generic hint, which points at a description search — the wrong
+ * next step for a package identifier the other tools decode directly.
+ */
+const NDC_RECOVERY =
+  'Decode the NDC to its RxNorm product with medcode_get_code, or crosswalk it with medcode_map_codes (direction ndc_to_rxcui); the resulting RXCUI can be checked here.';
+
 export const checkCodeTool = tool('medcode_check_code', {
-  title: 'medical-codes-mcp-server',
+  title: 'Check Medical Code',
   description:
-    'Validate whether a US medical code exists, is current, and is billable in the active bundled release. Returns a discriminated status — valid_billable, valid_not_billable, valid_header, or terminated — with a `whyNot` explaining non-billable and terminated cases (e.g. "valid ICD-10-CM category but not billable — submit a more specific child code"). This is the detail a coder needs before submitting a claim. Auto-detects the system from the code\'s shape; pass an explicit `system` to disambiguate. A non-billable or terminated code is a successful result with a whyNot, not an error — only a code that exists in no bundled system raises unknown_code. A code string that also exists in another bundled system carries `alsoInSystems` naming it, since the verdict applies only to the system that answered.',
+    'Validate whether a US medical code exists, is current, and is billable in the active bundled release. Returns a discriminated status — valid_billable, valid_not_billable, valid_header, valid, or terminated — with a `whyNot` explaining non-billable and terminated cases (e.g. "valid ICD-10-CM category but not billable — submit a more specific child code"). This is the detail a coder needs before submitting a claim. RxNorm has no billing concept, so a current RxNorm concept is `valid` with `billable: null` and no billing verdict. Auto-detects the system from the code\'s shape; pass an explicit `system` to disambiguate. A non-billable or terminated code is a successful result with a whyNot, not an error — only a code absent from the named or detected system raises unknown_code, which names the other bundled system when one holds the code. A code string that also exists in another bundled system carries `alsoInSystems` naming it, since the verdict applies only to the system that answered.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -39,15 +49,22 @@ export const checkCodeTool = tool('medcode_check_code', {
     system: z.string().describe('The system the code was resolved in, echoed for chaining.'),
     code: z.string().describe('The code in display form (ICD-10-CM carries the dot).'),
     status: z
-      .enum(['valid_billable', 'valid_not_billable', 'valid_header', 'terminated'])
+      .enum(['valid_billable', 'valid_not_billable', 'valid_header', 'valid', 'terminated'])
       .describe(
-        'Validity status. valid_billable = submit as-is; valid_header/valid_not_billable = needs a more specific code; terminated = retired.',
+        'Validity status. valid_billable = submit as-is; valid_header/valid_not_billable = needs a more specific code; valid = exists and is current in a system with no billing concept (RxNorm), so there is no billing verdict; terminated = retired.',
       ),
-    billable: z.boolean().describe('True only when status is valid_billable.'),
+    billable: z
+      .boolean()
+      .nullable()
+      .describe(
+        'True only when status is valid_billable. Null when status is valid — the system has no billing concept.',
+      ),
     whyNot: z
       .string()
       .nullable()
-      .describe('Explanation for non-billable/terminated statuses, or null when valid_billable.'),
+      .describe(
+        'Explanation for non-billable/terminated statuses, or null when valid_billable or valid.',
+      ),
     alsoInSystems: z
       .array(z.string())
       .optional()
@@ -84,9 +101,11 @@ export const checkCodeTool = tool('medcode_check_code', {
 
     const r = outcome.result;
     if (r.status === 'unknown') {
-      throw ctx.fail('unknown_code', r.whyNot ?? `Unknown code "${input.code.trim()}".`, {
-        ...ctx.recoveryFor('unknown_code'),
-      });
+      throw ctx.fail(
+        'unknown_code',
+        r.whyNot ?? `Unknown code "${input.code.trim()}".`,
+        r.ndc ? { recovery: { hint: NDC_RECOVERY } } : { ...ctx.recoveryFor('unknown_code') },
+      );
     }
 
     ctx.log.info('Checked code', { code: r.code, system: r.system, status: r.status });
@@ -94,7 +113,7 @@ export const checkCodeTool = tool('medcode_check_code', {
       system: r.system,
       code: r.code,
       status: r.status,
-      billable: r.status === 'valid_billable',
+      billable: r.status === 'valid' ? null : r.status === 'valid_billable',
       whyNot: r.whyNot ?? null,
       ...(r.alsoIn?.length ? { alsoInSystems: r.alsoIn } : {}),
     };
@@ -106,12 +125,19 @@ export const checkCodeTool = tool('medcode_check_code', {
       valid_billable: '✅ Valid and billable',
       valid_not_billable: '⚠️ Valid but not billable',
       valid_header: '⚠️ Valid category/header — not billable',
+      valid: '✅ Valid and current',
       terminated: '⛔ Terminated',
     };
+    const billable =
+      result.billable === null
+        ? `n/a — ${label} has no billing concept`
+        : result.billable
+          ? 'Yes'
+          : 'No';
     const lines = [
       `## ${result.code} — ${label}`,
       `**Status:** ${verdict[result.status]}`,
-      `**Billable:** ${result.billable ? 'Yes' : 'No'}`,
+      `**Billable:** ${billable}`,
     ];
     if (result.whyNot) lines.push('', result.whyNot);
     // The verdict is system-specific, so a text-only client must see that another

@@ -89,6 +89,11 @@ describe('handler-thrown failures', () => {
       args: { system: 'ICD10CM', node: ABSENT },
       reason: 'unknown_node',
     },
+    {
+      tool: mapCodesTool,
+      args: { from: '11111-2222-33', direction: 'ndc_to_rxcui', limit: 1 },
+      reason: 'field_not_applicable',
+    },
   ];
 
   for (const { tool, args, reason } of CASES) {
@@ -112,6 +117,100 @@ describe('handler-thrown failures', () => {
     });
   }
 
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/38
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/39
+  it.each([
+    [{ from: '43239', direction: 'parents' }, 'medcode_search_codes'],
+    [{ from: 'ICD10CM', direction: 'children' }, 'medcode_browse_hierarchy'],
+    // https://github.com/cyanheads/medical-codes-mcp-server/issues/50
+    [{ from: '11-1112-22233', direction: 'ndc_to_rxcui' }, 'name_to_rxcui'],
+    [{ from: '99999-8888-77', direction: 'ndc_to_rxcui' }, 'name_to_rxcui'],
+  ])('replaces the declared no_mapping recovery for %j on both surfaces', async (args, names) => {
+    const declared = mapCodesTool.errors?.find((entry) => entry.reason === 'no_mapping');
+    const result = await callWithRawArgs(mapCodesTool, args);
+    const envelope = result.structuredContent as ErrorEnvelope;
+    expect(envelope.error.code).toBe(declared?.code);
+    expect(envelope.error.data?.reason).toBe('no_mapping');
+
+    const hint = envelope.error.data?.recovery?.hint ?? '';
+    expect(hint).toContain(names);
+    expect(hint).not.toBe(declared?.recovery);
+
+    const text = textOf(result.content);
+    expect(text).toContain(hint);
+    expect(text).not.toContain(declared?.recovery);
+    expect(text).toContain('(reason no_mapping)');
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/49
+  it.each([
+    [{ codes: ['161'], system: 'ICD10CM' }, 'ICD-10-CM', '"161" (RxNorm)'],
+    [{ codes: ['E11.9'], system: 'HCPCS' }, 'HCPCS Level II', '"E11.9" (ICD-10-CM)'],
+  ])(
+    'names the named system and the holder for %j on both surfaces',
+    async (args, named, holder) => {
+      const declared = getCodeTool.errors?.find((entry) => entry.reason === 'no_codes_found');
+      const result = await callWithRawArgs(getCodeTool, args);
+      const envelope = result.structuredContent as ErrorEnvelope;
+      expect(envelope.error.data?.reason).toBe('no_codes_found');
+      expect(envelope.error.message).toContain(
+        `resolved in ${named}, the \`system\` this call named`,
+      );
+      expect(envelope.error.message).toContain(holder);
+      expect(envelope.error.message).not.toContain('any bundled system');
+      expect(envelope.error.data?.recovery?.hint).toBe(declared?.recovery);
+
+      const text = textOf(result.content);
+      expect(text).toContain(`resolved in ${named}`);
+      expect(text).toContain(holder);
+      expect(text).toContain('(reason no_codes_found)');
+    },
+  );
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/48
+  describe('medcode_check_code under an explicit system', () => {
+    const declared = checkCodeTool.errors?.find((entry) => entry.reason === 'unknown_code');
+
+    it.each([
+      ['E11.9', 'ICD-10-CM'],
+      ['J0120', 'HCPCS Level II'],
+      ['0DTJ4ZZ', 'ICD-10-PCS'],
+    ])(
+      'names the system holding %s on both surfaces, with no CPT sentence',
+      async (code, label) => {
+        const result = await callWithRawArgs(checkCodeTool, { code, system: 'RXNORM' });
+        expect(result.isError).toBe(true);
+        const envelope = result.structuredContent as ErrorEnvelope;
+        expect(envelope.error.code).toBe(declared?.code);
+        expect(envelope.error.data?.reason).toBe('unknown_code');
+        expect(envelope.error.message).toContain(`it is a code in ${label}`);
+        expect(envelope.error.message).not.toMatch(/CPT/);
+
+        const text = textOf(result.content);
+        expect(text).toContain(`it is a code in ${label}`);
+        expect(text).not.toMatch(/CPT/);
+        expect(text).toContain('(reason unknown_code)');
+      },
+    );
+
+    it.each([
+      [
+        { code: '99213', system: 'RXNORM' },
+        'No RxNorm concept matches "99213". If this is a CPT or HCPCS Level I code, those are out of scope — this server bundles ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm.',
+      ],
+      [
+        { code: 'ZZ9Q', system: 'RXNORM' },
+        'No RxNorm concept matches "ZZ9Q" in the bundled release.',
+      ],
+    ])('words %j the same on both surfaces', async (args, message) => {
+      const result = await callWithRawArgs(checkCodeTool, args);
+      const envelope = result.structuredContent as ErrorEnvelope;
+      expect(envelope.error.data?.reason).toBe('unknown_code');
+      expect(envelope.error.message).toBe(message);
+      expect(textOf(result.content)).toContain(message);
+    });
+  });
+
   it('names the colliding systems so the caller can re-call with one', async () => {
     const result = await callWithRawArgs(checkCodeTool, { code: COLLIDING });
     const envelope = result.structuredContent as ErrorEnvelope & {
@@ -121,6 +220,55 @@ describe('handler-thrown failures', () => {
       expect.arrayContaining(['ICD10CM', 'HCPCS']),
     );
     expect(envelope.error.message).toContain(COLLIDING);
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/43
+  describe('medcode_check_code on a National Drug Code', () => {
+    const declared = checkCodeTool.errors?.find((entry) => entry.reason === 'unknown_code');
+
+    it.each([
+      ['11111-2222-33', /product 198440/], // hyphenated, maps to a bundled product
+      ['11111222233', /product 198440/], // the same NDC as bare 11 digits
+      ['99999-8888-77', /no bundled drug maps to it/i], // well-formed, maps to nothing
+    ])('names %s as an NDC and recovers to the tools that decode one', async (ndc, detail) => {
+      const result = await callWithRawArgs(checkCodeTool, { code: ndc });
+      expect(result.isError).toBe(true);
+
+      // The failure itself is unchanged: same code, same reason.
+      const envelope = result.structuredContent as ErrorEnvelope;
+      expect(envelope.error.code).toBe(declared?.code);
+      expect(envelope.error.data?.reason).toBe('unknown_code');
+
+      expect(envelope.error.message).toContain(`"${ndc}" is`);
+      expect(envelope.error.message).toMatch(/National Drug Code \(NDC\)/);
+      expect(envelope.error.message).toMatch(detail);
+      expect(envelope.error.message).not.toMatch(/matches no bundled code shape/);
+
+      const hint = envelope.error.data?.recovery?.hint ?? '';
+      expect(hint).toContain('medcode_get_code');
+      expect(hint).toContain('ndc_to_rxcui');
+      expect(hint).not.toBe(declared?.recovery);
+
+      const text = textOf(result.content);
+      expect(text).toContain('National Drug Code (NDC)');
+      expect(text).toContain('medcode_get_code');
+      expect(text).toContain('ndc_to_rxcui');
+      expect(text).toContain('(reason unknown_code)');
+    });
+
+    it.each(['2-152-1', '0002-152-01'])(
+      'keeps the generic message and recovery for the malformed %s',
+      async (malformed) => {
+        const result = await callWithRawArgs(checkCodeTool, { code: malformed });
+        const envelope = result.structuredContent as ErrorEnvelope;
+        expect(envelope.error.data?.reason).toBe('unknown_code');
+        expect(envelope.error.message).toBe(
+          `"${malformed}" is not present in any bundled code system (ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm), and matches no bundled code shape.`,
+        );
+        expect(envelope.error.data?.recovery?.hint).toBe(declared?.recovery);
+        expect(textOf(result.content)).not.toContain('NDC');
+      },
+    );
   });
 });
 

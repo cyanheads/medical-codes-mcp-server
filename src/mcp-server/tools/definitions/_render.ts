@@ -11,7 +11,8 @@ import { SYSTEM_LABELS } from '@/services/code-index/types.js';
 
 /** The minimal decoded-code shape every render helper consumes. */
 export interface RenderableCode {
-  billable: boolean;
+  /** Null when the code's system has no billing concept (RxNorm). */
+  billable: boolean | null;
   chapter: string | null;
   code: string;
   description: string | null;
@@ -28,10 +29,12 @@ function label(system: string): string {
 /**
  * Billability phrase referencing both fields by their key names. The key names
  * ("billable", "header") must appear literally so the format-parity linter — which
- * checks for the key name of permissive boolean fields — sees them rendered.
+ * checks for the key name of permissive boolean fields — sees them rendered. A null
+ * `billable` (no billing concept in the system) reads `n/a`, never `no`.
  */
 function flags(c: RenderableCode): string {
-  return `billable: ${c.billable ? 'yes' : 'no'}, header: ${c.header ? 'yes' : 'no'}`;
+  const billable = c.billable === null ? 'n/a' : c.billable ? 'yes' : 'no';
+  return `billable: ${billable}, header: ${c.header ? 'yes' : 'no'}`;
 }
 
 /**

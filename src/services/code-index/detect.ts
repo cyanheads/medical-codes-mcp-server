@@ -51,6 +51,15 @@ const HCPCS_RE = /^[A-V][0-9]{4}$/;
 const RXCUI_RE = /^[0-9]+$/;
 
 /**
+ * Whether a raw value is a bare integer as the caller typed it — trimmed, but
+ * with no dot stripped, so `432.39` is not one. Every CPT / HCPCS Level I code
+ * the server cannot hold takes this shape, and so does every RXCUI.
+ */
+export function isBareInteger(rawCode: string): boolean {
+  return RXCUI_RE.test(rawCode.trim());
+}
+
+/**
  * Return every system whose shape the raw code matches, in canonical order.
  * Empty array ⇒ the code matches no COMPLETE code shape — which is not the same
  * as "not a code", since the index also materializes header rows (HCPCS letter

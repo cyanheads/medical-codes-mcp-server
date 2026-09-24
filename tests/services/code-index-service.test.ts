@@ -6,10 +6,13 @@
  * @module tests/services/code-index-service.test
  */
 
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 
-import type { CodeIndexService } from '@/services/code-index/code-index-service.js';
-import { escapeLike, toFtsMatch } from '@/services/code-index/code-index-service.js';
+import {
+  CodeIndexService,
+  escapeLike,
+  toFtsMatch,
+} from '@/services/code-index/code-index-service.js';
 import { ICD10PCS_PARTIAL_RE, ndcCandidates } from '@/services/code-index/detect.js';
 import { ensureIndex } from '../helpers/index-fixture.ts';
 
@@ -539,6 +542,12 @@ describe('toFtsMatch', () => {
   });
   it('returns null when nothing usable remains', () => {
     expect(toFtsMatch('  ()*  ')).toBeNull();
+    expect(toFtsMatch('  ()*  ', 'long_desc')).toBeNull();
+  });
+  it('restricts every token to one column when asked', () => {
+    expect(toFtsMatch('oral tablet', 'long_desc')).toBe(
+      'long_desc : "oral"* AND long_desc : "tablet"*',
+    );
   });
 });
 
@@ -650,11 +659,34 @@ describe('mapCode (RxNorm drug directions)', () => {
   it('source_not_found for an unknown drug name', () => {
     expect(svc.mapCode('zzznotadrug', 'name_to_rxcui').kind).toBe('source_not_found');
   });
-  it('ndc_to_rxcui falls back to a digit strip for a non-standard separator', () => {
-    // Not NDC-shaped (spaces, not hyphens), so no segmentation is inferred — the
-    // digits alone still have to reach the 11-digit key.
-    const r = svc.mapCode('11111 2222 33', 'ndc_to_rxcui');
-    expect(r.kind === 'ok' && r.hits[0]?.value).toBe('198440');
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/35
+  it('ndc_to_rxcui refuses a spelling get_code refuses, rather than digit-stripping it', () => {
+    // Each one's digits spell the fixture key 11111222233, so a digit-strip lookup
+    // would resolve all of them to 198440. None is an FDA segment configuration.
+    for (const spelling of [
+      '11111 2222 33',
+      '11111.2222.33',
+      '11111*2222*33',
+      '11111/2222/33',
+      'NDC 11111-2222-33',
+      '11111--2222-33',
+      '11-1112-22233', // the 2-4-5 split
+      '11111-222233',
+      '11111-2222-3-3',
+    ]) {
+      expect(svc.getByNdc(spelling).kind, spelling).toBe('not_ndc');
+      expect(svc.mapCode(spelling, 'ndc_to_rxcui').kind, spelling).toBe('source_not_found');
+    }
+  });
+  it('ndc_to_rxcui still resolves every spelling get_code decodes', () => {
+    for (const spelling of ['11111-2222-33', '11111222233', ' 11111-2222-33 ', '\t11111222233 ']) {
+      const r = svc.mapCode(spelling, 'ndc_to_rxcui');
+      expect(r.kind === 'ok' && r.hits.map((h) => h.value), spelling).toEqual(['198440']);
+    }
+    for (const spelling of ['0904-5161-60', '0904516160', '00904516160']) {
+      const r = svc.mapCode(spelling, 'ndc_to_rxcui');
+      expect(r.kind === 'ok' && r.hits.map((h) => h.value), spelling).toEqual(['1049640']);
+    }
   });
   it('source_not_found for an NDC absent from the map', () => {
     expect(svc.mapCode('99999-8888-77', 'ndc_to_rxcui').kind).toBe('source_not_found');
@@ -780,5 +812,366 @@ describe('mapCode (hierarchy resolution)', () => {
       value: 'A01.0',
       description: 'Typhoid fever',
     });
+  });
+});
+
+/** Every fixture RxNorm concept, read through search so the rows come off the index. */
+function rxnormHits() {
+  return svc.searchFts('a', { system: 'RXNORM', limit: 200 }).codes;
+}
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/37
+describe('RxNorm has no billing concept', () => {
+  it('decodes every RxNorm concept with billable null, never the stored placeholder', () => {
+    const hits = rxnormHits();
+    expect(hits.length).toBeGreaterThan(0);
+    for (const hit of hits) {
+      expect(hit.system).toBe('RXNORM');
+      expect(hit.billable).toBeNull();
+      // The non-goal holds: an RxNorm concept is not a header either.
+      expect(hit.header).toBe(false);
+    }
+  });
+
+  it('projects a directly-fetched RxNorm row the same way', () => {
+    const r = svc.getByCode('161');
+    expect(r.kind).toBe('found');
+    if (r.kind === 'found') expect(CodeIndexService.project(r.row).billable).toBeNull();
+  });
+
+  it('keeps a boolean billable on every other system', () => {
+    for (const code of ['E11.9', 'E11', '0DTJ4ZZ', 'J0120', 'K0552']) {
+      const r = svc.getByCode(code);
+      expect(r.kind).toBe('found');
+      if (r.kind === 'found')
+        expect(typeof CodeIndexService.project(r.row).billable).toBe('boolean');
+    }
+  });
+
+  it.each([
+    ['161', undefined],
+    ['161', 'RXNORM'],
+    ['198440', undefined],
+    ['202433', 'RXNORM'],
+  ] as const)('checks %s (system %s) as valid, with no why-not', (code, system) => {
+    const r = svc.checkCode(code, system);
+    expect(r.kind).toBe('resolved');
+    if (r.kind === 'resolved') {
+      expect(r.result).toMatchObject({ system: 'RXNORM', code, status: 'valid' });
+      expect(r.result.whyNot).toBeUndefined();
+    }
+  });
+
+  it('still excludes every RxNorm concept from a billable-only search', () => {
+    expect(svc.searchFts('a', { system: 'RXNORM', billableOnly: true, limit: 200 }).codes).toEqual(
+      [],
+    );
+    const anySystem = svc.searchFts('acetaminophen', { billableOnly: true, limit: 200 }).codes;
+    expect(anySystem.some((hit) => hit.system === 'RXNORM')).toBe(false);
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/42
+describe('RxNorm publishes no short description', () => {
+  it('returns shortDescription null and keeps the term type in chapter', () => {
+    const byCode = new Map(rxnormHits().map((hit) => [hit.code, hit]));
+    expect(byCode.get('161')).toMatchObject({
+      description: 'acetaminophen',
+      shortDescription: null,
+      chapter: 'IN',
+    });
+    expect(byCode.get('198440')).toMatchObject({
+      description: 'Acetaminophen 500 MG Oral Tablet',
+      shortDescription: null,
+      chapter: 'SCD',
+    });
+    for (const hit of byCode.values()) expect(hit.shortDescription).toBeNull();
+
+    // The brand concept "Tylenol" is outside the "a" search; decode it directly.
+    const brand = svc.getByCode('202433');
+    expect(brand.kind === 'found' && CodeIndexService.project(brand.row)).toMatchObject({
+      description: 'Tylenol',
+      shortDescription: null,
+      chapter: 'BN',
+    });
+  });
+
+  it('keeps the term-type chapter filter working', () => {
+    const scd = svc.searchFts('a', { system: 'RXNORM', chapter: 'SCD', limit: 200 }).codes;
+    expect(scd.map((hit) => hit.code).sort()).toEqual(['1049640', '198440']);
+    expect(scd.every((hit) => hit.chapter === 'SCD')).toBe(true);
+  });
+
+  it('leaves the short description of the other systems untouched', () => {
+    const r = svc.getByCode('E11.9');
+    expect(r.kind === 'found' && CodeIndexService.project(r.row).shortDescription).toBe(
+      'Type 2 diab w/o complications',
+    );
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/43
+describe('checkCode on a National Drug Code', () => {
+  it.each([
+    ['11111-2222-33', '198440'], // hyphenated 5-4-2
+    ['11111222233', '198440'], // bare 11-digit
+    ['0904-5161-60', '1049640'], // hyphenated 4-4-2, padded to 11 digits
+    ['0904516160', '1049640'], // bare 10-digit
+  ])('names %s as an NDC and points at the tools that decode it', (ndc, rxcui) => {
+    const r = svc.checkCode(ndc);
+    expect(r.kind).toBe('resolved');
+    if (r.kind === 'resolved') {
+      expect(r.result.status).toBe('unknown');
+      expect(r.result.ndc).toBe(true);
+      expect(r.result.whyNot).toMatch(/National Drug Code \(NDC\)/);
+      expect(r.result.whyNot).toContain(rxcui);
+      expect(r.result.whyNot).not.toMatch(/matches no bundled code shape/);
+      expect(r.result.whyNot).not.toMatch(/No RxNorm concept matches/);
+    }
+  });
+
+  it('names a well-formed NDC that nothing maps to as an NDC too', () => {
+    const r = svc.checkCode('99999-8888-77');
+    expect(r.kind === 'resolved' && r.result).toMatchObject({ status: 'unknown', ndc: true });
+    expect(r.kind === 'resolved' && r.result.whyNot).toMatch(/no bundled drug maps to it/i);
+  });
+
+  it.each([
+    ['2-152-1', /not present in any bundled code system/], // malformed segment widths
+    ['12-34-56-78', /not present in any bundled code system/], // four segments
+    ['99999888877', /No RxNorm concept matches/], // bare 11 digits with no map hit
+    ['99213', /CPT/], // a CPT code keeps its out-of-scope sentence
+  ])('keeps the non-NDC message for %s', (value, message) => {
+    const r = svc.checkCode(value);
+    expect(r.kind).toBe('resolved');
+    if (r.kind === 'resolved') {
+      expect(r.result.status).toBe('unknown');
+      expect(r.result.ndc).toBeUndefined();
+      expect(r.result.whyNot).toMatch(message);
+      expect(r.result.whyNot).not.toMatch(/NDC/);
+    }
+  });
+});
+
+/** Run `fn` against a build whose RxNorm tables are empty, restoring the real answer after. */
+function withoutRxNorm<T>(fn: () => T): T {
+  const spy = vi.spyOn(svc, 'hasRxNorm').mockReturnValue(false);
+  try {
+    return fn();
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+const CPT_SENTENCE =
+  'If this is a CPT or HCPCS Level I code, those are out of scope — this server bundles ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm.';
+const CPT_SENTENCE_NO_RXNORM =
+  'RxNorm is not present in this build, and CPT / HCPCS Level I are out of scope — this build carries ICD-10-CM, ICD-10-PCS, and HCPCS Level II.';
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/38
+describe('the CPT / HCPCS Level I out-of-scope sentence', () => {
+  it('words a bare-integer checkCode miss exactly as it has since #8', () => {
+    const r = svc.checkCode('99213');
+    expect(r.kind === 'resolved' && r.result.whyNot).toBe(
+      `No RxNorm concept matches "99213". ${CPT_SENTENCE}`,
+    );
+  });
+
+  it('words the same miss exactly in a build without RxNorm', () => {
+    const r = withoutRxNorm(() => svc.checkCode('99213'));
+    expect(r.kind === 'resolved' && r.result.whyNot).toBe(
+      `"99213" looks like an RxNorm RXCUI or a CPT / HCPCS Level I code. ${CPT_SENTENCE_NO_RXNORM}`,
+    );
+  });
+
+  it('comes from one function, in the variant the build calls for', () => {
+    expect(svc.outOfScopeNote()).toBe(CPT_SENTENCE);
+    expect(withoutRxNorm(() => svc.outOfScopeNote())).toBe(CPT_SENTENCE_NO_RXNORM);
+  });
+});
+
+/** checkCode's whyNot for a value it could not resolve. */
+function missReason(code: string, system?: 'ICD10CM' | 'ICD10PCS' | 'HCPCS' | 'RXNORM'): string {
+  const r = svc.checkCode(code, system);
+  expect(r.kind === 'resolved' && r.result.status).toBe('unknown');
+  return r.kind === 'resolved' ? (r.result.whyNot ?? '') : '';
+}
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/48
+describe('checkCode under an explicit system', () => {
+  it.each([
+    ['E11.9', 'RXNORM', 'ICD-10-CM', 'ICD10CM'],
+    ['J0120', 'RXNORM', 'HCPCS Level II', 'HCPCS'],
+    ['0DTJ4ZZ', 'RXNORM', 'ICD-10-PCS', 'ICD10PCS'],
+    ['J0120', 'ICD10CM', 'HCPCS Level II', 'HCPCS'],
+    ['161', 'ICD10CM', 'RxNorm', 'RXNORM'],
+  ] as const)(
+    'names the system that holds %s when %s does not, with no CPT sentence',
+    (code, system, label, holder) => {
+      const whyNot = missReason(code, system);
+      expect(whyNot).toContain(`"${code}"`);
+      expect(whyNot).toContain(`it is a code in ${label}`);
+      expect(whyNot).toContain(`\`system\` "${holder}"`);
+      expect(whyNot).not.toMatch(/CPT|out of scope/);
+    },
+  );
+
+  it('names every other system that holds the string', () => {
+    // A0100 is an ICD-10-CM code and a HCPCS code, and no RxNorm concept.
+    expect(missReason('A0100', 'RXNORM')).toContain('it is a code in ICD-10-CM and HCPCS Level II');
+  });
+
+  it('keeps the CPT sentence for a bare integer no bundled system holds', () => {
+    // Explicit RXNORM is worded exactly as the auto-detected miss.
+    expect(missReason('99213', 'RXNORM')).toBe(
+      `No RxNorm concept matches "99213". ${CPT_SENTENCE}`,
+    );
+    expect(missReason('99213', 'RXNORM')).toBe(missReason('99213'));
+    expect(withoutRxNorm(() => missReason('99213', 'RXNORM'))).toBe(
+      `"99213" looks like an RxNorm RXCUI or a CPT / HCPCS Level I code. ${CPT_SENTENCE_NO_RXNORM}`,
+    );
+    // Another explicit system keeps its own generic lead and gains the sentence.
+    expect(missReason('43239', 'ICD10CM')).toBe(
+      `No ICD-10-CM code matches "43239" in the bundled release. ${CPT_SENTENCE}`,
+    );
+  });
+
+  it('keeps the generic message for a letter-bearing value no system holds', () => {
+    expect(missReason('ZZ9Q', 'RXNORM')).toBe(
+      'No RxNorm concept matches "ZZ9Q" in the bundled release.',
+    );
+    expect(missReason('ZZ9Q', 'ICD10CM')).toBe(
+      'No ICD-10-CM code matches "ZZ9Q" in the bundled release.',
+    );
+  });
+
+  it('names the missed system by its label on every not-found path', () => {
+    // One wording per system, whether auto-detected or named, and whether or not
+    // another system holds the value: RxNorm misses a concept, the others a code.
+    const leads = [
+      missReason('E11.99'), // auto-detected ICD-10-CM shape
+      missReason('U9999'), // auto-detected HCPCS shape (ICD-10-CM excludes U)
+      missReason('E11.9', 'RXNORM'), // held by ICD-10-CM
+      missReason('161', 'HCPCS'), // held by RxNorm
+      missReason('ZZ9Q', 'ICD10PCS'),
+    ].map((whyNot) => whyNot.split(' matches ')[0]);
+    expect(leads).toEqual([
+      'No ICD-10-CM code',
+      'No HCPCS Level II code',
+      'No RxNorm concept',
+      'No HCPCS Level II code',
+      'No ICD-10-PCS code',
+    ]);
+  });
+
+  it('leaves the NDC wording and the auto-detected wording as they were', () => {
+    expect(missReason('11111-2222-33', 'RXNORM')).toMatch(/National Drug Code \(NDC\)/);
+    expect(missReason('ZZ9Q')).toBe(
+      '"ZZ9Q" is not present in any bundled code system (ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm), and matches no bundled code shape.',
+    );
+  });
+});
+
+/** `system:code` for every non-RxNorm row of a search, in rank order. */
+function nonRxNormRanking(query: string, filters: { system?: 'ICD10CM' } = {}): string[] {
+  return svc
+    .searchFts(query, { ...filters, limit: 200 })
+    .codes.filter((hit) => hit.system !== 'RXNORM')
+    .map((hit) => `${hit.system}:${hit.code}`);
+}
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/45
+describe('search outside RxNorm keeps its matching and ranking', () => {
+  it.each([
+    [
+      'a',
+      'ICD10PCS:0DTJ0ZZ ICD10PCS:0DTJ4ZZ ICD10CM:A01 HCPCS:A HCPCS:J ICD10PCS:02703DZ HCPCS:E0110 HCPCS:K0552 HCPCS:A0100 HCPCS:A4206 HCPCS:E HCPCS:J0120 HCPCS:K ICD10CM:A00 ICD10CM:A00.0 ICD10CM:A00.1 ICD10CM:B00 ICD10CM:E11 ICD10CM:E11.40 ICD10CM:E11.42 ICD10CM:E11.9 ICD10CM:I10 ICD10PCS:B00',
+    ],
+    [
+      's',
+      'HCPCS:A HCPCS:A4206 HCPCS:K0552 ICD10CM:B00 ICD10PCS:B00 ICD10PCS:02703DZ HCPCS:A0100 HCPCS:E0110 HCPCS:J ICD10CM:A01 ICD10CM:A01.00 ICD10CM:E11 ICD10CM:E11.40 ICD10CM:E11.42 ICD10CM:E11.9 ICD10CM:I10 ICD10PCS:0DTJ0ZZ ICD10PCS:0DTJ4ZZ',
+    ],
+    [
+      'in',
+      'HCPCS:J0120 ICD10CM:B00 HCPCS:K0552 ICD10PCS:02703DZ HCPCS:E0110 HCPCS:A4206 HCPCS:J ICD10PCS:B00',
+    ],
+  ])('ranks the non-RxNorm rows of an all-systems "%s" search unchanged', (query, expected) => {
+    expect(nonRxNormRanking(query)).toEqual(expected.split(' '));
+  });
+
+  it('ranks a system-filtered search unchanged', () => {
+    expect(nonRxNormRanking('type', { system: 'ICD10CM' })).toEqual([
+      'ICD10CM:E11',
+      'ICD10CM:E11.9',
+      'ICD10CM:E11.42',
+      'ICD10CM:E11.40',
+    ]);
+  });
+
+  it('still matches a HCPCS row on its short description alone', () => {
+    // "Nonemergency transport taxi" / "Non-emergency transportation; taxi", and
+    // "Sup/access ext infus pump,each", whose long form never says "access".
+    for (const [query, code] of [
+      ['nonemergency', 'A0100'],
+      ['access', 'K0552'],
+    ] as const) {
+      for (const system of [undefined, 'HCPCS'] as const) {
+        const hits = svc.searchFts(query, { ...(system && { system }), limit: 50 }).codes;
+        expect(hits.map((hit) => `${hit.system}:${hit.code}`)).toEqual([`HCPCS:${code}`]);
+      }
+    }
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/45
+describe('RxNorm matching reads only the drug name', () => {
+  it('returns no RxNorm concept for a term type the name does not contain', () => {
+    for (const query of ['scd', 'SCD', 'bn']) {
+      for (const system of [undefined, 'RXNORM'] as const) {
+        const hits = svc.searchFts(query, { ...(system && { system }), limit: 200 }).codes;
+        expect(
+          hits.filter((hit) => hit.system === 'RXNORM'),
+          `${query} in ${system ?? 'every system'}`,
+        ).toEqual([]);
+      }
+    }
+  });
+
+  it('returns only the concepts whose name holds the term, with an exact hasMore', () => {
+    // "in" is the IN term type and a substring of four fixture names (aspirin,
+    // acetaminophen, and the two products). With the type unread, none of the four
+    // matches a whole token, so all come from the substring tier in code order.
+    const all = svc.searchFts('in', { system: 'RXNORM', limit: 200 });
+    expect(all.codes.map((hit) => hit.code)).toEqual(['1049640', '1191', '161', '198440']);
+    for (const hit of all.codes) expect(hit.description?.toLowerCase()).toContain('in');
+
+    // "s" prefix-matched the SCD type, so 198440 ("Acetaminophen 500 MG Oral
+    // Tablet", no "s") used to come back. Two names hold an "s".
+    const page1 = svc.searchFts('s', { system: 'RXNORM', offset: 0, limit: 1 });
+    expect(page1.codes.map((hit) => hit.code)).toEqual(['1049640']);
+    expect(page1.hasMore).toBe(true);
+    const page2 = svc.searchFts('s', { system: 'RXNORM', offset: 1, limit: 1 });
+    expect(page2.codes.map((hit) => hit.code)).toEqual(['1191']);
+    expect(page2.hasMore).toBe(false);
+    const exact = svc.searchFts('s', { system: 'RXNORM', offset: 0, limit: 2 });
+    expect(exact.codes).toHaveLength(2);
+    expect(exact.hasMore).toBe(false);
+    expect(svc.searchFts('s', { system: 'RXNORM', offset: 2, limit: 2 })).toEqual({
+      codes: [],
+      hasMore: false,
+    });
+  });
+
+  it('resolves name_to_rxcui on the name alone', () => {
+    for (const name of ['scd', 'SCD', 'bn', 'BN']) {
+      expect(svc.mapCode(name, 'name_to_rxcui').kind, name).toBe('source_not_found');
+    }
+    const r = svc.mapCode('in', 'name_to_rxcui');
+    expect(r.kind === 'ok' && r.hits.map((hit) => hit.value)).toEqual([
+      '161',
+      '1191',
+      '198440',
+      '1049640',
+    ]);
   });
 });

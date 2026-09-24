@@ -200,7 +200,10 @@ const HCPCS: { code: string; short: string; long: string; terminated: string | n
  * A small RxNorm drug graph: two ingredients, one brand, two products. The
  * products carry NDCs and ingredient/brand edges so the drug-crosswalk directions
  * and offline NDC decode resolve against real fixture rows. Concept rows mirror
- * what `parseRxNav` emits (code = RXCUI, longDesc = name, shortDesc/chapter = TTY).
+ * what `parseRxNav` emits (code = RXCUI, longDesc = name, shortDesc/chapter = TTY),
+ * including its `billable = 0` and `shortDesc = TTY` placeholders — the service
+ * never reads those for RXNORM (both decode to null), so the fixture stores them
+ * exactly as the real build does and the tests prove they stay unread.
  */
 const RXNORM: RxNavConcept[] = [
   { rxcui: '161', name: 'acetaminophen', tty: 'IN' },

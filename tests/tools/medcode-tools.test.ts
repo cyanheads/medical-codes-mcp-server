@@ -6,8 +6,9 @@
  * @module tests/tools/medcode-tools.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { browseHierarchyTool } from '@/mcp-server/tools/definitions/browse-hierarchy.tool.js';
 import { checkCodeTool } from '@/mcp-server/tools/definitions/check-code.tool.js';
@@ -15,6 +16,7 @@ import { getCodeTool } from '@/mcp-server/tools/definitions/get-code.tool.js';
 import { listSystemsTool } from '@/mcp-server/tools/definitions/list-systems.tool.js';
 import { mapCodesTool } from '@/mcp-server/tools/definitions/map-codes.tool.js';
 import { searchCodesTool } from '@/mcp-server/tools/definitions/search-codes.tool.js';
+import type { CodeIndexService } from '@/services/code-index/code-index-service.js';
 import { ensureIndex } from '../helpers/index-fixture.ts';
 
 /**
@@ -33,8 +35,9 @@ async function caught(fn: () => unknown): Promise<{ data?: { reason?: string }; 
   throw new Error('expected handler to throw, but it resolved');
 }
 
+let svc: CodeIndexService;
 beforeAll(async () => {
-  await ensureIndex();
+  svc = await ensureIndex();
 });
 
 describe('medcode_list_systems', () => {
@@ -747,5 +750,673 @@ describe('medcode_map_codes — pagination (#16 children, #18 name_to_rxcui, #20
     expect(e2?.nextCursor).toBeUndefined();
 
     expect([...p1.hits, ...p2.hits].map((h) => h.value)).toEqual(fullValues);
+  });
+});
+
+// ─── map_codes / get_code input and not-found contracts ──────────────────────
+
+type MapArgs = Record<string, unknown> & { direction: string; from: string };
+
+interface ThrownError {
+  code?: number;
+  data?: { direction?: string; fields?: string[]; reason?: string; recovery?: { hint?: string } };
+  message: string;
+}
+
+/** Run the map_codes handler with fresh context, returning its output and enrichment. */
+async function mapCall(args: MapArgs) {
+  const ctx = createMockContext({ errors: mapCodesTool.errors });
+  const out = await mapCodesTool.handler(mapCodesTool.input.parse(args), ctx);
+  return { out, enrich: getEnrichment(ctx) };
+}
+
+/** Run the map_codes handler and return what it threw. */
+function mapError(args: MapArgs): Promise<ThrownError> {
+  return caught(() =>
+    mapCodesTool.handler(
+      mapCodesTool.input.parse(args),
+      createMockContext({ errors: mapCodesTool.errors }),
+    ),
+  ) as Promise<ThrownError>;
+}
+
+/** Every text block a content-only client receives. */
+function contentText(result: Awaited<ReturnType<typeof runToolContract>>): string {
+  return (result.content as { text?: string; type: string }[])
+    .flatMap((block) => (block.type === 'text' ? [block.text ?? ''] : []))
+    .join('\n');
+}
+
+/** Error envelope from a runToolContract failure. */
+function envelopeOf(result: Awaited<ReturnType<typeof runToolContract>>) {
+  return (result.structuredContent as { error: ThrownError }).error;
+}
+
+/** Run `fn` against a build whose RxNorm tables are empty, restoring the real answer after. */
+async function withoutRxNorm<T>(fn: () => Promise<T>): Promise<T> {
+  const spy = vi.spyOn(svc, 'hasRxNorm').mockReturnValue(false);
+  try {
+    return await fn();
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+const declaredRecovery = (tool: typeof mapCodesTool | typeof getCodeTool, reason: string) =>
+  tool.errors?.find((entry) => entry.reason === reason)?.recovery;
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/36
+describe('medcode_map_codes — a field the direction does not use is rejected', () => {
+  /** One fixture source per direction, each with at least two results where the direction pages. */
+  const SOURCES = {
+    parents: 'E11.9',
+    children: 'A00',
+    name_to_rxcui: 'a',
+    ndc_to_rxcui: '11111-2222-33',
+    rxcui_to_ndc: '1049640',
+    rxcui_to_ingredients: '198440',
+    rxcui_to_brands: '198440',
+  } as const;
+  const DIRECTIONS = Object.keys(SOURCES) as (keyof typeof SOURCES)[];
+  const HIERARCHY = new Set(['parents', 'children']);
+  const PAGINATED = new Set(['children', 'name_to_rxcui', 'rxcui_to_ndc']);
+  const cursorAt = (offset: number, limit: number) =>
+    Buffer.from(JSON.stringify({ offset, limit })).toString('base64url');
+
+  async function expectRejected(args: MapArgs, fields: string[]) {
+    const err = await mapError(args);
+    expect(err.data?.reason, JSON.stringify(args)).toBe('field_not_applicable');
+    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err.data?.fields).toEqual(fields);
+    expect(err.data?.direction).toBe(args.direction);
+    expect(err.message).toContain(`"${args.direction}"`);
+    for (const field of fields) expect(err.message).toContain(`\`${field}\``);
+    expect(err.data?.recovery?.hint).toBe(declaredRecovery(mapCodesTool, 'field_not_applicable'));
+  }
+
+  describe.each(DIRECTIONS)('%s', (direction) => {
+    const from = SOURCES[direction];
+    const hierarchy = HIERARCHY.has(direction);
+    const paginated = PAGINATED.has(direction);
+
+    it(`system — ${hierarchy ? 'applies' : 'accepts only RXNORM, as a no-op'}`, async () => {
+      const baseline = await mapCall({ from, direction });
+      expect(baseline.out.hits.length).toBeGreaterThan(0);
+      if (hierarchy) {
+        // The source's own system resolves it exactly as auto-detection does…
+        expect((await mapCall({ from, direction, system: 'ICD10CM' })).out).toEqual(baseline.out);
+        // …and another system is a lookup there, not a rejected field.
+        expect((await mapError({ from, direction, system: 'HCPCS' })).data?.reason).toBe(
+          'no_mapping',
+        );
+      } else {
+        expect((await mapCall({ from, direction, system: 'RXNORM' })).out).toEqual(baseline.out);
+        for (const system of ['ICD10CM', 'ICD10PCS', 'HCPCS']) {
+          await expectRejected({ from, direction, system }, ['system']);
+        }
+      }
+    });
+
+    it(`limit — ${paginated ? 'caps the page' : 'rejected'}`, async () => {
+      if (!paginated) {
+        await expectRejected({ from, direction, limit: 1 }, ['limit']);
+        return;
+      }
+      const capped = await mapCall({ from, direction, limit: 1 });
+      expect(capped.out.hits).toHaveLength(1);
+      expect(capped.enrich).toMatchObject({ truncated: true, shown: 1, cap: 1 });
+    });
+
+    it(`cursor — ${paginated ? 'walks past the first page' : 'rejected'}`, async () => {
+      if (!paginated) {
+        await expectRejected({ from, direction, cursor: cursorAt(1, 1) }, ['cursor']);
+        // A cursor the decoder would refuse is still refused for the direction first.
+        await expectRejected({ from, direction, cursor: 'not-a-cursor' }, ['cursor']);
+        return;
+      }
+      const full = await mapCall({ from, direction, limit: 200 });
+      const second = await mapCall({ from, direction, cursor: cursorAt(1, 1) });
+      expect(second.out.hits.map((h) => h.value)).toEqual([full.out.hits[1]?.value]);
+      // Past the end is an empty page, not an error.
+      const beyond = await mapCall({ from, direction, cursor: cursorAt(999_999, 1) });
+      expect(beyond.out.hits).toEqual([]);
+      expect(beyond.enrich?.notice).toMatch(/page starts past the last/i);
+      // A malformed cursor still fails as it always has — on the cursor, not the field.
+      const malformed = await mapError({ from, direction, cursor: 'not-a-cursor' });
+      expect(malformed.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(malformed.data?.reason).not.toBe('field_not_applicable');
+    });
+
+    it('treats an empty cursor as omitted', async () => {
+      expect((await mapCall({ from, direction, cursor: '' })).out).toEqual(
+        (await mapCall({ from, direction })).out,
+      );
+    });
+  });
+
+  it('names every rejected field in one error', async () => {
+    await expectRejected(
+      { from: '198440', direction: 'rxcui_to_ingredients', system: 'HCPCS', limit: 1 },
+      ['system', 'limit'],
+    );
+    await expectRejected(
+      { from: 'E11.9', direction: 'parents', limit: 2, cursor: cursorAt(1, 1) },
+      ['limit', 'cursor'],
+    );
+    await expectRejected(
+      {
+        from: '11111-2222-33',
+        direction: 'ndc_to_rxcui',
+        system: 'ICD10CM',
+        limit: 1,
+        cursor: cursorAt(0, 1),
+      },
+      ['system', 'limit', 'cursor'],
+    );
+  });
+
+  it('keeps the page boundaries of the directions that do page', async () => {
+    // At the exact package count the page is complete, not truncated.
+    const exact = await mapCall({ from: '1049640', direction: 'rxcui_to_ndc', limit: 5 });
+    expect(exact.out.hits).toHaveLength(5);
+    expect(exact.enrich).toMatchObject({ truncated: false, shown: 5, cap: 5 });
+    expect(exact.enrich?.nextCursor).toBeUndefined();
+    // A leaf paged with an explicit limit is still an empty result, not a rejection.
+    const leaf = await mapCall({ from: 'E11.9', direction: 'children', limit: 1 });
+    expect(leaf.out.hits).toEqual([]);
+    expect(leaf.enrich).toMatchObject({ truncated: false, shown: 0, cap: 1 });
+  });
+
+  it('reports a drug direction a build without RxNorm cannot run ahead of its fields', async () => {
+    // Dropping the field would only reach this error, so the field is not the news.
+    const err = await withoutRxNorm(() =>
+      mapError({ from: '198440', direction: 'rxcui_to_brands', limit: 1, system: 'HCPCS' }),
+    );
+    expect(err.data?.reason).toBe('direction_unavailable');
+    // A hierarchy direction still runs there, so its inapplicable field is still rejected.
+    const hierarchy = await withoutRxNorm(() =>
+      mapError({ from: 'E11.9', direction: 'parents', limit: 1 }),
+    );
+    expect(hierarchy.data?.reason).toBe('field_not_applicable');
+  });
+});
+
+const CPT_SENTENCE =
+  'If this is a CPT or HCPCS Level I code, those are out of scope — this server bundles ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm.';
+const CPT_SENTENCE_NO_RXNORM =
+  'RxNorm is not present in this build, and CPT / HCPCS Level I are out of scope — this build carries ICD-10-CM, ICD-10-PCS, and HCPCS Level II.';
+/** The ndc_to_rxcui miss for a spelling ndcCandidates() refuses, after the quoted value (#50). */
+const NDC_MALFORMED_TAIL =
+  'is not an NDC spelling this server reads: an NDC is hyphenated in an FDA segment configuration (4-4-2, 5-3-2, 5-4-1, or 5-4-2) or written as bare 10 or 11 digits.';
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/38
+describe('medcode_map_codes — a bare integer that resolves nowhere', () => {
+  it.each(['parents', 'children', 'rxcui_to_ndc', 'rxcui_to_ingredients', 'rxcui_to_brands'])(
+    'names CPT / HCPCS Level I as out of scope on %s, on both surfaces',
+    async (direction) => {
+      const result = await runToolContract(mapCodesTool, { from: '43239', direction } as never);
+      expect(result.isError).toBe(true);
+      const error = envelopeOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.data?.reason).toBe('no_mapping');
+      expect(error.message).toBe(`No bundled code matches "43239". ${CPT_SENTENCE}`);
+      const hint = error.data?.recovery?.hint ?? '';
+      expect(hint).not.toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
+      expect(hint).toContain('medcode_search_codes');
+      expect(hint).toContain('ICD-10-PCS');
+
+      const text = contentText(result);
+      expect(text).toContain(CPT_SENTENCE);
+      expect(text).toContain(hint);
+      expect(text).toContain('(reason no_mapping)');
+    },
+  );
+
+  it('keeps the generic miss on name_to_rxcui, which reads the value as a name', async () => {
+    const err = await mapError({ from: '43239', direction: 'name_to_rxcui' });
+    expect(err.data?.reason).toBe('no_mapping');
+    expect(err.message).toBe('No bundled code matches "43239".');
+    expect(err.data?.recovery?.hint).toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
+  });
+
+  it('reads the value as an NDC spelling on ndc_to_rxcui, with no CPT sentence', async () => {
+    // Five digits is no NDC configuration, so #50's malformed-spelling miss answers.
+    const err = await mapError({ from: '43239', direction: 'ndc_to_rxcui' });
+    expect(err.data?.reason).toBe('no_mapping');
+    expect(err.message).toBe(`"43239" ${NDC_MALFORMED_TAIL}`);
+    expect(err.message).not.toMatch(/CPT/);
+  });
+
+  it('keeps the generic miss for a value that is not a bare integer', async () => {
+    for (const from of ['ZZZZZZ9', '432.39', '43239A']) {
+      const err = await mapError({ from, direction: 'parents' });
+      expect(err.message).toBe(`No bundled code matches "${from}".`);
+      expect(err.data?.recovery?.hint).toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
+    }
+  });
+
+  it('resolves a bare integer that is a bundled RXCUI instead of calling it out of scope', async () => {
+    const { out } = await mapCall({ from: '161', direction: 'rxcui_to_ndc' });
+    expect(out.resolvedSystem).toBe('RXNORM');
+  });
+
+  it('keeps the generic miss for a bundled RXCUI looked up in another system', async () => {
+    // 161 misses in ICD-10-CM, but it is a bundled concept, not an unbundled code.
+    const err = await mapError({ from: '161', direction: 'children', system: 'ICD10CM' });
+    expect(err.message).toBe('No bundled code matches "161".');
+    expect(err.data?.recovery?.hint).toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
+  });
+
+  it('uses the no-RxNorm variant in a build without RxNorm', async () => {
+    const err = await withoutRxNorm(() => mapError({ from: '43239', direction: 'parents' }));
+    expect(err.message).toBe(`No bundled code matches "43239". ${CPT_SENTENCE_NO_RXNORM}`);
+  });
+});
+
+// A bare 10/11-digit NDC is also a bare integer, and medcode_get_code decodes it: the
+// directions that read `from` as a code or an RXCUI name it as an NDC, never as CPT.
+describe('medcode_map_codes — an NDC where a code or an RXCUI belongs', () => {
+  it.each([
+    ['11111222233', 'parents', 'a code'],
+    ['11111222233', 'children', 'a code'],
+    ['0904516160', 'rxcui_to_ndc', 'an RXCUI'],
+    ['11111222233', 'rxcui_to_ingredients', 'an RXCUI'],
+    ['11111-2222-33', 'rxcui_to_brands', 'an RXCUI'],
+    ['99999-8888-77', 'children', 'a code'],
+  ])('names %s as an NDC on %s, on both surfaces', async (from, direction, notA) => {
+    const result = await runToolContract(mapCodesTool, { from, direction } as never);
+    const error = envelopeOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data?.reason).toBe('no_mapping');
+    expect(error.message).toBe(`"${from}" is a National Drug Code (NDC), not ${notA}.`);
+    const hint = error.data?.recovery?.hint ?? '';
+    expect(hint).toContain('ndc_to_rxcui');
+    expect(hint).toContain('medcode_get_code');
+    expect(hint).not.toMatch(/CPT/);
+
+    const text = contentText(result);
+    expect(text).not.toMatch(/CPT/);
+    expect(text).toContain(hint);
+    expect(text).toContain('(reason no_mapping)');
+  });
+
+  it('keeps the CPT sentence for a bare integer the NDC map does not hold', async () => {
+    // Eleven digits but no package: not an NDC get_code decodes, so still a bare-integer miss.
+    const err = await mapError({ from: '99999888877', direction: 'rxcui_to_ndc' });
+    expect(err.message).toBe(`No bundled code matches "99999888877". ${CPT_SENTENCE}`);
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/38
+describe('medcode_get_code — a bare integer that resolves nowhere', () => {
+  it('carries the out-of-scope sentence on its notFound entry, on both surfaces', async () => {
+    const result = await runToolContract(getCodeTool, { codes: ['43239', 'E11.9'] } as never);
+    expect(result.isError).toBeFalsy();
+    const out = result.structuredContent as {
+      found: { code: string }[];
+      notFound: { code: string; reason: string }[];
+    };
+    expect(out.found.map((f) => f.code)).toEqual(['E11.9']);
+    expect(out.notFound).toEqual([
+      {
+        code: '43239',
+        reason: `"43239" is not present in the bundled release (matched shape: RXNORM). ${CPT_SENTENCE}`,
+      },
+    ]);
+    expect(contentText(result)).toContain(CPT_SENTENCE);
+  });
+
+  it('names every bare-integer input when nothing resolves, keeping the declared recovery', async () => {
+    const result = await runToolContract(getCodeTool, { codes: ['43239', '99213'] } as never);
+    expect(result.isError).toBe(true);
+    const error = envelopeOf(result);
+    expect(error.data?.reason).toBe('no_codes_found');
+    expect(error.message).toContain('"43239"');
+    expect(error.message).toContain('"99213"');
+    expect(error.message).toContain(CPT_SENTENCE);
+    expect(error.data?.recovery?.hint).toBe(declaredRecovery(getCodeTool, 'no_codes_found'));
+    expect(contentText(result)).toContain(CPT_SENTENCE);
+  });
+
+  it('names only the bare integers of a mixed batch, and nothing for a batch without one', async () => {
+    const mixed = await caught(() =>
+      getCodeTool.handler(
+        getCodeTool.input.parse({ codes: ['ZZZZZZ9', '43239'] }),
+        createMockContext({ errors: getCodeTool.errors }),
+      ),
+    );
+    expect(mixed.message).toContain('"43239"');
+    expect(mixed.message).not.toContain('ZZZZZZ9');
+
+    const none = await caught(() =>
+      getCodeTool.handler(
+        getCodeTool.input.parse({ codes: ['ZZZZZZ9'] }),
+        createMockContext({ errors: getCodeTool.errors }),
+      ),
+    );
+    expect(none.message).toBe('None of the 1 requested code(s) resolved in any bundled system.');
+  });
+
+  it('decodes a bare integer that is a bundled RXCUI, with no out-of-scope sentence', async () => {
+    const out = await getCodeTool.handler(
+      getCodeTool.input.parse({ codes: ['161'] }),
+      createMockContext({ errors: getCodeTool.errors }),
+    );
+    expect(out.found[0]).toMatchObject({ system: 'RXNORM', code: '161' });
+
+    // Forced into a system it is not in, it misses — but as a bundled concept,
+    // so the reason and the batch error stay without the out-of-scope sentence.
+    const forced = await getCodeTool.handler(
+      getCodeTool.input.parse({ codes: ['161', 'E11.9'], system: 'ICD10CM' }),
+      createMockContext({ errors: getCodeTool.errors }),
+    );
+    expect(forced.notFound[0]?.reason).not.toContain('CPT');
+    const batch = await caught(() =>
+      getCodeTool.handler(
+        getCodeTool.input.parse({ codes: ['161'], system: 'ICD10CM' }),
+        createMockContext({ errors: getCodeTool.errors }),
+      ),
+    );
+    expect(batch.message).not.toContain('CPT');
+  });
+
+  it('names an NDC looked up under an explicit system as an NDC, not a CPT code', async () => {
+    // A forced `system` skips the NDC decode, so the value misses — as an NDC.
+    const mixed = await getCodeTool.handler(
+      getCodeTool.input.parse({ codes: ['11111222233', 'E11.9'], system: 'ICD10CM' }),
+      createMockContext({ errors: getCodeTool.errors }),
+    );
+    const reason = mixed.notFound[0]?.reason ?? '';
+    expect(reason).toContain('National Drug Code (NDC)');
+    expect(reason).toContain('omit `system`');
+    expect(reason).not.toMatch(/CPT/);
+
+    const only = await caught(() =>
+      getCodeTool.handler(
+        getCodeTool.input.parse({ codes: ['11111222233', '43239'], system: 'RXNORM' }),
+        createMockContext({ errors: getCodeTool.errors }),
+      ),
+    );
+    expect(only.data?.reason).toBe('no_codes_found');
+    // The NDC is named as one; the CPT-shaped value alone keeps the out-of-scope note.
+    expect(only.message).toContain(
+      'National Drug Codes (NDC) looked up under an explicit `system`: "11111222233"',
+    );
+    expect(only.message).toContain('Bare integers with no match: "43239".');
+    expect(only.message).not.toContain('Bare integers with no match: "11111222233"');
+  });
+
+  it('uses the no-RxNorm variant on get_code and check_code in a build without RxNorm', async () => {
+    const get = await withoutRxNorm(() =>
+      caught(() =>
+        getCodeTool.handler(
+          getCodeTool.input.parse({ codes: ['43239'] }),
+          createMockContext({ errors: getCodeTool.errors }),
+        ),
+      ),
+    );
+    expect(get.message).toContain(CPT_SENTENCE_NO_RXNORM);
+
+    const check = await withoutRxNorm(() =>
+      caught(() =>
+        checkCodeTool.handler(
+          checkCodeTool.input.parse({ code: '99213' }),
+          createMockContext({ errors: checkCodeTool.errors }),
+        ),
+      ),
+    );
+    expect(check.message).toBe(
+      `"99213" looks like an RxNorm RXCUI or a CPT / HCPCS Level I code. ${CPT_SENTENCE_NO_RXNORM}`,
+    );
+  });
+
+  it('leaves check_code on a CPT code worded as it was', async () => {
+    const err = await caught(() =>
+      checkCodeTool.handler(
+        checkCodeTool.input.parse({ code: '99213' }),
+        createMockContext({ errors: checkCodeTool.errors }),
+      ),
+    );
+    expect(err.message).toBe(`No RxNorm concept matches "99213". ${CPT_SENTENCE}`);
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/39
+describe('medcode_map_codes — a code system name in `from`', () => {
+  const ALL_DIRECTIONS = [
+    'parents',
+    'children',
+    'name_to_rxcui',
+    'ndc_to_rxcui',
+    'rxcui_to_ndc',
+    'rxcui_to_ingredients',
+    'rxcui_to_brands',
+  ];
+  const TOKENS = [
+    ['ICD10CM', 'ICD10CM'],
+    ['ICD-10-CM', 'ICD10CM'],
+    ['icd10cm', 'ICD10CM'],
+    ['ICD 10 CM', 'ICD10CM'],
+    ['ICD10PCS', 'ICD10PCS'],
+    ['icd-10-pcs', 'ICD10PCS'],
+    ['HCPCS', 'HCPCS'],
+    ['HCPCS Level II', 'HCPCS'],
+    ['RXNORM', 'RXNORM'],
+    ['RxNorm', 'RXNORM'],
+  ] as const;
+
+  it.each(TOKENS)('names "%s" as a code system on every direction', async (token, system) => {
+    for (const direction of ALL_DIRECTIONS) {
+      const err = await mapError({ from: token, direction });
+      expect(err.data?.reason, direction).toBe('no_mapping');
+      expect(err.message).toBe(`"${token}" is a code system, not a code.`);
+      const hint = err.data?.recovery?.hint ?? '';
+      expect(hint).not.toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
+      if (direction === 'parents' || direction === 'children') {
+        expect(hint).toContain(`\`system\` ("${system}")`);
+        expect(hint).toContain('medcode_browse_hierarchy');
+      } else {
+        expect(hint).toMatch(/drug name, an NDC, or an RXCUI/);
+        expect(hint).not.toContain('medcode_browse_hierarchy');
+      }
+    }
+  });
+
+  it('carries the message and the hierarchy recovery on both surfaces', async () => {
+    const result = await runToolContract(mapCodesTool, {
+      from: 'ICD10CM',
+      direction: 'children',
+    } as never);
+    const error = envelopeOf(result);
+    expect(error.data?.reason).toBe('no_mapping');
+    expect(error.message).toBe('"ICD10CM" is a code system, not a code.');
+    const text = contentText(result);
+    expect(text).toContain('"ICD10CM" is a code system, not a code.');
+    expect(text).toContain(error.data?.recovery?.hint ?? '<missing hint>');
+    expect(text).toContain('medcode_browse_hierarchy');
+  });
+
+  it('gives the drug-direction recovery for RXNORM on rxcui_to_ingredients', async () => {
+    const result = await runToolContract(mapCodesTool, {
+      from: 'RXNORM',
+      direction: 'rxcui_to_ingredients',
+    } as never);
+    const hint = envelopeOf(result).data?.recovery?.hint ?? '';
+    expect(hint).toMatch(/drug name, an NDC, or an RXCUI/);
+    expect(contentText(result)).toContain(hint);
+  });
+
+  it.each(['ICD10', 'CPT', 'NDC', 'ICD10CMX'])(
+    'keeps the generic miss for %s, which names no bundled system',
+    async (from) => {
+      for (const direction of ['parents', 'rxcui_to_ingredients']) {
+        const err = await mapError({ from, direction });
+        expect(err.message).toBe(`No bundled code matches "${from}".`);
+        expect(err.data?.recovery?.hint).toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
+      }
+    },
+  );
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/44
+describe('medcode_map_codes — hierarchy directions on an RxNorm concept', () => {
+  it.each(['parents', 'children'])(
+    'says RxNorm has no code hierarchy on %s and names the drug directions',
+    async (direction) => {
+      for (const args of [{}, { system: 'RXNORM' }]) {
+        const { out, enrich } = await mapCall({ from: '161', direction, ...args });
+        expect(out.hits).toEqual([]);
+        expect(out.resolvedSystem).toBe('RXNORM');
+        const notice = String(enrich?.notice);
+        expect(notice).toContain('RxNorm concepts have no code hierarchy');
+        for (const drug of ['rxcui_to_ingredients', 'rxcui_to_brands', 'rxcui_to_ndc']) {
+          expect(notice).toContain(drug);
+        }
+        expect(notice).not.toMatch(/top-level code|leaf code/);
+      }
+    },
+  );
+
+  it('leaves the ICD-10-CM top-level and leaf notices as they were', async () => {
+    const top = await mapCall({ from: 'E11', direction: 'parents' });
+    expect(top.enrich?.notice).toBe(
+      '"E11" resolved in ICD10CM but has no parents — it is a top-level code with no parent. Decode it with medcode_get_code, or map the opposite direction.',
+    );
+    const leaf = await mapCall({ from: 'E11.9', direction: 'children' });
+    expect(leaf.enrich?.notice).toBe(
+      '"E11.9" resolved in ICD10CM but has no children — it is a leaf code with no children. Decode it with medcode_get_code, or map the opposite direction.',
+    );
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/35
+describe('medcode_map_codes — ndc_to_rxcui accepts only what get_code decodes', () => {
+  it.each([
+    '11-1112-22233',
+    '11111-222233',
+    '11111-2222-3-3',
+    '11111 2222 33',
+    '11111.2222.33',
+    '11111*2222*33',
+    'NDC 11111-2222-33',
+    '11111--2222-33',
+    '11111/2222/33',
+  ])('throws no_mapping for %j, which get_code also refuses', async (spelling) => {
+    const err = await mapError({ from: spelling, direction: 'ndc_to_rxcui' });
+    expect(err.data?.reason).toBe('no_mapping');
+    const decoded = await caught(() =>
+      getCodeTool.handler(
+        getCodeTool.input.parse({ codes: [spelling] }),
+        createMockContext({ errors: getCodeTool.errors }),
+      ),
+    );
+    expect(decoded.data?.reason).toBe('no_codes_found');
+  });
+
+  it.each(['11111-2222-33', '11111222233', ' 11111-2222-33 ', ' 11111222233 '])(
+    'still decodes %j to 198440',
+    async (spelling) => {
+      const { out } = await mapCall({ from: spelling, direction: 'ndc_to_rxcui' });
+      expect(out.hits.map((h) => h.value)).toEqual(['198440']);
+    },
+  );
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/49
+describe('medcode_get_code — no_codes_found under an explicit system', () => {
+  it.each([
+    [
+      { codes: ['161'], system: 'ICD10CM' },
+      'None of the 1 requested code(s) resolved in ICD-10-CM, the `system` this call named. Codes another bundled system holds: "161" (RxNorm). Re-call with that `system` to decode each one.',
+    ],
+    [
+      { codes: ['E11.9'], system: 'HCPCS' },
+      'None of the 1 requested code(s) resolved in HCPCS Level II, the `system` this call named. Codes another bundled system holds: "E11.9" (ICD-10-CM). Re-call with that `system` to decode each one.',
+    ],
+    [
+      { codes: ['A0100', 'ZZZZZZ9'], system: 'RXNORM' },
+      'None of the 2 requested code(s) resolved in RxNorm, the `system` this call named. Codes another bundled system holds: "A0100" (ICD-10-CM and HCPCS Level II). Re-call with that `system` to decode each one.',
+    ],
+  ])('names the named system and the holder for %j on both surfaces', async (args, message) => {
+    const result = await runToolContract(getCodeTool, args as never);
+    expect(result.isError).toBe(true);
+    const error = envelopeOf(result);
+    expect(error.data?.reason).toBe('no_codes_found');
+    expect(error.message).toBe(message);
+    expect(error.data?.recovery?.hint).toBe(declaredRecovery(getCodeTool, 'no_codes_found'));
+    expect(contentText(result)).toContain(message);
+  });
+
+  it('names the holder on the per-code reason of a partial success', async () => {
+    const result = await runToolContract(getCodeTool, {
+      codes: ['161', 'E11.9'],
+      system: 'ICD10CM',
+    } as never);
+    const out = result.structuredContent as { notFound: { code: string; reason: string }[] };
+    const reason =
+      'No ICD-10-CM code matches "161" — it is a code in RxNorm. Re-call with `system` "RXNORM" to decode it there.';
+    expect(out.notFound).toEqual([{ code: '161', reason }]);
+    expect(contentText(result)).toContain(reason);
+  });
+
+  it('keeps the message of a call without system as it was', async () => {
+    const err = await caught(() =>
+      getCodeTool.handler(
+        getCodeTool.input.parse({ codes: ['ZZZZZZ9', 'Q99999'] }),
+        createMockContext({ errors: getCodeTool.errors }),
+      ),
+    );
+    expect(err.message).toBe('None of the 2 requested code(s) resolved in any bundled system.');
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/50
+describe('medcode_map_codes — an ndc_to_rxcui miss says which case it is', () => {
+  it.each([
+    ['11-1112-22233', `"11-1112-22233" ${NDC_MALFORMED_TAIL}`, /FDA segment configurations/],
+    [
+      'NDC 11111-2222-33',
+      `"NDC 11111-2222-33" ${NDC_MALFORMED_TAIL}`,
+      /FDA segment configurations/,
+    ],
+    [
+      '99999-8888-77',
+      '"99999-8888-77" is a valid NDC format but no bundled drug maps to it (normalized 99999888877).',
+      /no product for this package/,
+    ],
+    [
+      '99999888877',
+      '"99999888877" is a valid NDC format but no bundled drug maps to it (normalized 99999888877).',
+      /no product for this package/,
+    ],
+    [
+      '9999988887',
+      '"9999988887" is a valid NDC format but no bundled drug maps to it.',
+      /no product for this package/,
+    ],
+  ])('words the miss for %j on both surfaces', async (from, message, hintShape) => {
+    const result = await runToolContract(mapCodesTool, {
+      from,
+      direction: 'ndc_to_rxcui',
+    } as never);
+    const error = envelopeOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data?.reason).toBe('no_mapping');
+    expect(error.message).toBe(message);
+    const hint = error.data?.recovery?.hint ?? '';
+    expect(hint).toMatch(hintShape);
+    expect(hint).toContain('name_to_rxcui');
+    expect(hint).not.toContain('medcode_get_code');
+
+    const text = contentText(result);
+    expect(text).toContain(message);
+    expect(text).toContain(hint);
+    expect(text).not.toContain('medcode_get_code');
+    expect(text).toContain('(reason no_mapping)');
+  });
+
+  it('keeps the code-system hint ahead of the NDC wording', async () => {
+    const err = await mapError({ from: 'RXNORM', direction: 'ndc_to_rxcui' });
+    expect(err.message).toBe('"RXNORM" is a code system, not a code.');
   });
 });

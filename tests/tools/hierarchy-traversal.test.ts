@@ -158,6 +158,25 @@ describe('medcode_map_codes multi-level walk', () => {
     }
   });
 
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/44
+  it('ends a walk from an RxNorm concept at once, and points to the drug directions', async () => {
+    // RxNorm has no prefix hierarchy, so "top-level" and "leaf" would both be
+    // claims about a tree that does not exist.
+    for (const direction of ['parents', 'children'] as const) {
+      const result = await runToolContract(mapCodesTool, { from: '161', direction });
+      expect(result.isError).toBeFalsy();
+      const structured = result.structuredContent as unknown as MapResult;
+      expect(structured.resolvedSystem).toBe('RXNORM');
+      expect(structured.hits).toEqual([]);
+      const text = textOf(result.content);
+      for (const surface of [structured.notice ?? '', text]) {
+        expect(surface).toContain('RxNorm concepts have no code hierarchy');
+        expect(surface).toMatch(/rxcui_to_ingredients.*rxcui_to_brands.*rxcui_to_ndc/);
+        expect(surface).not.toMatch(/top-level code|leaf code/);
+      }
+    }
+  });
+
   it('round-trips: the parent of each child is the node the child came from', async () => {
     for (const node of CHAIN.slice(0, -1)) {
       const children = await map(node, 'children');

@@ -15,7 +15,7 @@ import { internalError } from '@cyanheads/mcp-ts-core/errors';
 import { logger, requestContextService, runtimeCaps } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
-import { detectSystems, ICD10PCS_PARTIAL_RE, ndcCandidates } from './detect.js';
+import { detectSystems, ICD10PCS_PARTIAL_RE, isBareInteger, ndcCandidates } from './detect.js';
 import { displayCode, icd10cmParent, storageCode } from './schema.js';
 import {
   type BuildMetaRow,
@@ -26,6 +26,8 @@ import {
   type Page,
   type PcsAxisRow,
   SYSTEM_IDS,
+  SYSTEM_LABELS,
+  SYSTEM_TRAITS,
   type SystemId,
 } from './types.js';
 
@@ -85,7 +87,8 @@ async function openDriver(dbPath: string): Promise<SqliteDb> {
 
 /** A decoded code with display form and derived flags, the shape tools return. */
 export interface DecodedCode {
-  billable: boolean;
+  /** Null when the code's system has no billing concept (see {@link SYSTEM_TRAITS}). */
+  billable: boolean | null;
   chapter: string | null;
   code: string;
   description: string | null;
@@ -111,6 +114,13 @@ export interface CheckResult {
    */
   alsoIn?: SystemId[];
   code: string;
+  /**
+   * True on an `unknown` result whose value is a National Drug Code — a shape
+   * `medcode_get_code` decodes to its RxNorm product (see {@link getByNdc}). NDC
+   * is a package identifier, not a code in a bundled system, so there is no
+   * validity verdict to give; the flag lets the caller point at the NDC decode.
+   */
+  ndc?: true;
   status: CheckStatus;
   system: SystemId;
   whyNot?: string;
@@ -171,6 +181,16 @@ interface Resolution {
 }
 
 const FALLBACK_DB_FILENAME = 'medical-codes.db';
+
+/**
+ * Systems whose `short_desc` column holds a placeholder rather than a description
+ * ({@link SYSTEM_TRAITS}) — RxNorm stores its term type there. Text matching reads
+ * only `long_desc` for these, so a query equal to or inside a term type (`SBD`,
+ * `in`) cannot return every concept of that type. As an SQL list of the closed
+ * system-id enum, for inlining.
+ */
+const LONG_DESC_ONLY_SYSTEMS = SYSTEM_IDS.filter((sys) => !SYSTEM_TRAITS[sys].shortDescription);
+const LONG_DESC_ONLY_SQL = LONG_DESC_ONLY_SYSTEMS.map((sys) => `'${sys}'`).join(', ');
 
 /**
  * Resolve the bundled DB path. An explicit `MEDCODE_DB_PATH` wins; otherwise the
@@ -263,14 +283,21 @@ export class CodeIndexService {
     };
   }
 
-  /** Project a CodeRow into the display shape tools return. */
+  /**
+   * Project a CodeRow into the display shape tools return. A field the system's
+   * release does not carry ({@link SYSTEM_TRAITS}) decodes to `null` rather than
+   * the placeholder the row stores for it, and the long-description fallback
+   * never reaches for a short description the system does not have.
+   */
   private static decode(row: CodeRow): DecodedCode {
+    const traits = SYSTEM_TRAITS[row.system];
+    const shortDescription = traits.shortDescription ? row.shortDesc : null;
     return {
       system: row.system,
       code: displayCode(row.system, row.code),
-      shortDescription: row.shortDesc,
-      description: row.longDesc ?? row.shortDesc,
-      billable: row.billable === 1,
+      shortDescription,
+      description: row.longDesc ?? shortDescription,
+      billable: traits.billing ? row.billable === 1 : null,
       header: row.header === 1,
       chapter: row.chapter,
     };
@@ -321,8 +348,7 @@ export class CodeIndexService {
    * evaluated across every system so `alsoIn` means the same thing on both paths.
    */
   private resolveSystems(rawCode: string, explicit?: SystemId): Resolution {
-    const code = storageCode(rawCode);
-    const members = SYSTEM_IDS.filter((sys) => this.getRow(code, sys) !== null);
+    const members = this.systemsHolding(rawCode);
 
     let systems: SystemId[];
     if (explicit) {
@@ -339,6 +365,16 @@ export class CodeIndexService {
     // leaves alsoIn empty on its own.
     const alsoIn = systems.length > 0 ? members.filter((sys) => !systems.includes(sys)) : [];
     return { systems, alsoIn };
+  }
+
+  /**
+   * Every bundled system whose index holds this exact code string, by DB
+   * membership alone — no shape narrowing, no explicit `system`. What a miss under
+   * an explicit `system` names as the system that does hold the code.
+   */
+  systemsHolding(rawCode: string): SystemId[] {
+    const code = storageCode(rawCode);
+    return SYSTEM_IDS.filter((sys) => this.getRow(code, sys) !== null);
   }
 
   /**
@@ -372,7 +408,7 @@ export class CodeIndexService {
    *
    *  - `found` — one or more `RXNORM` rows the NDC maps to (usually one).
    *  - `no_match` — an UNAMBIGUOUS NDC (hyphenated) that isn't in the bundled
-   *    prescribable set. A hyphenated drug code is never an RXCUI, so this is a
+   *    RxNorm set. A hyphenated drug code is never an RXCUI, so this is a
    *    real NDC miss, not a fall-through case.
    *  - `not_ndc` — the input isn't NDC-shaped, OR is a bare-digit NDC candidate
    *    with no map hit (it may instead be an RXCUI — the caller tries that next).
@@ -398,6 +434,24 @@ export class CodeIndexService {
     if (rows.length === 0)
       return unambiguous ? { kind: 'no_match', ndc: matched } : { kind: 'not_ndc' };
     return { kind: 'found', ndc: matched, rows };
+  }
+
+  /**
+   * The not-found explanation for a value {@link getByNdc} treats as an NDC —
+   * a package identifier `checkCode` has no verdict for — or null when it would
+   * not (`not_ndc`), so every other value keeps its system-shaped message.
+   */
+  private ndcWhyNot(value: string): string | null {
+    const ndc = this.getByNdc(value);
+    if (ndc.kind === 'not_ndc') return null;
+    const identity = `"${value}" is a National Drug Code (NDC) — a package identifier, not a code in any bundled code system, so it has no validity or billing verdict.`;
+    if (ndc.kind === 'no_match') {
+      return `${identity} It is well-formed, but no bundled drug maps to it (normalized ${ndc.ndc}).`;
+    }
+    const products = ndc.rows.map((row) =>
+      row.longDesc ? `${row.code} (${row.longDesc})` : row.code,
+    );
+    return `${identity} It decodes to RxNorm product ${products.join(', ')}.`;
   }
 
   /**
@@ -516,7 +570,12 @@ export class CodeIndexService {
    *    RxNorm `name_to_rxcui` crosswalk already runs at comparable scale.
    *
    * The system/billable/chapter filters apply to BOTH tiers so added recall never
-   * escapes the requested scope. `ORDER BY (tier, ord, system, code)` is a total
+   * escapes the requested scope. Both tiers read `long_desc` alone for a
+   * {@link LONG_DESC_ONLY_SYSTEMS} row: the FTS tier keeps such a row only when a
+   * second, `long_desc`-restricted MATCH also returns it, so its bm25 — and every
+   * other row's — is the one the single MATCH computes. Neither restriction is
+   * added when the `system` filter excludes those systems, so that query is
+   * unchanged. `ORDER BY (tier, ord, system, code)` is a total
    * order — `(system, code)` is unique — so `fetchPage` walks the merged set with an
    * exact `hasMore`, and consecutive offset pages reconstruct it (page1 ⧺ page2 ==
    * unpaged 2×limit) exactly as a single-tier query would. Building this as two
@@ -553,11 +612,24 @@ export class CodeIndexService {
     }
     const cWhere = cFilter.length > 0 ? ` AND ${cFilter.join(' AND ')}` : '';
 
+    // Whether the search can reach a system matched on `long_desc` alone. When the
+    // `system` filter rules those out, neither tier gains a restriction.
+    const scopeHasLongDescOnly = !filters.system || LONG_DESC_ONLY_SYSTEMS.includes(filters.system);
+    const ftsLongDescOnly = scopeHasLongDescOnly
+      ? ` AND (c.system NOT IN (${LONG_DESC_ONLY_SQL}) OR f.rowid IN (SELECT rowid FROM codes_fts WHERE codes_fts MATCH ?))`
+      : '';
+    const ftsParams = scopeHasLongDescOnly
+      ? [match, ...cParams, toFtsMatch(queryText, 'long_desc')]
+      : [match, ...cParams];
+
     // Substring tier: every token must appear as a LIKE substring (AND semantics,
     // mirroring the FTS tier). LIKE wildcards in the token are escaped so `%`/`_`
     // match literally — same guard as the RxNorm name crosswalk.
+    const shortDescLike = scopeHasLongDescOnly
+      ? `(c.system NOT IN (${LONG_DESC_ONLY_SQL}) AND c.short_desc LIKE ? ESCAPE '\\')`
+      : "c.short_desc LIKE ? ESCAPE '\\'";
     const likeClause = tokens
-      .map(() => "(c.long_desc LIKE ? ESCAPE '\\' OR c.short_desc LIKE ? ESCAPE '\\')")
+      .map(() => `(c.long_desc LIKE ? ESCAPE '\\' OR ${shortDescLike})`)
       .join(' AND ');
     const likeParams: unknown[] = [];
     for (const token of tokens) {
@@ -572,7 +644,7 @@ export class CodeIndexService {
         SELECT c.*, bm25(codes_fts) AS ord
           FROM codes_fts f
           JOIN codes c ON c.system = f.system AND c.code = f.code
-          WHERE codes_fts MATCH ?${cWhere}
+          WHERE codes_fts MATCH ?${cWhere}${ftsLongDescOnly}
       )
       SELECT *, 0 AS tier FROM fts
       UNION ALL
@@ -582,7 +654,7 @@ export class CodeIndexService {
           AND NOT EXISTS (SELECT 1 FROM fts WHERE fts.system = c.system AND fts.code = c.code)
       ORDER BY tier, ord, system, code`;
 
-    const { rows, hasMore } = this.fetchPage(sql, [match, ...cParams, ...likeParams, ...cParams], {
+    const { rows, hasMore } = this.fetchPage(sql, [...ftsParams, ...likeParams, ...cParams], {
       offset: filters.offset ?? 0,
       limit: filters.limit,
     });
@@ -595,8 +667,11 @@ export class CodeIndexService {
   /**
    * Validate a code's existence, currency, and billability. Existence vs.
    * validity are split: a non-billable or terminated code is a *successful*
-   * status with a why-not, NOT a failure. Only a code absent from every detected
-   * system is `unknown`.
+   * status with a why-not, NOT a failure, and a current code in a system with no
+   * billing concept (RxNorm) is `valid` with no why-not. Only a code absent from
+   * the named or detected system is `unknown` — flagged `ndc` when the value is a
+   * National Drug Code rather than a code, and naming the other bundled system
+   * that holds it when an explicit `system` missed one.
    */
   checkCode(
     rawCode: string,
@@ -609,26 +684,32 @@ export class CodeIndexService {
     if (present.length === 0) {
       // Echo a best-guess system for the caller's orientation, if shape suggests one.
       const detected = system ?? detectSystems(rawCode)[0];
-      // A bare integer matches only the RXCUI shape. If this build carries no
-      // RxNorm (hasRxNorm() false — e.g. a custom MEDCODE_DB_PATH), "No RXNORM
-      // code matches X" would imply we searched a populated table; instead name
-      // RxNorm as absent and flag the likely CPT / HCPCS Level I origin. With
-      // RxNorm bundled the gate falls through to a genuine per-concept not-found.
       const trimmed = rawCode.trim();
+      // An NDC is a package identifier, not a code in any bundled system, so it
+      // lands here — but medcode_get_code decodes it, and the shape and RxNorm
+      // messages below would misname it. It is recognized by the same test the
+      // decode uses, so check_code calls a value an NDC exactly when get_code
+      // would resolve it as one.
+      const ndcWhyNot = this.ndcWhyNot(trimmed);
+      // Otherwise the named system's miss or, auto-detected (resolveSystems already
+      // widened to every system, so nothing holds the value), an RXCUI-shaped miss
+      // is a likely CPT / HCPCS Level I code.
       const whyNot =
-        detected === 'RXNORM'
-          ? this.hasRxNorm()
-            ? `No RxNorm concept matches "${trimmed}". If this is a CPT or HCPCS Level I code, those are out of scope — this server bundles ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm.`
-            : `"${trimmed}" looks like an RxNorm RXCUI or a CPT / HCPCS Level I code. RxNorm is not present in this build, and CPT / HCPCS Level I are out of scope — this build carries ICD-10-CM, ICD-10-PCS, and HCPCS Level II.`
-          : detected
-            ? `No ${detected} code matches "${trimmed}" in the bundled release.`
-            : `"${trimmed}" is not present in any bundled code system (ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm), and matches no bundled code shape.`;
+        ndcWhyNot ??
+        (system
+          ? this.explicitSystemMiss(trimmed, system)
+          : detected === 'RXNORM'
+            ? this.bareIntegerMiss(trimmed)
+            : detected
+              ? `${noMatch(detected, trimmed)} in the bundled release.`
+              : `"${trimmed}" is not present in any bundled code system (ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm), and matches no bundled code shape.`);
       return {
         kind: 'resolved',
         result: {
           system: detected ?? 'ICD10CM',
-          code: rawCode.trim().toUpperCase(),
+          code: trimmed.toUpperCase(),
           status: 'unknown',
+          ...(ndcWhyNot ? { ndc: true as const } : {}),
           whyNot,
         },
       };
@@ -641,7 +722,7 @@ export class CodeIndexService {
     if (!row)
       return { kind: 'resolved', result: { system: sys ?? 'ICD10CM', code, status: 'unknown' } };
 
-    // Identity + the cross-system disclosure, shared by all four verdicts — the
+    // Identity + the cross-system disclosure, shared by all five verdicts — the
     // status is what differs between them, not who answered.
     const base = {
       system: row.system,
@@ -670,6 +751,11 @@ export class CodeIndexService {
         },
       };
     }
+    // A system with no billing concept has no billable/not-billable verdict to
+    // give — its stored flag is a placeholder, so it must not reach the test below.
+    if (!SYSTEM_TRAITS[row.system].billing) {
+      return { kind: 'resolved', result: { ...base, status: 'valid' } };
+    }
     if (row.billable === 1) {
       return { kind: 'resolved', result: { ...base, status: 'valid_billable' } };
     }
@@ -682,6 +768,37 @@ export class CodeIndexService {
           'Valid code, but not flagged billable in this release — verify a more specific code is not required before submitting.',
       },
     };
+  }
+
+  /**
+   * The miss for a bare integer no bundled system holds, with the out-of-scope
+   * sentence. If this build carries no RxNorm (hasRxNorm() false — e.g. a custom
+   * MEDCODE_DB_PATH), "No RxNorm concept matches X" would imply a populated table
+   * was searched, so RxNorm is named as absent instead.
+   */
+  private bareIntegerMiss(trimmed: string): string {
+    return this.hasRxNorm()
+      ? `${noMatch('RXNORM', trimmed)}. ${this.outOfScopeNote()}`
+      : `"${trimmed}" looks like an RxNorm RXCUI or a CPT / HCPCS Level I code. ${this.outOfScopeNote()}`;
+  }
+
+  /**
+   * The miss under an explicit `system`, which is authoritative for the choice but
+   * says nothing about the value's shape. A value another bundled system holds is
+   * named as that system's code; only a bare integer no system holds gets the
+   * out-of-scope sentence — the rule medcode_map_codes and medcode_get_code apply;
+   * any other miss keeps the generic wording.
+   */
+  private explicitSystemMiss(trimmed: string, system: SystemId): string {
+    const holders = this.systemsHolding(trimmed).filter((sys) => sys !== system);
+    if (holders.length > 0) {
+      return `${noMatch(system, trimmed)} — ${heldElsewhere(holders)} to check it there.`;
+    }
+    const generic = `${noMatch(system, trimmed)} in the bundled release.`;
+    if (!isBareInteger(trimmed)) return generic;
+    return system === 'RXNORM'
+      ? this.bareIntegerMiss(trimmed)
+      : `${generic} ${this.outOfScopeNote()}`;
   }
 
   /**
@@ -762,6 +879,19 @@ export class CodeIndexService {
     return this.mapDrug(from, direction, page);
   }
 
+  /**
+   * The sentence naming CPT / HCPCS Level I as out of scope, for a bare integer no
+   * bundled system holds — the shape every CPT code takes. medcode_check_code,
+   * medcode_map_codes, and medcode_get_code all word that miss with it; the
+   * variant depends on whether this build carries RxNorm, since a bare integer is
+   * otherwise also a candidate RXCUI.
+   */
+  outOfScopeNote(): string {
+    return this.hasRxNorm()
+      ? 'If this is a CPT or HCPCS Level I code, those are out of scope — this server bundles ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm.'
+      : 'RxNorm is not present in this build, and CPT / HCPCS Level I are out of scope — this build carries ICD-10-CM, ICD-10-PCS, and HCPCS Level II.';
+  }
+
   /** Whether the RxNorm tables carry any rows (i.e. RxNorm is bundled in this build). */
   hasRxNorm(): boolean {
     const row = this.db.query('SELECT COUNT(*) AS n FROM rxnorm_rel').get() as { n: number };
@@ -793,20 +923,21 @@ export class CodeIndexService {
         // of concepts, so this direction paginates. `ORDER BY length(code)` is not
         // unique (many RXCUIs share a string length), so `, code` makes the total
         // order deterministic — offset pages would otherwise skip or repeat rows.
+        // The name is `long_desc` alone: an RxNorm row's `short_desc` is its term
+        // type, which a name like "SBD" or "in" would otherwise match wholesale.
         const term = `%${escapeLike(value)}%`;
-        const match = `system = 'RXNORM' AND (long_desc LIKE ? ESCAPE '\\' OR short_desc LIKE ? ESCAPE '\\')`;
+        const match = `system = 'RXNORM' AND long_desc LIKE ? ESCAPE '\\'`;
         const { rows, hasMore } = this.fetchPage(
-          `SELECT code, long_desc, short_desc FROM codes
+          `SELECT code, long_desc FROM codes
              WHERE ${match}
              ORDER BY length(code), code`,
-          [term, term],
+          [term],
           page,
         );
         // An empty page is only an unmapped source when the name matches nothing
         // at any offset; past the last page it is a successful empty result.
         const pastEnd =
-          rows.length === 0 &&
-          this.hasAnyRow(`SELECT 1 AS hit FROM codes WHERE ${match}`, [term, term]);
+          rows.length === 0 && this.hasAnyRow(`SELECT 1 AS hit FROM codes WHERE ${match}`, [term]);
         if (rows.length === 0 && !pastEnd) return { kind: 'source_not_found' };
         return {
           kind: 'ok',
@@ -817,19 +948,19 @@ export class CodeIndexService {
             source: 'RXNORM',
             system: 'RXNORM' as const,
             value: r.code as string,
-            ...(r.long_desc || r.short_desc
-              ? { description: (r.long_desc ?? r.short_desc) as string }
-              : {}),
+            description: r.long_desc as string,
           })),
         };
       }
       case 'ndc_to_rxcui': {
         // Normalize to the 11-digit form(s) the map stores (RxNav emits 11-digit)
-        // so a 10-digit hyphenated NDC off a package label resolves; fall back to
-        // a plain digit-strip when the value isn't NDC-shaped.
+        // so a 10-digit hyphenated NDC off a package label resolves. Only the FDA
+        // segment configurations ndcCandidates() recognizes are looked up — the
+        // same test medcode_get_code decodes with — so a spelling the decode refuses
+        // cannot resolve here by having its digits stripped.
         const { candidates } = ndcCandidates(value);
-        const keys = candidates.length > 0 ? candidates : [value.replace(/[^0-9]/g, '')];
-        const { rxcuis } = this.ndcMapLookup(keys);
+        if (candidates.length === 0) return { kind: 'source_not_found' };
+        const { rxcuis } = this.ndcMapLookup(candidates);
         if (rxcuis.size === 0) return { kind: 'source_not_found' };
         return {
           kind: 'ok',
@@ -839,8 +970,8 @@ export class CodeIndexService {
           // decoded package carries the product's name, not a bare identifier the
           // caller has to spend a second decode on.
           hits: [...rxcuis].map((rxcui) => {
-            const row = this.getRow(rxcui, 'RXNORM');
-            const desc = row?.longDesc ?? row?.shortDesc;
+            // The name only: an RxNorm row's short_desc is its term type.
+            const desc = this.getRow(rxcui, 'RXNORM')?.longDesc;
             return {
               source: 'NDC',
               system: 'RXNORM' as const,
@@ -1130,14 +1261,16 @@ export function tokenizeQuery(text: string): string[] {
 
 /**
  * Translate free user text into a safe FTS5 MATCH expression. ANDs prefix-matched
- * tokens so "diabetic neuropathy" requires both stems. Returns null when nothing
- * usable remains (caller treats that as an empty result, not an error).
+ * tokens so "diabetic neuropathy" requires both stems. With `column`, every token
+ * is restricted to that `codes_fts` column. Returns null when nothing usable
+ * remains (caller treats that as an empty result, not an error).
  */
-export function toFtsMatch(text: string): string | null {
+export function toFtsMatch(text: string, column?: 'long_desc'): string | null {
   const tokens = tokenizeQuery(text);
   if (tokens.length === 0) return null;
   // Quote each token (defuses any residual special handling) and prefix-match.
-  return tokens.map((t) => `"${t}"*`).join(' AND ');
+  const filter = column ? `${column} : ` : '';
+  return tokens.map((t) => `${filter}"${t}"*`).join(' AND ');
 }
 
 /**
@@ -1148,6 +1281,24 @@ export function toFtsMatch(text: string): string | null {
  */
 export function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+/**
+ * The lead of a not-found message under a named or detected system, naming the
+ * missed system by its label so every miss reads alike: RxNorm misses a concept,
+ * the others a code. Shared by `checkCode` and medcode_get_code.
+ */
+export function noMatch(system: SystemId, trimmed: string): string {
+  return `No ${SYSTEM_LABELS[system]} ${system === 'RXNORM' ? 'concept' : 'code'} matches "${trimmed}"`;
+}
+
+/**
+ * The clause naming the other bundled systems that hold a code an explicit
+ * `system` missed, ending on the re-call — the caller appends its own purpose
+ * ("to check it there", "to decode it there").
+ */
+export function heldElsewhere(holders: SystemId[]): string {
+  return `it is a code in ${holders.map((sys) => SYSTEM_LABELS[sys]).join(' and ')}. Re-call with \`system\` ${holders.map((sys) => `"${sys}"`).join(' or ')}`;
 }
 
 /** Format a YYYYMMDD storage date as YYYY-MM-DD; pass through anything else. */

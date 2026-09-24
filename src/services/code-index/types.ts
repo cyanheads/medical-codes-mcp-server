@@ -20,9 +20,31 @@ export const SYSTEM_LABELS: Record<SystemId, string> = {
 };
 
 /**
+ * What each system's source release actually carries, for the decoded fields a
+ * system can lack entirely. The `codes` table stores one column set for every
+ * system, so a system without the concept still holds a value there — RxNorm rows
+ * store `billable = 0` and repeat the term type (`SBD`, `IN`, …) in `short_desc`.
+ * The service reads this record to publish `null` for those fields instead of
+ * passing the stored placeholder off as a fact.
+ *
+ *  - `billing` — the release flags codes billable or not. RxNorm identifies drugs
+ *    and has no billing concept, so its `billable` decodes to `null` and
+ *    `medcode_check_code` answers it `valid` with no billing verdict.
+ *  - `shortDescription` — the release publishes an abbreviated description. RxNorm
+ *    publishes a single name; its term type is carried in `chapter`.
+ */
+export const SYSTEM_TRAITS: Record<SystemId, { billing: boolean; shortDescription: boolean }> = {
+  ICD10CM: { billing: true, shortDescription: true },
+  ICD10PCS: { billing: true, shortDescription: true },
+  HCPCS: { billing: true, shortDescription: true },
+  RXNORM: { billing: false, shortDescription: false },
+};
+
+/**
  * A single code row from the `codes` table. The spine of the index — one row
  * per code across all systems. `billable`/`header` are 0/1 integers in SQLite;
- * the service maps them to booleans at the boundary.
+ * the service maps them to booleans at the boundary. `billable` and `shortDesc`
+ * hold a placeholder for a system {@link SYSTEM_TRAITS} marks as lacking them.
  */
 export interface CodeRow {
   /** 1 = billable leaf code. 0 = not billable (header/category or completeness-only). */
@@ -75,11 +97,16 @@ export interface PcsAxisRow {
   value: string;
 }
 
-/** Discriminated validity status for `medcode_check_code`. */
+/**
+ * Discriminated validity status for `medcode_check_code`. `valid` is the verdict
+ * for a current code in a system with no billing concept (RxNorm): it exists and
+ * is current, and there is no billable/not-billable answer to give.
+ */
 export type CheckStatus =
   | 'valid_billable'
   | 'valid_not_billable'
   | 'valid_header'
+  | 'valid'
   | 'terminated'
   | 'unknown';
 

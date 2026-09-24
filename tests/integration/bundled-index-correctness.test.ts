@@ -5,7 +5,7 @@
  * @module tests/integration/bundled-index-correctness.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 import { browseHierarchyTool } from '@/mcp-server/tools/definitions/browse-hierarchy.tool.js';
@@ -13,6 +13,7 @@ import { checkCodeTool } from '@/mcp-server/tools/definitions/check-code.tool.js
 import { getCodeTool } from '@/mcp-server/tools/definitions/get-code.tool.js';
 import { listSystemsTool } from '@/mcp-server/tools/definitions/list-systems.tool.js';
 import { mapCodesTool } from '@/mcp-server/tools/definitions/map-codes.tool.js';
+import { searchCodesTool } from '@/mcp-server/tools/definitions/search-codes.tool.js';
 import { ensureBundledIndex } from '../helpers/bundled-index.ts';
 
 interface CaughtError {
@@ -635,5 +636,534 @@ describe('release provenance and current-code status', () => {
       billable: false,
     });
     expect(out.whyNot).toMatch(/2025-12-31/);
+  });
+});
+
+/**
+ * ICD-10-CM, ICD-10-PCS, and HCPCS Level II carry a real billing signal, and the
+ * RxNorm billability and short-description fixes (#37, #42) derive RxNorm's values
+ * from the system rather than the stored row. These pins hold the three billing
+ * systems byte-for-byte on both client surfaces, so a system-level derivation
+ * that leaks past RxNorm fails here rather than shipping as a silent change.
+ */
+describe('billing-system output, pinned on both surfaces', () => {
+  /** The rendered `format()` block — the first content block of a success. */
+  function formatText(result: Awaited<ReturnType<typeof runToolContract>>): string {
+    const [first] = result.content as { text?: string; type: string }[];
+    return first?.type === 'text' ? (first.text ?? '') : '';
+  }
+
+  it.each([
+    [
+      'E11.9',
+      undefined,
+      { system: 'ICD10CM', code: 'E11.9', status: 'valid_billable', billable: true, whyNot: null },
+      '## E11.9 — ICD-10-CM\n**Status:** ✅ Valid and billable\n**Billable:** Yes',
+    ],
+    [
+      'E11',
+      undefined,
+      {
+        system: 'ICD10CM',
+        code: 'E11',
+        status: 'valid_header',
+        billable: false,
+        whyNot:
+          'Valid category/header, but not billable — submit a more specific child code instead.',
+      },
+      '## E11 — ICD-10-CM\n**Status:** ⚠️ Valid category/header — not billable\n**Billable:** No\n\nValid category/header, but not billable — submit a more specific child code instead.',
+    ],
+    [
+      'B00',
+      'ICD10PCS',
+      {
+        system: 'ICD10PCS',
+        code: 'B00',
+        status: 'valid_not_billable',
+        billable: false,
+        whyNot:
+          'Valid code, but not flagged billable in this release — verify a more specific code is not required before submitting.',
+        alsoInSystems: ['ICD10CM'],
+      },
+      '## B00 — ICD-10-PCS\n**Status:** ⚠️ Valid but not billable\n**Billable:** No\n\nValid code, but not flagged billable in this release — verify a more specific code is not required before submitting.\n\n**Also in:** ICD10CM — the same code string is a different code there, with its own billability; re-call with that `system` to validate it.',
+    ],
+    [
+      'C5271',
+      undefined,
+      {
+        system: 'HCPCS',
+        code: 'C5271',
+        status: 'terminated',
+        billable: false,
+        whyNot: 'Code terminated effective 2025-12-31; no longer valid for current claims.',
+      },
+      '## C5271 — HCPCS Level II\n**Status:** ⛔ Terminated\n**Billable:** No\n\nCode terminated effective 2025-12-31; no longer valid for current claims.',
+    ],
+  ] as const)('check_code %s (system %s) is unchanged', async (code, system, structured, text) => {
+    const result = await runToolContract(checkCodeTool, { code, ...(system ? { system } : {}) });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toEqual(structured);
+    expect(formatText(result)).toBe(text);
+  });
+
+  it('get_code decodes one code per billing system unchanged', async () => {
+    const result = await runToolContract(getCodeTool, {
+      codes: ['E11.9', '0DTJ4ZZ', 'E0110', 'C5271'],
+    });
+    expect(result.structuredContent).toEqual({
+      found: [
+        {
+          system: 'ICD10CM',
+          code: 'E11.9',
+          description: 'Type 2 diabetes mellitus without complications',
+          shortDescription: 'Type 2 diabetes mellitus without complications',
+          billable: true,
+          header: false,
+          chapter: 'E',
+        },
+        {
+          system: 'ICD10PCS',
+          code: '0DTJ4ZZ',
+          description: 'Resection of Appendix, Percutaneous Endoscopic Approach',
+          shortDescription: 'Resection of Appendix, Percutaneous Endoscopic Approach',
+          billable: true,
+          header: false,
+          chapter: '0',
+        },
+        {
+          system: 'HCPCS',
+          code: 'E0110',
+          description:
+            'Crutches, forearm, includes crutches of various materials, adjustable or fixed, pair, complete with tips and handgrips',
+          shortDescription: 'Crutch forearm pair',
+          billable: true,
+          header: false,
+          chapter: 'E',
+        },
+        {
+          system: 'HCPCS',
+          code: 'C5271',
+          description:
+            'Application of low cost skin substitute graft to trunk, arms, legs, total wound surface area up to 100 sq cm; first 25 sq cm or less wound surface area',
+          shortDescription: 'Low cost skin substitute app',
+          billable: false,
+          header: false,
+          chapter: 'C',
+        },
+      ],
+      notFound: [],
+    });
+    expect(formatText(result)).toBe(
+      [
+        '## E11.9 — ICD-10-CM',
+        '**billable: yes, header: no** · chapter E',
+        'Type 2 diabetes mellitus without complications',
+        '',
+        '## 0DTJ4ZZ — ICD-10-PCS',
+        '**billable: yes, header: no** · chapter 0',
+        'Resection of Appendix, Percutaneous Endoscopic Approach',
+        '',
+        '## E0110 — HCPCS Level II',
+        '**billable: yes, header: no** · chapter E',
+        'Crutches, forearm, includes crutches of various materials, adjustable or fixed, pair, complete with tips and handgrips',
+        '_Short:_ Crutch forearm pair',
+        '',
+        '## C5271 — HCPCS Level II',
+        '**billable: no, header: no** · chapter C',
+        'Application of low cost skin substitute graft to trunk, arms, legs, total wound surface area up to 100 sq cm; first 25 sq cm or less wound surface area',
+        '_Short:_ Low cost skin substitute app',
+      ].join('\n'),
+    );
+  });
+
+  it('search_codes and browse_hierarchy render ICD-10-CM rows unchanged', async () => {
+    const search = await runToolContract(searchCodesTool, {
+      query: 'type 2 diabetes mellitus without complications',
+      system: 'ICD10CM',
+      limit: 2,
+    });
+    expect((search.structuredContent as { codes: unknown }).codes).toEqual([
+      {
+        system: 'ICD10CM',
+        code: 'E11.9',
+        description: 'Type 2 diabetes mellitus without complications',
+        shortDescription: 'Type 2 diabetes mellitus without complications',
+        billable: true,
+        header: false,
+        chapter: 'E',
+      },
+      {
+        system: 'ICD10CM',
+        code: 'E11.A',
+        description: 'Type 2 diabetes mellitus without complications in remission',
+        shortDescription: 'Type 2 diabetes mellitus without complications in remission',
+        billable: true,
+        header: false,
+        chapter: 'E',
+      },
+    ]);
+    expect(formatText(search)).toBe(
+      [
+        '## 2 matching code(s)',
+        '',
+        '- **E11.9** (ICD-10-CM; billable: yes, header: no · chapter E): Type 2 diabetes mellitus without complications',
+        '- **E11.A** (ICD-10-CM; billable: yes, header: no · chapter E): Type 2 diabetes mellitus without complications in remission',
+      ].join('\n'),
+    );
+
+    const browse = await runToolContract(browseHierarchyTool, {
+      system: 'ICD10CM',
+      node: 'E11',
+      limit: 2,
+    });
+    expect((browse.structuredContent as { codes: unknown }).codes).toEqual([
+      {
+        system: 'ICD10CM',
+        code: 'E11.0',
+        description: 'Type 2 diabetes mellitus with hyperosmolarity',
+        shortDescription: 'Type 2 diabetes mellitus with hyperosmolarity',
+        billable: false,
+        header: true,
+        chapter: 'E',
+      },
+      {
+        system: 'ICD10CM',
+        code: 'E11.1',
+        description: 'Type 2 diabetes mellitus with ketoacidosis',
+        shortDescription: 'Type 2 diabetes mellitus with ketoacidosis',
+        billable: false,
+        header: true,
+        chapter: 'E',
+      },
+    ]);
+    expect(formatText(browse)).toBe(
+      [
+        '## Browse result (codes)',
+        '',
+        '### 2 child code(s)',
+        '- **E11.0** (ICD-10-CM; billable: no, header: yes · chapter E): Type 2 diabetes mellitus with hyperosmolarity',
+        '- **E11.1** (ICD-10-CM; billable: no, header: yes · chapter E): Type 2 diabetes mellitus with ketoacidosis',
+      ].join('\n'),
+    );
+  });
+});
+
+/** Every text block a content-only client receives, the enrichment trailer included. */
+function allText(result: Awaited<ReturnType<typeof runToolContract>>): string {
+  return (result.content as { text?: string; type: string }[])
+    .flatMap((block) => (block.type === 'text' ? [block.text ?? ''] : []))
+    .join('\n');
+}
+
+/** RXCUI 104849 — fluoxetine 20 MG Oral Capsule [Prozac], a branded product. */
+const PROZAC_ROW = {
+  system: 'RXNORM',
+  code: '104849',
+  description: 'fluoxetine 20 MG Oral Capsule [Prozac]',
+  shortDescription: null,
+  billable: null,
+  header: false,
+  chapter: 'SBD',
+};
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/37
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/42
+describe('RxNorm concepts in the shipped corpus', () => {
+  it.each([
+    ['104849', undefined],
+    ['104849', 'RXNORM'],
+    ['161', undefined],
+    ['161', 'RXNORM'],
+  ] as const)('check_code answers %s (system %s) as valid', async (code, system) => {
+    const result = await runToolContract(checkCodeTool, { code, ...(system ? { system } : {}) });
+    expect(result.structuredContent).toEqual({
+      system: 'RXNORM',
+      code,
+      status: 'valid',
+      billable: null,
+      whyNot: null,
+    });
+    const text = allText(result);
+    expect(text).toContain('**Billable:** n/a');
+    expect(text).not.toMatch(/not billable|more specific|before submitting|claim/i);
+  });
+
+  it.each(['104849', '0777-3105-02'])(
+    'get_code decodes %s with billable and shortDescription null',
+    async (value) => {
+      const result = await runToolContract(getCodeTool, { codes: [value] });
+      const { found } = result.structuredContent as { found: Record<string, unknown>[] };
+      expect(found).toEqual([value === '104849' ? PROZAC_ROW : { ...PROZAC_ROW, source: 'NDC' }]);
+      const text = allText(result);
+      expect(text).toContain('**billable: n/a, header: no** · chapter SBD');
+      expect(text).not.toContain('Short:');
+      expect(text).not.toContain('null');
+    },
+  );
+
+  it('search_codes returns every Prozac hit with billable and shortDescription null', async () => {
+    const result = await runToolContract(searchCodesTool, {
+      query: 'Prozac',
+      system: 'RXNORM',
+      limit: 200,
+    });
+    const { codes } = result.structuredContent as {
+      codes: { billable: unknown; chapter: string; shortDescription: unknown }[];
+    };
+    expect(codes.length).toBeGreaterThan(1);
+    for (const row of codes) expect(row).toMatchObject({ billable: null, shortDescription: null });
+    // The brand concept and the branded products both come back, each typed by chapter.
+    expect(codes.map((row) => row.chapter)).toEqual(expect.arrayContaining(['BN', 'SBD']));
+    const text = allText(result);
+    expect(text).not.toContain('(short:');
+    expect(text.match(/billable: n\/a/g)).toHaveLength(codes.length);
+  });
+
+  it('keeps the term-type chapter filter narrowing RxNorm results', async () => {
+    const result = await runToolContract(searchCodesTool, {
+      query: 'fluoxetine',
+      system: 'RXNORM',
+      chapter: 'SBD',
+      limit: 200,
+    });
+    const { codes } = result.structuredContent as { codes: { code: string; chapter: string }[] };
+    expect(codes.map((row) => row.code)).toContain('104849');
+    expect(codes.every((row) => row.chapter === 'SBD')).toBe(true);
+  });
+
+  it('excludes every RxNorm row under billableOnly and names why', async () => {
+    const result = await runToolContract(searchCodesTool, {
+      query: 'fluoxetine',
+      system: 'RXNORM',
+      billableOnly: true,
+    });
+    const page = result.structuredContent as { codes: unknown[]; notice?: string };
+    expect(page.codes).toEqual([]);
+    expect(page.notice).toMatch(/RxNorm has no billing concept/);
+    expect(page.notice).not.toMatch(/Broaden the terms/);
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/43
+describe('check_code on a real package NDC', () => {
+  it.each(['0777-3105-02', '00777310502'])(
+    'names %s as an NDC for RxNorm product 104849',
+    async (ndc) => {
+      const result = await runToolContract(checkCodeTool, { code: ndc });
+      expect(result.isError).toBe(true);
+      const { error } = result.structuredContent as {
+        error: { data?: { reason?: string; recovery?: { hint?: string } }; message: string };
+      };
+      expect(error.data?.reason).toBe('unknown_code');
+      expect(error.message).toMatch(/National Drug Code \(NDC\)/);
+      expect(error.message).toContain('104849');
+      expect(error.message).not.toMatch(/matches no bundled code shape|CPT/);
+      expect(error.data?.recovery?.hint).toContain('medcode_get_code');
+      expect(error.data?.recovery?.hint).toContain('ndc_to_rxcui');
+    },
+  );
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/48
+  it.each([
+    ['E11.9', 'ICD-10-CM'],
+    // J0120 is the HCPCS tetracycline injection AND ICD-10-CM J01.20 (acute
+    // ethmoidal sinusitis) in the shipped release, so both are named.
+    ['J0120', 'ICD-10-CM and HCPCS Level II'],
+    ['0016070', 'ICD-10-PCS'],
+  ])('names the system holding %s when asked for it in RxNorm', async (code, label) => {
+    const result = await runToolContract(checkCodeTool, { code, system: 'RXNORM' });
+    const { error } = result.structuredContent as {
+      error: { data?: { reason?: string }; message: string };
+    };
+    expect(error.data?.reason).toBe('unknown_code');
+    expect(error.message).toContain(`it is a code in ${label}`);
+    expect(error.message).not.toMatch(/CPT/);
+  });
+
+  it('keeps the generic message for a malformed spelling get_code refuses', async () => {
+    const result = await runToolContract(checkCodeTool, { code: '2-152-1' });
+    const { error } = result.structuredContent as { error: { message: string } };
+    expect(error.message).toMatch(/matches no bundled code shape/);
+    expect(error.message).not.toContain('NDC');
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/35
+describe('ndc_to_rxcui against the shipped NDC map', () => {
+  it.each([
+    '00-7773-10502', // 2-4-5: its digits spell the real 0777-3105-02
+    '00777-310502',
+    '00777-3105-0-2',
+    '00777--3105-02',
+    '00777 3105 02',
+    '00777.3105.02',
+    '00777*3105*02',
+    '00777/3105/02',
+    'NDC 00777-3105-02',
+  ])('refuses %j, as get_code does', async (spelling) => {
+    const mapped = await caught(() =>
+      mapCodesTool.handler(
+        mapCodesTool.input.parse({ from: spelling, direction: 'ndc_to_rxcui' }),
+        createMockContext({ errors: mapCodesTool.errors }),
+      ),
+    );
+    expect(mapped.data?.reason).toBe('no_mapping');
+    const decoded = await caught(() =>
+      getCodeTool.handler(
+        getCodeTool.input.parse({ codes: [spelling] }),
+        createMockContext({ errors: getCodeTool.errors }),
+      ),
+    );
+    expect(decoded.data?.reason).toBe('no_codes_found');
+  });
+
+  it.each(['0777-3105-02', '00777-3105-02', '0777310502', '00777310502'])(
+    'still resolves %s, bare and padded, to 104849 through both tools',
+    async (ndc) => {
+      for (const spelling of [ndc, ` ${ndc} `]) {
+        const mapped = await mapCodesTool.handler(
+          mapCodesTool.input.parse({ from: spelling, direction: 'ndc_to_rxcui' }),
+          createMockContext({ errors: mapCodesTool.errors }),
+        );
+        expect(mapped.hits.map((hit) => hit.value)).toEqual(['104849']);
+        const decoded = await getCodeTool.handler(
+          getCodeTool.input.parse({ codes: [spelling] }),
+          createMockContext({ errors: getCodeTool.errors }),
+        );
+        expect(decoded.found.map((row) => row.code)).toEqual(['104849']);
+      }
+    },
+  );
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/45
+describe('RxNorm name matching against the shipped corpus', () => {
+  it('returns no concept for the SBD term type, with a correct truncated flag', async () => {
+    const result = await runToolContract(searchCodesTool, {
+      query: 'sbd',
+      system: 'RXNORM',
+      limit: 3,
+    });
+    const page = result.structuredContent as { codes: unknown[]; truncated: boolean };
+    expect(page.codes).toEqual([]);
+    expect(page.truncated).toBe(false);
+
+    const err = await caught(() =>
+      mapCodesTool.handler(
+        mapCodesTool.input.parse({ from: 'SBD', direction: 'name_to_rxcui', limit: 3 }),
+        createMockContext({ errors: mapCodesTool.errors }),
+      ),
+    );
+    expect(err.data?.reason).toBe('no_mapping');
+  });
+
+  it('keeps the Prozac search and the aspirin crosswalk as they were', async () => {
+    const prozac = await searchCodesTool.handler(
+      searchCodesTool.input.parse({ query: 'Prozac', system: 'RXNORM', limit: 200 }),
+      createMockContext(),
+    );
+    expect(prozac.codes.map((row) => row.code)).toEqual(['58827', '104849', '205535', '261287']);
+
+    const aspirin: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const ctx = createMockContext({ errors: mapCodesTool.errors });
+      const page = await mapCodesTool.handler(
+        mapCodesTool.input.parse({
+          from: 'aspirin',
+          direction: 'name_to_rxcui',
+          limit: 200,
+          ...(cursor ? { cursor } : {}),
+        }),
+        ctx,
+      );
+      aspirin.push(...page.hits.map((hit) => hit.value));
+      cursor = getEnrichment(ctx)?.nextCursor as string | undefined;
+    } while (cursor);
+    expect(aspirin).toHaveLength(256);
+    expect(aspirin.slice(0, 5)).toEqual(['611', '1191', '103863', '103954', '104474']);
+    expect(aspirin.at(-1)).toBe('2734143');
+  });
+
+  it('still finds ICD-10-CM and HCPCS rows by their short description alone', async () => {
+    // "NEC" is only in the short form of A05 ("… intoxications, NEC"); the long
+    // form spells out "not elsewhere classified". "Whlchr" is the HCPCS short form.
+    const icd = await searchCodesTool.handler(
+      searchCodesTool.input.parse({ query: 'foodborne nec', system: 'ICD10CM' }),
+      createMockContext(),
+    );
+    expect(icd.codes.map((row) => row.code)).toEqual(['A05']);
+
+    const hcpcs = await searchCodesTool.handler(
+      searchCodesTool.input.parse({ query: 'whlchr', system: 'HCPCS', limit: 5 }),
+      createMockContext(),
+    );
+    expect(hcpcs.codes.map((row) => row.code)).toEqual([
+      'K0004',
+      'K0012',
+      'K0013',
+      'K0014',
+      'K0002',
+    ]);
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/38
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/39
+describe('map_codes misses against the shipped corpus', () => {
+  it('names a CPT code as out of scope, and resolves a five-digit RXCUI', async () => {
+    for (const cpt of ['43239', '99213', '36415', '80053']) {
+      const err = await caught(() =>
+        mapCodesTool.handler(
+          mapCodesTool.input.parse({ from: cpt, direction: 'parents' }),
+          createMockContext({ errors: mapCodesTool.errors }),
+        ),
+      );
+      expect(err.data?.reason).toBe('no_mapping');
+      expect(err.message).toContain('CPT or HCPCS Level I code, those are out of scope');
+    }
+    // 90176 is the RXCUI for iron: a bare integer that genuinely resolves.
+    const iron = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: '90176', direction: 'rxcui_to_ndc' }),
+      createMockContext({ errors: mapCodesTool.errors }),
+    );
+    expect(iron.resolvedSystem).toBe('RXNORM');
+  });
+
+  it('names a real package NDC as an NDC, never as a CPT code', async () => {
+    // 00777310502 is the Prozac capsule package get_code decodes to 104849.
+    for (const [from, direction] of [
+      ['00777310502', 'rxcui_to_ingredients'],
+      ['0777310502', 'parents'],
+    ] as const) {
+      const err = await caught(() =>
+        mapCodesTool.handler(
+          mapCodesTool.input.parse({ from, direction }),
+          createMockContext({ errors: mapCodesTool.errors }),
+        ),
+      );
+      expect(err.data?.reason).toBe('no_mapping');
+      expect(err.message).toContain(`"${from}" is a National Drug Code (NDC)`);
+      expect(err.message).not.toMatch(/CPT/);
+    }
+    const forced = await caught(() =>
+      getCodeTool.handler(
+        getCodeTool.input.parse({ codes: ['00777310502'], system: 'RXNORM' }),
+        createMockContext({ errors: getCodeTool.errors }),
+      ),
+    );
+    expect(forced.message).toContain('National Drug Codes (NDC)');
+    expect(forced.message).not.toMatch(/CPT/);
+  });
+
+  it('names a code system passed as `from`', async () => {
+    const err = await caught(() =>
+      mapCodesTool.handler(
+        mapCodesTool.input.parse({ from: 'ICD-10-CM', direction: 'children' }),
+        createMockContext({ errors: mapCodesTool.errors }),
+      ),
+    );
+    expect(err.data?.reason).toBe('no_mapping');
+    expect(err.message).toBe('"ICD-10-CM" is a code system, not a code.');
   });
 });

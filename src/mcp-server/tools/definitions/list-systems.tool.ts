@@ -15,7 +15,7 @@ const SOURCE_URL =
   'https://github.com/cyanheads/medical-codes-mcp-server/blob/main/src/mcp-server/tools/definitions/list-systems.tool.ts';
 
 export const listSystemsTool = tool('medcode_list_systems', {
-  title: 'medical-codes-mcp-server',
+  title: 'List Code Systems',
   description:
     'List the bundled US medical code systems with their release identifiers, effective dates, and code counts. Confirms which ICD-10-CM fiscal year, ICD-10-PCS fiscal year, HCPCS Level II release, and RxNorm normalized set are active before acting on any decode, search, or crosswalk result. The corpus is offline and built at package-build time — this call reports exactly which release is baked into the running server. ICD-10-CM/PCS are the US clinical modifications, not the ICD-10/ICD-11 base.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },

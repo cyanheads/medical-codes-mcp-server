@@ -36,7 +36,7 @@ interface AppOptions {
   setup?: () => Promise<void> | void;
   teardown?: () => Promise<void> | void;
   title: string;
-  tools: { name: string }[];
+  tools: { name: string; title?: string }[];
 }
 
 let options: AppOptions;
@@ -60,6 +60,20 @@ describe('createApp() wiring', () => {
   it('carries the hyphenated repo name on both identity fields', () => {
     expect(options.name).toBe('medical-codes-mcp-server');
     expect(options.title).toBe('medical-codes-mcp-server');
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/41
+  it('gives each tool its own UI title, distinct from the server identity', () => {
+    // `title` on a tool is the row a client lists it under; the hyphenated repo
+    // name belongs to createApp() alone, so six tools sharing it read as one.
+    expect(Object.fromEntries(options.tools.map((t) => [t.name, t.title]))).toEqual({
+      medcode_get_code: 'Get Medical Code',
+      medcode_search_codes: 'Search Medical Codes',
+      medcode_check_code: 'Check Medical Code',
+      medcode_map_codes: 'Map Medical Codes',
+      medcode_browse_hierarchy: 'Browse Code Hierarchy',
+      medcode_list_systems: 'List Code Systems',
+    });
   });
 
   it('registers the six medcode_* tools', () => {

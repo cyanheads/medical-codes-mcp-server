@@ -144,6 +144,43 @@ describe('index query fuzz', () => {
     }
   });
 
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/35
+  it('crosswalks an NDC exactly when get_code decodes it as one', () => {
+    // The last nine spell the fixture key 11111222233 in a configuration the FDA
+    // does not assign; a digit-stripping crosswalk would resolve every one of them.
+    const spellings = [
+      ...MALFORMED_IDENTIFIERS,
+      '11111-2222-33',
+      '11111222233',
+      ' 0904-5161-60 ',
+      '0904516160',
+      '11-1112-22233',
+      '11111-222233',
+      '11111-2222-3-3',
+      '11111 2222 33',
+      '11111.2222.33',
+      '11111*2222*33',
+      'NDC 11111-2222-33',
+      '11111--2222-33',
+      '11111/2222/33',
+    ];
+    for (const raw of spellings) {
+      let mapped: ReturnType<CodeIndexService['mapCode']>;
+      try {
+        mapped = svc.mapCode(raw, 'ndc_to_rxcui');
+      } catch (error) {
+        throw new Error(`ndc_to_rxcui threw for ${JSON.stringify(raw)}`, { cause: error });
+      }
+      const decoded = svc.getByNdc(raw);
+      expect(mapped.kind, JSON.stringify(raw)).toBe(
+        decoded.kind === 'found' ? 'ok' : 'source_not_found',
+      );
+      if (mapped.kind === 'ok' && decoded.kind === 'found') {
+        expect(mapped.hits.map((hit) => hit.value)).toEqual(decoded.rows.map((row) => row.code));
+      }
+    }
+  });
+
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/26
   it('never converts an out-of-range page into a claim about the source', () => {
     // Offsets a caller can reach by holding a cursor across an index rebuild, or by
@@ -246,5 +283,86 @@ describe('index query fuzz', () => {
     );
     expect(out.codes).toEqual([]);
     expect(getEnrichment(ctx)?.notice).toMatch(/broaden/i);
+  });
+});
+
+describe('RxNorm row invariants', () => {
+  /** Queries that reach every fixture RxNorm concept, plus the adversarial corpus. */
+  const QUERIES = [...SEARCH_CORPUS, 'a', 'acetaminophen', 'aspirin', 'tylenol', 'tablet'];
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/37
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/42
+  it('never gives an RxNorm row a billing verdict or a short description', () => {
+    let rxnormRows = 0;
+    for (const query of QUERIES) {
+      for (const system of [undefined, 'RXNORM'] as const) {
+        const { codes } = svc.searchFts(query, { ...(system && { system }), limit: 200 });
+        for (const row of codes) {
+          if (row.system === 'RXNORM') {
+            rxnormRows += 1;
+            expect(row.billable).toBeNull();
+            expect(row.shortDescription).toBeNull();
+            // The term type stays in chapter, where the chapter filter reads it.
+            expect(row.chapter).toMatch(/^[A-Z]+$/);
+          } else {
+            expect(typeof row.billable).toBe('boolean');
+          }
+        }
+      }
+    }
+    // Guard against a vacuous pass: the loop must actually have seen RxNorm rows.
+    expect(rxnormRows).toBeGreaterThan(0);
+  });
+
+  it('checks every RxNorm concept as valid, with or without an explicit system', () => {
+    const concepts = new Set<string>();
+    for (const query of QUERIES) {
+      for (const row of svc.searchFts(query, { system: 'RXNORM', limit: 200 }).codes) {
+        concepts.add(row.code);
+      }
+    }
+    expect(concepts.size).toBe(5);
+    for (const code of concepts) {
+      for (const system of [undefined, 'RXNORM'] as const) {
+        const r = svc.checkCode(code, system);
+        expect(r.kind === 'resolved' && r.result.status).toBe('valid');
+        expect(r.kind === 'resolved' && r.result.whyNot).toBeUndefined();
+      }
+    }
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/43
+  it('names an unresolved value as an NDC exactly when get_code decodes it as one', () => {
+    const spellings = [
+      ...MALFORMED_IDENTIFIERS,
+      '11111-2222-33',
+      '11111222233',
+      '0904-5161-60',
+      '0904516160',
+      '00904516160',
+      '99999-8888-77',
+      '99999888877',
+      '9999988887',
+      '2-152-1',
+      '0002-152-01',
+      ' 11111-2222-33 ',
+    ];
+    let ndcs = 0;
+    for (const raw of spellings) {
+      const r = svc.checkCode(raw);
+      const decodesAsNdc = svc.getByNdc(raw).kind !== 'not_ndc';
+      // An NDC is never a code check_code answers, so it must reach the miss branch.
+      if (decodesAsNdc) {
+        ndcs += 1;
+        expect(r.kind === 'resolved' && r.result.status, JSON.stringify(raw)).toBe('unknown');
+      }
+      if (r.kind !== 'resolved' || r.result.status !== 'unknown') continue;
+      expect(r.result.ndc === true, `ndc flag for ${JSON.stringify(raw)}`).toBe(decodesAsNdc);
+      expect(/NDC/.test(r.result.whyNot ?? ''), `NDC wording for ${JSON.stringify(raw)}`).toBe(
+        decodesAsNdc,
+      );
+    }
+    // Seven of the spellings decode (six to a product, one well-formed with no match).
+    expect(ndcs).toBe(7);
   });
 });

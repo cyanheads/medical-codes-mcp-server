@@ -12,7 +12,13 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 
 import { CodeIndexService, getCodeIndexService } from '@/services/code-index/code-index-service.js';
-import { type MapDirection, SYSTEM_IDS } from '@/services/code-index/types.js';
+import { isBareInteger, ndcCandidates } from '@/services/code-index/detect.js';
+import {
+  type MapDirection,
+  SYSTEM_IDS,
+  SYSTEM_LABELS,
+  type SystemId,
+} from '@/services/code-index/types.js';
 import { encodeNextCursor, resolvePage } from './_pagination.js';
 import { nonBlankString } from './_schema.js';
 
@@ -29,11 +35,14 @@ const DIRECTIONS = [
   'rxcui_to_brands',
 ] as const satisfies readonly MapDirection[];
 
+/** The directions that walk a code's hierarchy — the only ones `system` steers. */
+const HIERARCHY_DIRECTIONS: ReadonlySet<MapDirection> = new Set(['parents', 'children']);
+
 /**
  * The directions whose result sets are unbounded in the corpus and therefore
  * paginate: hierarchy children, the drug-name substring crosswalk, and a
- * product's package NDCs (one RXCUI can carry thousands). The remaining point
- * directions ignore `limit`/`cursor` and carry no continuation metadata.
+ * product's package NDCs (one RXCUI can carry thousands). They are the only ones
+ * that accept `limit` / `cursor`; the point directions reject both.
  */
 const PAGINATED_DIRECTIONS: ReadonlySet<MapDirection> = new Set([
   'children',
@@ -42,23 +51,159 @@ const PAGINATED_DIRECTIONS: ReadonlySet<MapDirection> = new Set([
 ]);
 
 /**
+ * The input fields `direction` does not read, in declaration order. `system`
+ * applies to the hierarchy directions; the drug directions all resolve in
+ * RxNorm, so they accept `system: "RXNORM"` — the value medcode_get_code echoes —
+ * and nothing else. `limit` and `cursor` apply to the paginated directions, and
+ * an empty `cursor` counts as omitted.
+ */
+function inapplicableFields(input: {
+  cursor?: string | undefined;
+  direction: MapDirection;
+  limit?: number | undefined;
+  system?: SystemId | undefined;
+}): ('system' | 'limit' | 'cursor')[] {
+  const fields: ('system' | 'limit' | 'cursor')[] = [];
+  if (input.system && !HIERARCHY_DIRECTIONS.has(input.direction) && input.system !== 'RXNORM') {
+    fields.push('system');
+  }
+  if (!PAGINATED_DIRECTIONS.has(input.direction)) {
+    if (input.limit !== undefined) fields.push('limit');
+    if (input.cursor) fields.push('cursor');
+  }
+  return fields;
+}
+
+/** A system token compared the way callers vary it: case-insensitive, `-` `.` and whitespace dropped. */
+function normalizeSystemToken(value: string): string {
+  return value.toLowerCase().replace(/[-.\s]/g, '');
+}
+
+/**
+ * Every bundled system's id and display label, normalized, mapped to the id —
+ * so `ICD10CM`, `ICD-10-CM`, and `icd 10 cm` all name ICD10CM. Built from the
+ * system enum and labels so a newly bundled system joins it.
+ */
+const SYSTEM_TOKENS: ReadonlyMap<string, SystemId> = new Map(
+  SYSTEM_IDS.flatMap((id) => [
+    [normalizeSystemToken(id), id],
+    [normalizeSystemToken(SYSTEM_LABELS[id]), id],
+  ]),
+);
+
+/** A code from each system, for the recovery that shows where a code goes. */
+const EXAMPLE_CODE: Record<SystemId, string> = {
+  ICD10CM: 'E11.9',
+  ICD10PCS: '0DTJ4ZZ',
+  HCPCS: 'J0120',
+  RXNORM: '161',
+};
+
+/** Recovery for a bare integer no bundled system holds — likely a CPT / HCPCS Level I code. */
+const OUT_OF_SCOPE_RECOVERY =
+  'CPT and HCPCS Level I codes are not bundled. Find the procedure by description with medcode_search_codes instead — ICD-10-PCS covers inpatient procedures and HCPCS Level II covers supplies and services.';
+
+/** Recovery for an NDC sent to a direction that reads `from` as a code or an RXCUI. */
+const NDC_RECOVERY =
+  "Map an NDC with direction ndc_to_rxcui, or decode it with medcode_get_code, to reach its RxNorm product; pass that product's RXCUI to the rxcui_to_* directions.";
+
+/** Recovery for an `ndc_to_rxcui` source in no FDA segment configuration. */
+const NDC_MALFORMED_RECOVERY =
+  'Re-send the NDC as printed on the package, hyphenated in one of those FDA segment configurations or as bare 10/11 digits, with no other separator or prefix. To find a drug by name instead, use direction name_to_rxcui.';
+
+/** Recovery for a well-formed `ndc_to_rxcui` source the bundled NDC map does not hold. */
+const NDC_UNMAPPED_RECOVERY =
+  'The bundled RxNorm set lists no product for this package. Check the NDC against the package label, or find the drug by name with direction name_to_rxcui.';
+
+/**
+ * The `ndc_to_rxcui` miss, split by the same test the lookup ran: a spelling
+ * ndcCandidates() refuses is named as malformed; a well-formed one (hyphenated,
+ * or bare 10/11 digits) is named as unmapped, in medcode_get_code's words — with
+ * the normalized key when the spelling fixes one. Neither recovers to
+ * medcode_get_code, which refuses and misses on the same values.
+ */
+function ndcMiss(from: string): { message: string; recovery: string } {
+  const { candidates } = ndcCandidates(from);
+  if (candidates.length === 0) {
+    return {
+      message: `"${from}" is not an NDC spelling this server reads: an NDC is hyphenated in an FDA segment configuration (4-4-2, 5-3-2, 5-4-1, or 5-4-2) or written as bare 10 or 11 digits.`,
+      recovery: NDC_MALFORMED_RECOVERY,
+    };
+  }
+  const normalized = candidates.length === 1 ? ` (normalized ${candidates[0]})` : '';
+  return {
+    message: `"${from}" is a valid NDC format but no bundled drug maps to it${normalized}.`,
+    recovery: NDC_UNMAPPED_RECOVERY,
+  };
+}
+
+/**
+ * The miss for a source that resolved nowhere, worded for the most likely cause.
+ * A code system named in `from` (letters always) is one, and an `ndc_to_rxcui`
+ * source is always read as an NDC. On a direction that reads `from` as a code or an
+ * RXCUI, so are an NDC — recognized exactly when medcode_get_code would decode
+ * it — and, failing that, a bare integer no bundled system holds. Everything else
+ * keeps the generic message and the declared recovery (`null` here).
+ */
+function sourceMiss(
+  from: string,
+  direction: MapDirection,
+  svc: CodeIndexService,
+): { message: string; recovery: string | null } {
+  const system = SYSTEM_TOKENS.get(normalizeSystemToken(from));
+  if (system) {
+    return {
+      message: `"${from}" is a code system, not a code.`,
+      recovery: HIERARCHY_DIRECTIONS.has(direction)
+        ? `Put the code itself in \`from\` (e.g. ${EXAMPLE_CODE[system]}) and the system in \`system\` ("${system}"). To list a system's top-level codes, call medcode_browse_hierarchy with \`system\` and no \`node\`.`
+        : '`from` takes a drug name, an NDC, or an RXCUI; the drug directions resolve in RxNorm without a `system`.',
+    };
+  }
+  if (direction === 'ndc_to_rxcui') return ndcMiss(from);
+  // name_to_rxcui reads the value as a drug name, not a code.
+  if (direction === 'name_to_rxcui') {
+    return { message: `No bundled code matches "${from}".`, recovery: null };
+  }
+  // A bare 10/11-digit NDC is also a bare integer, so it is named before the CPT test.
+  if (svc.getByNdc(from).kind !== 'not_ndc') {
+    return {
+      message: `"${from}" is a National Drug Code (NDC), not ${HIERARCHY_DIRECTIONS.has(direction) ? 'a code' : 'an RXCUI'}.`,
+      recovery: NDC_RECOVERY,
+    };
+  }
+  // The membership check keeps a bundled RXCUI forced into another `system` from
+  // being called an unbundled code.
+  if (isBareInteger(from) && svc.systemsHolding(from).length === 0) {
+    return {
+      message: `No bundled code matches "${from}". ${svc.outOfScopeNote()}`,
+      recovery: OUT_OF_SCOPE_RECOVERY,
+    };
+  }
+  return { message: `No bundled code matches "${from}".`, recovery: null };
+}
+
+/**
  * The notice for a resolvable source that has no edges in `direction`. Every
  * direction states its own cause and next move, because the causes are not
  * interchangeable facts: an ingredient concept has no ingredients of its own, an
- * ICD-10-PCS code has no prefix parent, and wording either as "a leaf code with
- * no children" would tell the caller something untrue about its input.
+ * ICD-10-PCS code has no prefix parent, an RxNorm concept has no code hierarchy
+ * at all, and wording any of them as "a leaf code with no children" would tell
+ * the caller something untrue about its input.
  */
 function noEdgeNotice(from: string, direction: MapDirection, system: string | null): string {
   const head = `"${from}" resolved in ${system} but has no ${direction}`;
+  if (system === 'RXNORM' && HIERARCHY_DIRECTIONS.has(direction)) {
+    return `${head} — RxNorm concepts have no code hierarchy in this index. Map its drug relationships with the rxcui_to_ingredients, rxcui_to_brands, or rxcui_to_ndc direction instead.`;
+  }
   switch (direction) {
     case 'children':
       return `${head} — it is a leaf code with no children. Decode it with medcode_get_code, or map the opposite direction.`;
     case 'rxcui_to_ndc':
-      return `${head} — no package in the bundled prescribable set lists it. Ingredient and brand-name concepts carry no packages; map a drug product's RXCUI instead.`;
+      return `${head} — no package in the bundled RxNorm set lists it. Ingredient and brand-name concepts carry no packages; map a drug product's RXCUI instead.`;
     case 'rxcui_to_ingredients':
       return `${head} — ingredient, precise-ingredient, multiple-ingredient, and brand-name concepts carry no ingredient edges. Map a drug product's RXCUI instead, or decode this one with medcode_get_code.`;
     case 'rxcui_to_brands':
-      return `${head} — no branded form of it is in the bundled prescribable set. Decode it with medcode_get_code.`;
+      return `${head} — no branded form of it is in the bundled RxNorm set. Decode it with medcode_get_code.`;
     default:
       return system === 'ICD10PCS'
         ? `${head} — ICD-10-PCS codes are axis-based and have no prefix parent. Decode it with medcode_get_code.`
@@ -67,9 +212,9 @@ function noEdgeNotice(from: string, direction: MapDirection, system: string | nu
 }
 
 export const mapCodesTool = tool('medcode_map_codes', {
-  title: 'medical-codes-mcp-server',
+  title: 'Map Medical Codes',
   description:
-    "Crosswalk a US medical code or drug across systems and within a hierarchy. Hierarchy directions: `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full ancestor or descendant path (ICD-10-CM/HCPCS; ICD-10-PCS codes have no prefix parent). A resolvable source with no edge in the requested direction is a successful empty result with a notice, not an error. A source code string that also exists in another bundled system carries `alsoInSystems` naming it, since only the resolved system's hierarchy was walked. Drug directions (RxNorm): `name_to_rxcui` (drug name → RXCUI), `ndc_to_rxcui` and `rxcui_to_ndc` (NDC ↔ RXCUI; NDCs accepted hyphenated in an FDA segment configuration — 4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2 — or as bare 10/11 digits; `ndc_to_rxcui` names the product it decoded to), `rxcui_to_ingredients` and `rxcui_to_brands` (RXCUI → ingredient/brand RXCUIs, each with the target's RxNorm name and its `conceptType` — read that before counting a combination product's ingredients). Every result carries `source` provenance (which system or edge answered) so a chained call (e.g. into openfda with a resolved NDC) uses the right identifier. The `children`, `name_to_rxcui`, and `rxcui_to_ndc` directions can return large sets and paginate: a `nextCursor` in the response is passed back as `cursor` (with an optional `limit` page size) to walk the full set; the point directions ignore both.",
+    "Crosswalk a US medical code or drug across systems and within a hierarchy. Hierarchy directions: `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full ancestor or descendant path (ICD-10-CM/HCPCS; ICD-10-PCS codes have no prefix parent, and RxNorm concepts no code hierarchy). A resolvable source with no edge in the requested direction is a successful empty result with a notice, not an error. A source code string that also exists in another bundled system carries `alsoInSystems` naming it, since only the resolved system's hierarchy was walked. Drug directions (RxNorm): `name_to_rxcui` (drug name → RXCUI), `ndc_to_rxcui` and `rxcui_to_ndc` (NDC ↔ RXCUI; NDCs accepted hyphenated in an FDA segment configuration — 4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2 — or as bare 10/11 digits; `ndc_to_rxcui` names the product it decoded to), `rxcui_to_ingredients` and `rxcui_to_brands` (RXCUI → ingredient/brand RXCUIs, each with the target's RxNorm name and its `conceptType` — read that before counting a combination product's ingredients). Every result carries `source` provenance (which system or edge answered) so a chained call (e.g. into openfda with a resolved NDC) uses the right identifier. The `children`, `name_to_rxcui`, and `rxcui_to_ndc` directions can return large sets and paginate: a `nextCursor` in the response is passed back as `cursor` (with an optional `limit` page size) to walk the full set. A field the direction does not use is rejected with `field_not_applicable`: `limit` and `cursor` on the point directions, and a `system` other than RXNORM on the drug directions.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -86,7 +231,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
       .enum(SYSTEM_IDS)
       .optional()
       .describe(
-        'For parents/children, force the source code into this system. Omit to auto-detect.',
+        'For parents/children, force the source code into this system. Omit to auto-detect. The drug directions resolve in RxNorm and accept only "RXNORM" (no effect); any other value there is rejected.',
       ),
     limit: z
       .number()
@@ -95,13 +240,13 @@ export const mapCodesTool = tool('medcode_map_codes', {
       .max(200)
       .optional()
       .describe(
-        'Max results per page for the paginated directions (children, name_to_rxcui, rxcui_to_ndc). Defaults to MEDCODE_MAX_RESULTS (50), ceiling 200. Ignored by the point directions.',
+        'Max results per page, for the paginated directions only (children, name_to_rxcui, rxcui_to_ndc). Defaults to MEDCODE_MAX_RESULTS (50), ceiling 200. Rejected on every other direction.',
       ),
     cursor: z
       .string()
       .optional()
       .describe(
-        "Opaque continuation token from a previous response's `nextCursor`, for the paginated directions (children, name_to_rxcui, rxcui_to_ndc). Omit for the first page.",
+        "Opaque continuation token from a previous response's `nextCursor`, for the paginated directions only (children, name_to_rxcui, rxcui_to_ndc). Omit for the first page; an empty string counts as omitted. A non-empty cursor on any other direction is rejected.",
       ),
   }),
 
@@ -177,11 +322,18 @@ export const mapCodesTool = tool('medcode_map_codes', {
       .string()
       .optional()
       .describe(
-        'Guidance whenever a resolvable source returns no hits, naming which of the two causes applies: it has no edge in the requested direction (a top-level code has no parent; a leaf has no children; ICD-10-PCS codes have no prefix parent), or the `cursor` starts past the last page of a direction that does have results.',
+        'Guidance whenever a resolvable source returns no hits, naming which of the two causes applies: it has no edge in the requested direction (a top-level code has no parent; a leaf has no children; ICD-10-PCS codes have no prefix parent; RxNorm concepts have no code hierarchy), or the `cursor` starts past the last page of a direction that does have results.',
       ),
   },
 
   errors: [
+    {
+      reason: 'field_not_applicable',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'A `system`, `limit`, or `cursor` was sent on a direction that does not use it.',
+      recovery:
+        'Drop the named fields and re-call. `system` steers only parents and children (the drug directions accept only "RXNORM", which changes nothing); `limit` and `cursor` apply only to children, name_to_rxcui, and rxcui_to_ndc.',
+    },
     {
       reason: 'no_mapping',
       code: JsonRpcErrorCode.NotFound,
@@ -207,11 +359,31 @@ export const mapCodesTool = tool('medcode_map_codes', {
   handler(input, ctx) {
     const svc = getCodeIndexService();
 
+    // First: a direction this build cannot run fails whatever fields it carries, so
+    // a field rejection here would only send the caller to re-call into this error.
     if (CodeIndexService.isDrugDirection(input.direction) && !svc.hasRxNorm()) {
       throw ctx.fail(
         'direction_unavailable',
         `The "${input.direction}" crosswalk needs RxNorm, which is not present in this build of the index.`,
         { ...ctx.recoveryFor('direction_unavailable') },
+      );
+    }
+
+    // Ahead of the cursor decode and every lookup: a field this direction would
+    // silently drop is a caller mistake, not a query to answer.
+    const rejected = inapplicableFields(input);
+    if (rejected.length > 0) {
+      const named = rejected.map((field) =>
+        field === 'system' ? `\`system\` ("${input.system}")` : `\`${field}\``,
+      );
+      throw ctx.fail(
+        'field_not_applicable',
+        `Not used by direction "${input.direction}": ${named.join(', ')}.`,
+        {
+          direction: input.direction,
+          fields: rejected,
+          ...ctx.recoveryFor('field_not_applicable'),
+        },
       );
     }
 
@@ -226,9 +398,12 @@ export const mapCodesTool = tool('medcode_map_codes', {
       );
     }
     if (result.kind === 'source_not_found') {
-      throw ctx.fail('no_mapping', `No bundled code matches "${input.from.trim()}".`, {
-        ...ctx.recoveryFor('no_mapping'),
-      });
+      const miss = sourceMiss(input.from.trim(), input.direction, svc);
+      throw ctx.fail(
+        'no_mapping',
+        miss.message,
+        miss.recovery ? { recovery: { hint: miss.recovery } } : ctx.recoveryFor('no_mapping'),
+      );
     }
 
     // The source resolved in one system while the same code string exists in
@@ -238,7 +413,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
 
     // Disclose truncation + continuation for the paginated directions (even at zero
     // hits — a leaf's empty children page is still "complete"). The point directions
-    // ignore the page and carry no continuation metadata.
+    // take no page and carry no continuation metadata.
     if (PAGINATED_DIRECTIONS.has(input.direction)) {
       ctx.enrich({ truncated: result.hasMore, shown: result.hits.length, cap: page.limit });
       if (result.hasMore) ctx.enrich({ nextCursor: encodeNextCursor(page) });

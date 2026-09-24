@@ -29,7 +29,12 @@ const CodeNodeSchema = z
     code: z.string().describe('The child code in display form.'),
     description: z.string().nullable().describe('Official long description, or null.'),
     shortDescription: z.string().nullable().describe('Official short description, or null.'),
-    billable: z.boolean().describe('True when the code is a billable leaf.'),
+    billable: z
+      .boolean()
+      .nullable()
+      .describe(
+        'True when the code is a billable leaf. Null when the system has no billing concept.',
+      ),
     header: z.boolean().describe('True when the code is a non-billable category/header.'),
     chapter: z.string().nullable().describe('Chapter/range bucket, or null.'),
   })
@@ -44,7 +49,7 @@ const AxisNodeSchema = z
   .describe('A valid ICD-10-PCS axis value at a given character position.');
 
 export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
-  title: 'medical-codes-mcp-server',
+  title: 'Browse Code Hierarchy',
   description:
     "Walk a US medical code system's hierarchy for discovery without a search term. With no `node`, returns the top-level entries (ICD-10-CM categories, HCPCS range buckets, or ICD-10-PCS first-axis values). With a `node`, returns its immediate children. ICD-10-CM and HCPCS use a prefix hierarchy (a shorter code is the parent of a longer one); ICD-10-PCS is axis-based — each of its 7 characters is an independent axis (section, body system, root operation, body part, approach, device, qualifier), but only the top-level Section axis is browsable (omit `node`): positions 2–7 are context-dependent on the preceding axis path and are not enumerable from a flat partial code. Lets an agent orient in an unfamiliar system or enumerate a category's specific codes. A large child set paginates: when the response carries a `nextCursor`, pass it back as `cursor` to fetch the next page.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
