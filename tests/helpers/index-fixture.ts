@@ -27,6 +27,18 @@ import {
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const FIXTURE_PATH = join(ROOT, 'tests', 'fixtures', 'medical-codes.fixture.db');
+const NO_CLASS_LAYER_FIXTURE_PATH = join(
+  ROOT,
+  'tests',
+  'fixtures',
+  'medical-codes.no-class-layer.fixture.db',
+);
+const EMPTY_CLASS_LAYER_FIXTURE_PATH = join(
+  ROOT,
+  'tests',
+  'fixtures',
+  'medical-codes.empty-class-layer.fixture.db',
+);
 const BUILDER_PATH = join(ROOT, 'scripts', 'build-fixture-db.ts');
 
 /**
@@ -43,11 +55,11 @@ const BUILDER_PATH = join(ROOT, 'scripts', 'build-fixture-db.ts');
  * notices the file changed identity. A rebuild has to happen before any worker
  * opens the DB, which this helper — running inside the workers — cannot do.
  */
-function assertFixtureCurrent(): void {
-  if (!existsSync(FIXTURE_PATH)) return;
-  if (statSync(BUILDER_PATH).mtimeMs <= statSync(FIXTURE_PATH).mtimeMs) return;
+function assertFixtureCurrent(path: string): void {
+  if (!existsSync(path)) return;
+  if (statSync(BUILDER_PATH).mtimeMs <= statSync(path).mtimeMs) return;
   throw new Error(
-    `The cached test fixture at ${FIXTURE_PATH} is older than scripts/build-fixture-db.ts, ` +
+    `The cached test fixture at ${path} is older than scripts/build-fixture-db.ts, ` +
       'so it is missing rows the tests expect. Delete it and re-run — it is gitignored and ' +
       'rebuilt automatically when absent.',
   );
@@ -68,13 +80,16 @@ function assertFixtureCurrent(): void {
  * the path (even atomically, by rename) makes SQLite fail connections that are
  * already open on the old one.
  */
-function buildFixture(): void {
-  mkdirSync(dirname(FIXTURE_PATH), { recursive: true });
-  const scratch = `${FIXTURE_PATH}.${randomUUID()}.tmp`;
+function buildFixture(path: string, builderArgs: string[] = []): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const scratch = `${path}.${randomUUID()}.tmp`;
   try {
-    execFileSync('bun', ['run', BUILDER_PATH, scratch], { cwd: ROOT, stdio: 'ignore' });
+    execFileSync('bun', ['run', BUILDER_PATH, scratch, ...builderArgs], {
+      cwd: ROOT,
+      stdio: 'ignore',
+    });
     try {
-      linkSync(scratch, FIXTURE_PATH);
+      linkSync(scratch, path);
     } catch (error) {
       // EEXIST — a sibling worker published first. Its build is byte-identical
       // input to ours, so adopt it; anything else is a real filesystem failure.
@@ -92,10 +107,37 @@ export async function ensureIndex(): Promise<ReturnType<typeof getCodeIndexServi
   if (!ready) {
     // Must be set before the service first reads getServerConfig() (lazy-cached).
     process.env.MEDCODE_DB_PATH = FIXTURE_PATH;
-    assertFixtureCurrent();
-    if (!existsSync(FIXTURE_PATH)) buildFixture();
+    assertFixtureCurrent(FIXTURE_PATH);
+    if (!existsSync(FIXTURE_PATH)) buildFixture(FIXTURE_PATH);
     await initCodeIndexService();
     ready = true;
   }
   return getCodeIndexService();
+}
+
+/**
+ * Path to the fixture built as an index from before the RxClass layer — the same
+ * rows with no class tables — building it if missing. It does not touch the
+ * service singleton: open it with `MEDCODE_DB_PATH` set to this path in a fresh
+ * module registry (`vi.resetModules()`), as the lifecycle suite does.
+ */
+export function ensureFixtureWithoutClassLayer(): string {
+  assertFixtureCurrent(NO_CLASS_LAYER_FIXTURE_PATH);
+  if (!existsSync(NO_CLASS_LAYER_FIXTURE_PATH)) {
+    buildFixture(NO_CLASS_LAYER_FIXTURE_PATH, ['--without-class-layer']);
+  }
+  return NO_CLASS_LAYER_FIXTURE_PATH;
+}
+
+/**
+ * Path to the fixture built as `build-index.ts` builds an index from sources with
+ * no RxClass cache — the class tables exist but hold no rows — building it if
+ * missing. Opened the same way as {@link ensureFixtureWithoutClassLayer}.
+ */
+export function ensureFixtureWithEmptyClassLayer(): string {
+  assertFixtureCurrent(EMPTY_CLASS_LAYER_FIXTURE_PATH);
+  if (!existsSync(EMPTY_CLASS_LAYER_FIXTURE_PATH)) {
+    buildFixture(EMPTY_CLASS_LAYER_FIXTURE_PATH, ['--empty-class-layer']);
+  }
+  return EMPTY_CLASS_LAYER_FIXTURE_PATH;
 }

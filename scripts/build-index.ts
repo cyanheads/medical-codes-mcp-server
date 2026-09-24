@@ -26,9 +26,17 @@
  *      `<from-dir>/rxnav/`; this script reads that cache (still no download here).
  *      RxNav serves the public-domain RxNorm normalized vocabulary, never the
  *      UMLS-licensed source vocabularies — the same redistribution profile.
+ *  - RxClass drug-class edges: the keyless RxClass REST API. Run
+ *      `scripts/ingest/fetch-rxclass.ts` after the RxNav fetch to cache class nodes,
+ *      source versions, and `class/byRxcui` for every bundled ingredient under
+ *      `<from-dir>/rxclass/`. Only the US-government sources are baked — MEDRT,
+ *      FDASPL, FMTSME, VA, RXNORM (CSA schedules), CDC (CVX); ATC/ATCPROD (WHO
+ *      terms), SNOMEDCT (SNOMED CT Affiliate license), and DAILYMED (duplicates
+ *      FDASPL, no version) are dropped. Needs the RxNorm layer to key on.
  *
  * Usage:
  *   bun run scripts/ingest/fetch-rxnav.ts                                    # once, for RxNorm
+ *   bun run scripts/ingest/fetch-rxclass.ts                                  # then, for RxClass
  *   bun run scripts/build-index.ts --from-dir ./.sources --fy 2026 [--out data/medical-codes.db]
  *   Expected files in --from-dir (match the names above; the script probes common variants).
  * @module scripts/build-index
@@ -45,7 +53,10 @@ import {
   parseIcd10cmOrder,
   parseIcd10pcsAxes,
   parseIcd10pcsOrder,
+  parseRxClass,
   parseRxNav,
+  type RxClassResponseRecord,
+  type RxClassSnapshot,
   type RxNavConcept,
   type RxNavProduct,
 } from './ingest/parsers.ts';
@@ -66,6 +77,25 @@ function findFile(dir: string, ...needles: string[]): string | undefined {
     if (lower.some((needle) => n.includes(needle))) return join(dir, name);
   }
   return;
+}
+
+/**
+ * The time a fetcher recorded for its completed cache (`<cacheDir>/meta.json`,
+ * written by `fetch-rxnav.ts` / `fetch-rxclass.ts`). The index reports this as the
+ * snapshot date, never the build time, so a rebuild from an unchanged cache
+ * reports the same date. A cache without one fails the build.
+ */
+function cacheFetchedAt(cacheDir: string, fetcher: string): string {
+  const metaPath = join(cacheDir, 'meta.json');
+  const fetchedAt = existsSync(metaPath)
+    ? (JSON.parse(readFileSync(metaPath, 'utf-8')) as { fetchedAt?: unknown }).fetchedAt
+    : undefined;
+  if (typeof fetchedAt !== 'string' || Number.isNaN(Date.parse(fetchedAt))) {
+    throw new Error(
+      `${metaPath} does not record when the cache was fetched — complete the cache with scripts/ingest/${fetcher}`,
+    );
+  }
+  return fetchedAt;
 }
 
 function ingestIcd10cm(w: DbWriter, dir: string, fy: string): boolean {
@@ -152,15 +182,20 @@ function ingestHcpcs(w: DbWriter, dir: string, year: string): boolean {
   return true;
 }
 
-function ingestRxNorm(w: DbWriter, dir: string): boolean {
+/**
+ * Ingest the RxNorm layer. Returns the bundled concepts (every `codes(RXNORM)`
+ * row), which the class layer keys on, or null when the RxNav cache is absent.
+ */
+function ingestRxNorm(w: DbWriter, dir: string): RxNavConcept[] | null {
   // RxNorm comes from the keyless RxNav cache the fetcher writes under
   // `<dir>/rxnav/` (concepts.json + products.jsonl) — NOT the RRF files, which
   // NLM gates behind UMLS/UTS auth. Run scripts/ingest/fetch-rxnav.ts first.
   const rxnavDir = join(dir, 'rxnav');
   const conceptsPath = join(rxnavDir, 'concepts.json');
   const productsPath = join(rxnavDir, 'products.jsonl');
-  if (!existsSync(conceptsPath) || !existsSync(productsPath)) return false;
+  if (!existsSync(conceptsPath) || !existsSync(productsPath)) return null;
 
+  const fetchedAt = cacheFetchedAt(rxnavDir, 'fetch-rxnav.ts');
   const concepts = JSON.parse(readFileSync(conceptsPath, 'utf-8')).concepts as RxNavConcept[];
   const products = readFileSync(productsPath, 'utf-8')
     .split('\n')
@@ -178,16 +213,61 @@ function ingestRxNorm(w: DbWriter, dir: string): boolean {
     // The current RxNorm normalized drug vocabulary (ingredients, brand names,
     // clinical/branded drugs, and packs) from RxNav — the public-domain layer,
     // never the UMLS-licensed source vocabularies. RxNav has no monthly release
-    // label, so the build-meta `built_at` timestamp records the snapshot date.
+    // label, so `built_at` carries the snapshot date: the time the RxNav fetch
+    // completed the cache, read from the cache rather than taken from this build.
     releaseId: 'RxNorm (current normalized set)',
     effectiveStart: null,
     effectiveEnd: null,
     codeCount: w.countFor('RXNORM'),
     sourceUrl: 'https://rxnav.nlm.nih.gov/',
+    builtAt: fetchedAt,
   });
   console.log(
-    `  RxNorm: ${w.countFor('RXNORM')} concepts, ${parsed.rels.length} edges, ${parsed.ndcs.length} NDC maps`,
+    `  RxNorm: ${w.countFor('RXNORM')} concepts, ${parsed.rels.length} edges, ${parsed.ndcs.length} NDC maps (RxNav snapshot ${fetchedAt})`,
   );
+  const bundled = new Set(parsed.codes.map((c) => c.code));
+  return concepts.filter((c) => bundled.has(c.rxcui));
+}
+
+/**
+ * Ingest the RxClass drug-class layer from the cache `fetch-rxclass.ts` writes
+ * under `<dir>/rxclass/`, keyed on the bundled RxNorm concepts. Edges to any other
+ * RXCUI are dropped, and the cache must cover every bundled `IN` + `MIN`.
+ */
+function ingestRxClass(w: DbWriter, dir: string, concepts: RxNavConcept[] | null): boolean {
+  const rxclassDir = join(dir, 'rxclass');
+  const byRxcuiPath = join(rxclassDir, 'byrxcui.jsonl');
+  if (!concepts || !existsSync(byRxcuiPath)) return false;
+
+  const readSnapshot = (name: string) =>
+    JSON.parse(readFileSync(join(rxclassDir, name), 'utf-8')) as RxClassSnapshot;
+  const parsed = parseRxClass({
+    bundled: new Set(concepts.map((c) => c.rxcui)),
+    queried: concepts.filter((c) => c.tty === 'IN' || c.tty === 'MIN').map((c) => c.rxcui),
+    byRxcui: readFileSync(byRxcuiPath, 'utf-8')
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as RxClassResponseRecord),
+    classes: readSnapshot('classes.json'),
+    versions: readSnapshot('versions.json'),
+    fetchedAt: cacheFetchedAt(rxclassDir, 'fetch-rxclass.ts'),
+  });
+
+  w.begin();
+  for (const c of parsed.classes) w.addRxClassClass(c);
+  for (const e of parsed.edges) w.addRxClassEdge(e);
+  for (const s of parsed.sources) w.writeRxClassSource(s);
+  w.commit();
+  console.log(
+    `  RxClass: ${parsed.classes.length} classes, ${parsed.edges.length} edges ` +
+      `(dropped: ${parsed.dropped.excludedSource} excluded-source, ` +
+      `${parsed.dropped.unbundledRxcui} non-bundled RXCUI, ${parsed.dropped.duplicate} duplicate)`,
+  );
+  for (const s of parsed.sources) {
+    console.log(
+      `    ${s.source.padEnd(7)} ${String(s.version ?? '(no version)').padEnd(18)} ${s.classCount} classes, ${s.edgeCount} edges`,
+    );
+  }
   return true;
 }
 
@@ -212,11 +292,16 @@ function main(): void {
   console.log(`Building index from ${fromDir} → ${outPath}`);
   const w = createDbWriter(outPath);
 
+  const icd10cm = ingestIcd10cm(w, fromDir, fy);
+  const icd10pcs = ingestIcd10pcs(w, fromDir, fy);
+  const hcpcs = ingestHcpcs(w, fromDir, year);
+  const rxnormConcepts = ingestRxNorm(w, fromDir); // only if the RxNav cache (<dir>/rxnav/) is present
   const built = {
-    icd10cm: ingestIcd10cm(w, fromDir, fy),
-    icd10pcs: ingestIcd10pcs(w, fromDir, fy),
-    hcpcs: ingestHcpcs(w, fromDir, year),
-    rxnorm: ingestRxNorm(w, fromDir), // only if the RxNav cache (<dir>/rxnav/) is present
+    icd10cm,
+    icd10pcs,
+    hcpcs,
+    rxnorm: rxnormConcepts !== null,
+    rxclass: ingestRxClass(w, fromDir, rxnormConcepts), // needs RxNorm + <dir>/rxclass/
   };
 
   w.finalize();
@@ -225,7 +310,7 @@ function main(): void {
   if (!any) {
     console.error(
       `No recognized source files found in ${fromDir}. Expected at least one of: ` +
-        'icd10cm-order-*.txt, icd10pcs_order_*.txt, *ANWEB.txt, or a rxnav/ cache dir.',
+        'icd10cm-order-*.txt, icd10pcs_order_*.txt, *ANWEB.txt, or an rxnav/ cache dir.',
     );
     process.exit(1);
   }

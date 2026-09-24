@@ -73,7 +73,53 @@ CREATE TABLE build_meta (
   source_url      TEXT,
   built_at        TEXT NOT NULL
 ) WITHOUT ROWID;
+
+CREATE TABLE rxclass_class (
+  class_type TEXT NOT NULL,
+  class_id   TEXT NOT NULL,
+  class_name TEXT NOT NULL,
+  PRIMARY KEY (class_type, class_id)
+) WITHOUT ROWID;
+
+CREATE INDEX idx_rxclass_class_id ON rxclass_class (class_id);
+
+CREATE TABLE rxclass_edge (
+  rxcui      TEXT NOT NULL,
+  class_type TEXT NOT NULL,
+  class_id   TEXT NOT NULL,
+  source     TEXT NOT NULL,
+  relation   TEXT NOT NULL,
+  PRIMARY KEY (rxcui, class_type, class_id, source, relation)
+) WITHOUT ROWID;
+
+CREATE INDEX idx_rxclass_edge_class ON rxclass_edge (class_id, class_type);
+
+CREATE TABLE rxclass_source (
+  source      TEXT PRIMARY KEY,
+  version     TEXT,
+  class_count INTEGER NOT NULL,
+  edge_count  INTEGER NOT NULL,
+  fetched_at  TEXT NOT NULL
+) WITHOUT ROWID;
 `;
+
+/**
+ * The RxClass drug-class layer's tables. An index built before the layer existed
+ * (a custom `MEDCODE_DB_PATH`) has none of them.
+ *
+ *  - `rxclass_class` — every class node of the bundled class types, including
+ *    hierarchy nodes with no direct member. A class ID is unique within its type
+ *    only (a few MeSH IDs are both `CHEM` and `DISEASE`), hence the composite key.
+ *  - `rxclass_edge` — one row per RXCUI × class × asserting source × relation, for
+ *    bundled RXCUIs only, exactly as RxClass attaches them (mostly at `IN`/`PIN`/
+ *    `MIN`; VA classes and CSA schedules at the product). No inherited rows: a
+ *    product reaches its ingredients' classes through `rxnorm_rel has_ingredient`.
+ *    `relation` is the RxClass rela, lowercased to RxClass's own `relas` vocabulary.
+ *  - `rxclass_source` — per bundled source: its RxClass version (null when RxClass
+ *    publishes none), the classes it asserts at least one edge to, its edge count,
+ *    and when the snapshot was fetched.
+ */
+export const RXCLASS_TABLES = ['rxclass_class', 'rxclass_edge', 'rxclass_source'] as const;
 
 /**
  * Insert a `codes` row and mirror it into the FTS index in one call. The build

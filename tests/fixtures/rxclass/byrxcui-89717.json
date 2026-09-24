@@ -1,0 +1,20 @@
+{
+  "rxclassDrugInfoList": {
+    "rxclassDrugInfo": [
+      {
+        "minConcept": {
+          "rxcui": "376541",
+          "name": "thymol iodide Topical Powder",
+          "tty": "SCDF"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "DE109",
+          "className": "ANTI-INFECTIVE,TOPICAL,OTHER",
+          "classType": "VA"
+        },
+        "rela": "has_VAClass",
+        "relaSource": "VA"
+      }
+    ]
+  }
+}

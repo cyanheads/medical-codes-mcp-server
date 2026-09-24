@@ -15,6 +15,8 @@
  *    Action Effective Date, pos 285-292 Termination Date (YYYYMMDD, blank=active).
  *  - RxNorm RRF: pipe-delimited. RXNCONSO (RXCUI,LAT,…,SAB,TTY,CODE,STR,…),
  *    RXNSAT (RXCUI,…,ATN,SAB,ATV,…), RXNREL (RXCUI1,…,REL,RXCUI2,…,RELA,…).
+ *  - RxNav / RxClass JSON: cached API responses (`fetch-rxnav.ts`,
+ *    `fetch-rxclass.ts`), already parsed from JSON.
  * @module scripts/ingest/parsers
  */
 
@@ -24,7 +26,18 @@ import {
   icd10cmChapterLetter,
   icd10cmParent,
 } from '@/services/code-index/schema.js';
-import type { CodeInput } from '../_db-writer.ts';
+import {
+  RXCLASS_CLASS_TYPES,
+  RXCLASS_SOURCES,
+  type RxClassSource,
+  type RxClassType,
+} from '@/services/code-index/types.js';
+import type {
+  CodeInput,
+  RxClassClassInput,
+  RxClassEdgeInput,
+  RxClassSourceInput,
+} from '../_db-writer.ts';
 
 /** Slice a fixed-width field by 1-based inclusive [start, end] (CMS doc convention). */
 function field(line: string, start1: number, end1: number): string {
@@ -352,6 +365,190 @@ export function parseRxNav(concepts: RxNavConcept[], products: RxNavProduct[]): 
   }
 
   return { codes, rels, ndcs };
+}
+
+/** One cached `class/byRxcui` response — one line of `byrxcui.jsonl` from the fetcher. */
+export interface RxClassResponseRecord {
+  body: unknown;
+  rxcui: string;
+  status: number;
+}
+
+/** A cached set of raw responses keyed by source or class type (`versions.json`, `classes.json`). */
+export interface RxClassSnapshot {
+  fetchedAt: string;
+  responses: Record<string, unknown>;
+}
+
+/** Everything `parseRxClass` reads: the fetcher's cache plus the bundled RxNorm RXCUIs. */
+export interface RxClassParseInput {
+  /** Every RXCUI in `codes(RXNORM)` — edges to any other RXCUI are dropped. */
+  bundled: ReadonlySet<string>;
+  byRxcui: RxClassResponseRecord[];
+  /** `allClasses` response per bundled class type. */
+  classes: RxClassSnapshot;
+  /** When the fetcher completed the cache (its `meta.json`) — every source row's `fetched_at`. */
+  fetchedAt: string;
+  /** The RXCUIs the cache must hold a response for (the bundled `IN` + `MIN` set). */
+  queried: readonly string[];
+  /** `version/<SRC>` response per bundled source. */
+  versions: RxClassSnapshot;
+}
+
+/** Normalized class-layer rows, plus what the filters removed. */
+export interface RxClassParseResult {
+  classes: RxClassClassInput[];
+  dropped: { excludedSource: number; unbundledRxcui: number; duplicate: number };
+  edges: RxClassEdgeInput[];
+  sources: RxClassSourceInput[];
+}
+
+interface RxClassDrugInfo {
+  minConcept?: { rxcui?: string; tty?: string };
+  rela?: string;
+  relaSource?: string;
+  rxclassMinConceptItem?: { classId?: string; className?: string; classType?: string };
+}
+
+const BUNDLED_SOURCES: ReadonlySet<string> = new Set(RXCLASS_SOURCES);
+const BUNDLED_CLASS_TYPES: ReadonlySet<string> = new Set(RXCLASS_CLASS_TYPES);
+
+function isBundledSource(value: string | undefined): value is RxClassSource {
+  return value !== undefined && BUNDLED_SOURCES.has(value);
+}
+
+function isClassType(value: string | undefined): value is RxClassType {
+  return value !== undefined && BUNDLED_CLASS_TYPES.has(value);
+}
+
+/** A snapshot entry, or a loud failure naming what is missing. */
+function snapshotEntry(snapshot: RxClassSnapshot, key: string, label: string): unknown {
+  if (!(key in snapshot.responses)) {
+    throw new Error(`RxClass ${label} snapshot has no response for ${key} — refetch it`);
+  }
+  return snapshot.responses[key];
+}
+
+/**
+ * Parse the cached RxClass drug-class data (see `scripts/ingest/fetch-rxclass.ts`)
+ * into the class layer: class nodes, edges on bundled RXCUIs, and per-source
+ * provenance.
+ *
+ *  - Edges come from `class/byRxcui` items, keyed by the item's own `minConcept`
+ *    (an ingredient query also returns its PIN/MIN and product members). Only the
+ *    bundled sources ({@link RXCLASS_SOURCES}) are kept, only members that are
+ *    bundled RXCUIs, and one row per RXCUI × class type × class × source ×
+ *    relation — the same edge recurs across the responses of every ingredient a
+ *    product contains.
+ *  - `relation` is the item's `rela`, lowercased: RxClass's own `relas` list spells
+ *    VA's relations `has_vaclass` / `has_vaclass_extended`, while `byRxcui` returns
+ *    `has_VAClass`.
+ *  - Class nodes come from `allClasses` per bundled type, so hierarchy nodes with
+ *    no direct member are present; a class seen only on an edge is added from it.
+ *  - A source's version is its `relaSourceVersion` as fetched, or null when RxClass
+ *    publishes none (CDC answers `{}`); its `fetchedAt` is the time the fetcher
+ *    recorded for the cache, never the build time.
+ *
+ * Fails loudly rather than bake a partial layer: a cached non-200 response, an
+ * ingredient in `queried` with no cached response, a snapshot missing a bundled
+ * source or type, a malformed item, or a bundled source asserting a class type
+ * outside {@link RXCLASS_CLASS_TYPES} (the tool contract enumerates those types).
+ */
+export function parseRxClass(input: RxClassParseInput): RxClassParseResult {
+  const failed = input.byRxcui.filter((r) => r.status !== 200);
+  if (failed.length > 0) {
+    throw new Error(
+      `RxClass cache holds ${failed.length} failed response(s) (e.g. RXCUI ${failed[0]?.rxcui}, HTTP ${failed[0]?.status}) — refetch them`,
+    );
+  }
+  const cached = new Set(input.byRxcui.map((r) => r.rxcui));
+  const missing = input.queried.filter((rxcui) => !cached.has(rxcui));
+  if (missing.length > 0) {
+    throw new Error(
+      `RxClass cache is incomplete: ${missing.length} of ${input.queried.length} ingredients have no cached response (e.g. ${missing.slice(0, 5).join(', ')}) — rerun scripts/ingest/fetch-rxclass.ts`,
+    );
+  }
+
+  const dropped = { excludedSource: 0, unbundledRxcui: 0, duplicate: 0 };
+  const edges = new Map<string, RxClassEdgeInput>();
+  const edgeClassNames = new Map<string, RxClassClassInput>();
+  for (const record of input.byRxcui) {
+    const items =
+      (record.body as { rxclassDrugInfoList?: { rxclassDrugInfo?: RxClassDrugInfo[] } })
+        ?.rxclassDrugInfoList?.rxclassDrugInfo ?? [];
+    for (const item of items) {
+      const source = item.relaSource;
+      if (!isBundledSource(source)) {
+        dropped.excludedSource++;
+        continue;
+      }
+      const rxcui = item.minConcept?.rxcui;
+      const { classId, className, classType } = item.rxclassMinConceptItem ?? {};
+      const relation = item.rela?.toLowerCase();
+      if (!rxcui || !classId || !className || !relation) {
+        throw new Error(
+          `Malformed RxClass item in the response for RXCUI ${record.rxcui}: ${JSON.stringify(item)}`,
+        );
+      }
+      if (!isClassType(classType)) {
+        throw new Error(
+          `RxClass source ${source} asserts class type ${classType} (class ${classId}), which the class layer does not carry — add it to RXCLASS_CLASS_TYPES or exclude it deliberately`,
+        );
+      }
+      if (!input.bundled.has(rxcui)) {
+        dropped.unbundledRxcui++;
+        continue;
+      }
+      const key = `${rxcui}|${classType}|${classId}|${source}|${relation}`;
+      if (edges.has(key)) {
+        dropped.duplicate++;
+        continue;
+      }
+      edges.set(key, { rxcui, classType, classId, source, relation });
+      edgeClassNames.set(`${classType}|${classId}`, { classType, classId, className });
+    }
+  }
+
+  const classes = new Map<string, RxClassClassInput>();
+  for (const type of RXCLASS_CLASS_TYPES) {
+    const body = snapshotEntry(input.classes, type, 'class-node');
+    const nodes =
+      (
+        body as {
+          rxclassMinConceptList?: {
+            rxclassMinConcept?: { classId?: string; className?: string; classType?: string }[];
+          };
+        }
+      )?.rxclassMinConceptList?.rxclassMinConcept ?? [];
+    for (const node of nodes) {
+      if (!node.classId || !node.className || node.classType !== type) {
+        throw new Error(`Malformed RxClass ${type} class node: ${JSON.stringify(node)}`);
+      }
+      classes.set(`${type}|${node.classId}`, {
+        classType: type,
+        classId: node.classId,
+        className: node.className,
+      });
+    }
+  }
+  for (const [key, node] of edgeClassNames) if (!classes.has(key)) classes.set(key, node);
+
+  const edgeList = [...edges.values()];
+  const sources = RXCLASS_SOURCES.map((source): RxClassSourceInput => {
+    const body = snapshotEntry(input.versions, source, 'version') as {
+      relaSourceVersion?: string;
+    };
+    const own = edgeList.filter((e) => e.source === source);
+    return {
+      source,
+      version: body?.relaSourceVersion ?? null,
+      classCount: new Set(own.map((e) => `${e.classType}|${e.classId}`)).size,
+      edgeCount: own.length,
+      fetchedAt: input.fetchedAt,
+    };
+  });
+
+  return { classes: [...classes.values()], edges: edgeList, sources, dropped };
 }
 
 /** Keep only digits (date columns may carry stray spaces). */

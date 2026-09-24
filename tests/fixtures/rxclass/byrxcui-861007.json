@@ -1,0 +1,62 @@
+{
+  "rxclassDrugInfoList": {
+    "rxclassDrugInfo": [
+      {
+        "minConcept": {
+          "rxcui": "6809",
+          "name": "metformin",
+          "tty": "IN"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "D003924",
+          "className": "Diabetes Mellitus, Type 2",
+          "classType": "DISEASE"
+        },
+        "rela": "may_treat",
+        "relaSource": "MEDRT"
+      },
+      {
+        "minConcept": {
+          "rxcui": "6809",
+          "name": "metformin",
+          "tty": "IN"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "N0000175565",
+          "className": "Biguanide",
+          "classType": "EPC"
+        },
+        "rela": "has_epc",
+        "relaSource": "FDASPL"
+      },
+      {
+        "minConcept": {
+          "rxcui": "861007",
+          "name": "metformin hydrochloride 500 MG Oral Tablet",
+          "tty": "SCD"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "A10BA",
+          "className": "Biguanides",
+          "classType": "ATC1-4"
+        },
+        "rela": "",
+        "relaSource": "ATCPROD"
+      },
+      {
+        "minConcept": {
+          "rxcui": "861007",
+          "name": "metformin hydrochloride 500 MG Oral Tablet",
+          "tty": "SCD"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "HS502",
+          "className": "ORAL HYPOGLYCEMIC AGENTS,ORAL",
+          "classType": "VA"
+        },
+        "rela": "has_VAClass",
+        "relaSource": "VA"
+      }
+    ]
+  }
+}

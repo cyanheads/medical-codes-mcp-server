@@ -110,7 +110,53 @@ export type CheckStatus =
   | 'terminated'
   | 'unknown';
 
-/** Crosswalk directions for `medcode_map_codes`. The drug directions are RxNorm-backed. */
+/**
+ * The RxClass relationship sources bundled in the class layer — all US government
+ * works. ATC and ATCPROD (WHO terms bar commercial redistribution), SNOMEDCT
+ * (SNOMED CT Affiliate license), and DAILYMED (a near-duplicate of FDASPL with no
+ * published version) are excluded at build time.
+ */
+export const RXCLASS_SOURCES = ['MEDRT', 'FDASPL', 'FMTSME', 'VA', 'RXNORM', 'CDC'] as const;
+
+/** A bundled RxClass relationship source. */
+export type RxClassSource = (typeof RXCLASS_SOURCES)[number];
+
+/**
+ * The RxClass class types the bundled sources assert. `SCHEDULE` is the DEA CSA
+ * schedule (source `RXNORM`); `CVX` the CDC vaccine code (source `CDC`).
+ */
+export const RXCLASS_CLASS_TYPES = [
+  'EPC',
+  'MOA',
+  'PE',
+  'PK',
+  'TC',
+  'CHEM',
+  'DISEASE',
+  'VA',
+  'SCHEDULE',
+  'CVX',
+] as const;
+
+/** A bundled RxClass class type. */
+export type RxClassType = (typeof RXCLASS_CLASS_TYPES)[number];
+
+/** One bundled RxClass source's provenance row from `rxclass_source`. */
+export interface RxClassSourceRow {
+  /** Distinct classes this source asserts at least one bundled edge to. */
+  classCount: number;
+  edgeCount: number;
+  /** When the RxClass snapshot was fetched (ISO 8601), recorded by the fetcher. */
+  fetchedAt: string;
+  source: RxClassSource;
+  /** The release RxClass reports for the source, or null when it publishes none (CDC). */
+  version: string | null;
+}
+
+/**
+ * Crosswalk directions for `medcode_map_codes`. The drug directions are
+ * RxNorm-backed; the class directions also read the RxClass class layer.
+ */
 export type MapDirection =
   | 'parents'
   | 'children'
@@ -118,13 +164,26 @@ export type MapDirection =
   | 'ndc_to_rxcui'
   | 'rxcui_to_ndc'
   | 'rxcui_to_ingredients'
-  | 'rxcui_to_brands';
+  | 'rxcui_to_brands'
+  | 'rxcui_to_classes'
+  | 'class_to_rxcuis';
 
-/** Map directions that require the RxNorm tables (bundled; the tool guards on hasRxNorm()). */
+/** Map directions that read the RxClass class layer (the tool guards on hasClassLayer()). */
+export const CLASS_DIRECTIONS: readonly MapDirection[] = [
+  'rxcui_to_classes',
+  'class_to_rxcuis',
+] as const;
+
+/**
+ * Map directions that require the RxNorm tables (bundled; the tool guards on
+ * hasRxNorm()). The class directions are among them: their members and
+ * ingredient edges are RxNorm rows.
+ */
 export const DRUG_DIRECTIONS: readonly MapDirection[] = [
   'name_to_rxcui',
   'ndc_to_rxcui',
   'rxcui_to_ndc',
   'rxcui_to_ingredients',
   'rxcui_to_brands',
+  ...CLASS_DIRECTIONS,
 ] as const;

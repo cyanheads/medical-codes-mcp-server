@@ -1,8 +1,9 @@
 /**
  * @fileoverview Shared DB-writing helpers for the index build and fixture
  * scripts. Centralizes schema creation, the `codes` + FTS insert, and
- * `build_meta` / `pcs_axes` / `rxnorm_rel` / `ndc_map` writes so the real build
- * and the synthetic fixture produce byte-compatible databases.
+ * `build_meta` / `pcs_axes` / `rxnorm_rel` / `ndc_map` / RxClass class-layer
+ * writes so the real build and the synthetic fixture produce byte-compatible
+ * databases.
  *
  * Bun-only (uses `bun:sqlite`). Run via `bun run`.
  * @module scripts/_db-writer
@@ -11,7 +12,7 @@
 import { Database } from 'bun:sqlite';
 
 import { INSERT_CODE_SQL, INSERT_FTS_SQL, SCHEMA_SQL } from '@/services/code-index/schema.js';
-import type { SystemId } from '@/services/code-index/types.js';
+import type { RxClassSource, RxClassType, SystemId } from '@/services/code-index/types.js';
 
 /** A code row to insert (storage form — no dots). */
 export interface CodeInput {
@@ -29,12 +30,43 @@ export interface CodeInput {
 
 /** A build_meta provenance row. */
 export interface MetaInput {
+  /**
+   * The row's `built_at`. Omit to stamp the build time; a system sourced from a
+   * fetched snapshot (RxNorm) passes the time its cache recorded instead, so a
+   * rebuild from the same cache reports the same date.
+   */
+  builtAt?: string;
   codeCount: number;
   effectiveEnd: string | null;
   effectiveStart: string | null;
   releaseId: string;
   sourceUrl: string | null;
   system: SystemId;
+}
+
+/** An RxClass class node. */
+export interface RxClassClassInput {
+  classId: string;
+  className: string;
+  classType: RxClassType;
+}
+
+/** One RxClass edge: a bundled RXCUI's membership in a class, as one source asserts it. */
+export interface RxClassEdgeInput {
+  classId: string;
+  classType: RxClassType;
+  relation: string;
+  rxcui: string;
+  source: RxClassSource;
+}
+
+/** Provenance for one bundled RxClass source. */
+export interface RxClassSourceInput {
+  classCount: number;
+  edgeCount: number;
+  fetchedAt: string;
+  source: RxClassSource;
+  version: string | null;
 }
 
 /**
@@ -48,6 +80,9 @@ export class DbWriter {
   private readonly insertRel;
   private readonly insertNdc;
   private readonly insertMeta;
+  private readonly insertClass;
+  private readonly insertClassEdge;
+  private readonly insertClassSource;
   private readonly counts = new Map<SystemId, number>();
 
   constructor(private readonly db: Database) {
@@ -69,6 +104,16 @@ export class DbWriter {
       `INSERT OR REPLACE INTO build_meta
        (system, release_id, effective_start, effective_end, code_count, source_url, built_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    this.insertClass = db.query(
+      'INSERT INTO rxclass_class (class_type, class_id, class_name) VALUES (?, ?, ?)',
+    );
+    this.insertClassEdge = db.query(
+      'INSERT INTO rxclass_edge (rxcui, class_type, class_id, source, relation) VALUES (?, ?, ?, ?, ?)',
+    );
+    this.insertClassSource = db.query(
+      `INSERT INTO rxclass_source (source, version, class_count, edge_count, fetched_at)
+       VALUES (?, ?, ?, ?, ?)`,
     );
   }
 
@@ -115,6 +160,27 @@ export class DbWriter {
     this.insertNdc.run(ndc, rxcui);
   }
 
+  /** Insert an RxClass class node. */
+  addRxClassClass(row: RxClassClassInput): void {
+    this.insertClass.run(row.classType, row.classId, row.className);
+  }
+
+  /** Insert an RxClass edge. */
+  addRxClassEdge(row: RxClassEdgeInput): void {
+    this.insertClassEdge.run(row.rxcui, row.classType, row.classId, row.source, row.relation);
+  }
+
+  /** Write one bundled RxClass source's provenance row. */
+  writeRxClassSource(row: RxClassSourceInput): void {
+    this.insertClassSource.run(
+      row.source,
+      row.version,
+      row.classCount,
+      row.edgeCount,
+      row.fetchedAt,
+    );
+  }
+
   /** Number of `codes` rows inserted for a system so far. */
   countFor(system: SystemId): number {
     return this.counts.get(system) ?? 0;
@@ -129,13 +195,18 @@ export class DbWriter {
       meta.effectiveEnd,
       meta.codeCount,
       meta.sourceUrl,
-      new Date().toISOString(),
+      meta.builtAt ?? new Date().toISOString(),
     );
   }
 
-  /** Optimize FTS and close the handle. */
+  /**
+   * Optimize FTS, compact the file, and close the handle. The FTS merge and the
+   * per-system transactions leave free pages behind; `VACUUM` rewrites the file
+   * without them, since the index ships in every npm install and Docker image.
+   */
   finalize(): void {
     this.db.run("INSERT INTO codes_fts(codes_fts) VALUES('optimize')");
+    this.db.run('VACUUM');
     this.db.close();
   }
 }

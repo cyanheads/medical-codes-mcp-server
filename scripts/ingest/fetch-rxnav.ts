@@ -25,7 +25,9 @@
  *     the broader `allrelated.json` nests under `allRelatedGroup` — different key.)
  *
  * The cache is resumable: products already present in `products.jsonl` are
- * skipped, so an interrupted fetch continues where it left off. NDCs come back
+ * skipped, so an interrupted fetch continues where it left off. Once every product
+ * is cached, `meta.json` records `fetchedAt` — the snapshot date the index build
+ * reports for RxNorm. NDCs come back
  * 11-digit from RxNav; the runtime normalizes user input to 11-digit before
  * lookup (see `ndcCandidates` in `src/services/code-index/detect.ts`).
  *
@@ -248,8 +250,25 @@ async function main(): Promise<void> {
     }
   });
 
+  console.log(`Done. Fetched ${fetched} products (${withNdcs} with NDCs). Cache: ${jsonlPath}`);
+
+  // Record when the cache was completed — the snapshot date the index reports for
+  // RxNorm. Written only once every product is cached, and only when this run
+  // fetched something (or none is recorded yet), so rerunning over a complete
+  // cache keeps the original date.
+  const metaPath = join(outDir, 'meta.json');
+  const cached = done.size + fetched;
+  if (cached < allProducts.length) {
+    console.log(
+      `Cache incomplete (${cached}/${allProducts.length} products) — rerun to finish; no fetch date recorded yet.`,
+    );
+    return;
+  }
+  if (fetched > 0 || !existsSync(metaPath)) {
+    writeFileSync(metaPath, JSON.stringify({ fetchedAt: new Date().toISOString() }));
+  }
   console.log(
-    `Done. Fetched ${fetched} products (${withNdcs} with NDCs). Cache: ${jsonlPath}\n` +
+    `Snapshot recorded in ${metaPath}: ${readFileSync(metaPath, 'utf-8')}\n` +
       `Next: bun run scripts/build-index.ts --from-dir .sources --fy <FY>`,
   );
 }

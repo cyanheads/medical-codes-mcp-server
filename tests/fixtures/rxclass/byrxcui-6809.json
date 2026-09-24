@@ -1,0 +1,203 @@
+{
+  "rxclassDrugInfoList": {
+    "rxclassDrugInfo": [
+      {
+        "minConcept": {
+          "rxcui": "6809",
+          "name": "metformin",
+          "tty": "IN"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "109082004",
+          "className": "Biguanide-containing product",
+          "classType": "STRUCT",
+          "classUrl": "http://snomed.info/id/109082004"
+        },
+        "rela": "isa_structure",
+        "relaSource": "SNOMEDCT"
+      },
+      {
+        "minConcept": {
+          "rxcui": "6809",
+          "name": "metformin",
+          "tty": "IN"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "A10BA",
+          "className": "Biguanides",
+          "classType": "ATC1-4"
+        },
+        "rela": "",
+        "relaSource": "ATC"
+      },
+      {
+        "minConcept": {
+          "rxcui": "6809",
+          "name": "metformin",
+          "tty": "IN"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "D001645",
+          "className": "Biguanides",
+          "classType": "CHEM"
+        },
+        "rela": "has_chemical_structure",
+        "relaSource": "FDASPL"
+      },
+      {
+        "minConcept": {
+          "rxcui": "6809",
+          "name": "metformin",
+          "tty": "IN"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "D001645",
+          "className": "Biguanides",
+          "classType": "CHEM"
+        },
+        "rela": "has_chemical_structure",
+        "relaSource": "DAILYMED"
+      },
+      {
+        "minConcept": {
+          "rxcui": "6809",
+          "name": "metformin",
+          "tty": "IN"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "N0000175565",
+          "className": "Biguanide",
+          "classType": "EPC"
+        },
+        "rela": "has_epc",
+        "relaSource": "FDASPL"
+      },
+      {
+        "minConcept": {
+          "rxcui": "6809",
+          "name": "metformin",
+          "tty": "IN"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "N0000175565",
+          "className": "Biguanide",
+          "classType": "EPC"
+        },
+        "rela": "has_epc",
+        "relaSource": "DAILYMED"
+      },
+      {
+        "minConcept": {
+          "rxcui": "6809",
+          "name": "metformin",
+          "tty": "IN"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "D000138",
+          "className": "Acidosis",
+          "classType": "DISEASE"
+        },
+        "rela": "ci_with",
+        "relaSource": "MEDRT"
+      },
+      {
+        "minConcept": {
+          "rxcui": "6809",
+          "name": "metformin",
+          "tty": "IN"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "D003924",
+          "className": "Diabetes Mellitus, Type 2",
+          "classType": "DISEASE"
+        },
+        "rela": "may_treat",
+        "relaSource": "MEDRT"
+      },
+      {
+        "minConcept": {
+          "rxcui": "6809",
+          "name": "metformin",
+          "tty": "IN"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "D004342",
+          "className": "Drug Hypersensitivity",
+          "classType": "DISEASE"
+        },
+        "rela": "ci_with",
+        "relaSource": "MEDRT"
+      },
+      {
+        "minConcept": {
+          "rxcui": "235743",
+          "name": "metformin hydrochloride",
+          "tty": "PIN"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "D000138",
+          "className": "Acidosis",
+          "classType": "DISEASE"
+        },
+        "rela": "ci_with",
+        "relaSource": "MEDRT"
+      },
+      {
+        "minConcept": {
+          "rxcui": "235743",
+          "name": "metformin hydrochloride",
+          "tty": "PIN"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "D003924",
+          "className": "Diabetes Mellitus, Type 2",
+          "classType": "DISEASE"
+        },
+        "rela": "may_treat",
+        "relaSource": "MEDRT"
+      },
+      {
+        "minConcept": {
+          "rxcui": "235743",
+          "name": "metformin hydrochloride",
+          "tty": "PIN"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "D004342",
+          "className": "Drug Hypersensitivity",
+          "classType": "DISEASE"
+        },
+        "rela": "ci_with",
+        "relaSource": "MEDRT"
+      },
+      {
+        "minConcept": {
+          "rxcui": "861007",
+          "name": "metformin hydrochloride 500 MG Oral Tablet",
+          "tty": "SCD"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "A10BA",
+          "className": "Biguanides",
+          "classType": "ATC1-4"
+        },
+        "rela": "",
+        "relaSource": "ATCPROD"
+      },
+      {
+        "minConcept": {
+          "rxcui": "861007",
+          "name": "metformin hydrochloride 500 MG Oral Tablet",
+          "tty": "SCD"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "HS502",
+          "className": "ORAL HYPOGLYCEMIC AGENTS,ORAL",
+          "classType": "VA"
+        },
+        "rela": "has_VAClass",
+        "relaSource": "VA"
+      }
+    ]
+  }
+}

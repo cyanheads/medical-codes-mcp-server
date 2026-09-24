@@ -1,0 +1,34 @@
+{
+  "rxclassDrugInfoList": {
+    "rxclassDrugInfo": [
+      {
+        "minConcept": {
+          "rxcui": "1014599",
+          "name": "acetaminophen 300 MG / oxycodone hydrochloride 10 MG Oral Tablet",
+          "tty": "SCD"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "SCHEDULE2",
+          "className": "SCHEDULE II",
+          "classType": "SCHEDULE"
+        },
+        "rela": "has_schedule",
+        "relaSource": "RXNORM"
+      },
+      {
+        "minConcept": {
+          "rxcui": "1038779",
+          "name": "acetaminophen 32 MG/ML Oral Solution [Bactimicina]",
+          "tty": "SBD"
+        },
+        "rxclassMinConceptItem": {
+          "classId": "CN103",
+          "className": "NON-OPIOID ANALGESICS",
+          "classType": "VA"
+        },
+        "rela": "has_VAClass_extended",
+        "relaSource": "VA"
+      }
+    ]
+  }
+}

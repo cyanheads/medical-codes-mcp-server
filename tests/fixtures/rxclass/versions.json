@@ -1,0 +1,21 @@
+{
+  "fetchedAt": "2026-09-24T18:18:35.103Z",
+  "responses": {
+    "MEDRT": {
+      "relaSourceVersion": "2026.07.06"
+    },
+    "FDASPL": {
+      "relaSourceVersion": "MEDRT 2026.07.06"
+    },
+    "FMTSME": {
+      "relaSourceVersion": "MEDRT 2026.07.06"
+    },
+    "VA": {
+      "relaSourceVersion": "2026_07_31"
+    },
+    "RXNORM": {
+      "relaSourceVersion": "08-Sep-2026"
+    },
+    "CDC": {}
+  }
+}

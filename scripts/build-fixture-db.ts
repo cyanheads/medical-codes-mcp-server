@@ -3,24 +3,51 @@
  * a local smoke run exercise. Hand-curated representative rows across all four
  * bundled systems — ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm (a small
  * drug graph with NDC and ingredient/brand edges so the drug crosswalk directions
- * and offline NDC decode have real data to resolve against). Writes to
- * `data/medical-codes.db` by default — the bundled path the service resolves when
- * `MEDCODE_DB_PATH` is unset.
+ * and offline NDC decode have real data to resolve against) — plus a small
+ * RxClass class layer over that drug graph. Writes to `data/medical-codes.db` by
+ * default — the bundled path the service resolves when `MEDCODE_DB_PATH` is unset.
+ * `--without-class-layer` drops the class tables, reproducing an index built
+ * before the layer existed; `--empty-class-layer` keeps the tables and empties
+ * them, reproducing an index built from sources with no RxClass cache.
  *
- * Run: `bun run scripts/build-fixture-db.ts [outPath]`
+ * Run: `bun run scripts/build-fixture-db.ts [outPath] [--without-class-layer | --empty-class-layer]`
  * @module scripts/build-fixture-db
  */
 
+import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { hcpcsParent, icd10cmChapterLetter, icd10cmParent } from '@/services/code-index/schema.js';
-import type { SystemId } from '@/services/code-index/types.js';
-import { type CodeInput, createDbWriter } from './_db-writer.js';
+import {
+  hcpcsParent,
+  icd10cmChapterLetter,
+  icd10cmParent,
+  RXCLASS_TABLES,
+} from '@/services/code-index/schema.js';
+import { RXCLASS_SOURCES, type RxClassSource, type SystemId } from '@/services/code-index/types.js';
+import {
+  type CodeInput,
+  createDbWriter,
+  type RxClassClassInput,
+  type RxClassEdgeInput,
+  type RxClassSourceInput,
+} from './_db-writer.js';
 import { hcpcsSectionRows, type RxNavConcept } from './ingest/parsers.ts';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+/** Build the fixture as an index from before the RxClass layer: no class tables. */
+const WITHOUT_CLASS_LAYER_FLAG = '--without-class-layer';
+
+/** Build the fixture as an index built with no RxClass cache: empty class tables. */
+const EMPTY_CLASS_LAYER_FLAG = '--empty-class-layer';
+
+/**
+ * RxNorm's `built_at`: the RxNav snapshot date, never the build time, exactly as
+ * `build-index.ts` records it from the RxNav cache.
+ */
+const RXNAV_FETCHED_AT = '2026-06-22T00:44:15.018Z';
 
 /** A compact spec for an ICD-10-CM code; parent/chapter are derived. */
 interface CmSpec {
@@ -236,6 +263,104 @@ const RXNORM_RELS: { rxcui: string; rel: string; target: string; targetType: str
   { rxcui: '1049640', rel: 'has_ingredient', target: '1191', targetType: 'IN' },
 ];
 
+/**
+ * A small RxClass class layer over the drug graph above, with real class IDs and
+ * names from RxClass. Edges attach where RxClass attaches them — at the
+ * ingredient for MED-RT and FDA classes, at the product for VA classes — so:
+ *
+ *  - product 198440 carries its own VA edge and inherits 161's ingredient edges
+ *    through `has_ingredient`; product 1049640 has no edge of its own and inherits
+ *    1191's, including two FDA EPC classes;
+ *  - PE `N0000008836` has two members (both ingredients);
+ *  - DISEASE `D010146` "Pain" reaches 161 under two relations (`may_treat`,
+ *    `may_prevent`) and `D004342` under a contraindication (`ci_with`);
+ *  - brand 202433 (Tylenol) has no edge at all;
+ *  - VA `CN100` "ANALGESICS" and EPC `N0000193873` "Diuretic" are class nodes with
+ *    no direct member (hierarchy parents);
+ *  - SCHEDULE `SCHEDULE2` is a node with no member in this graph.
+ */
+const RXCLASS_CLASSES: RxClassClassInput[] = [
+  { classType: 'EPC', classId: 'N0000175722', className: 'Nonsteroidal Anti-inflammatory Drug' },
+  { classType: 'EPC', classId: 'N0000175578', className: 'Platelet Aggregation Inhibitor' },
+  { classType: 'EPC', classId: 'N0000193873', className: 'Diuretic' },
+  { classType: 'MOA', classId: 'N0000000160', className: 'Cyclooxygenase Inhibitors' },
+  { classType: 'MOA', classId: 'N0000000108', className: 'Prostaglandin Receptor Antagonists' },
+  { classType: 'PE', classId: 'N0000008836', className: 'Decreased Prostaglandin Production' },
+  { classType: 'DISEASE', classId: 'D010146', className: 'Pain' },
+  { classType: 'DISEASE', classId: 'D004342', className: 'Drug Hypersensitivity' },
+  { classType: 'CHEM', classId: 'D000082', className: 'Acetaminophen' },
+  { classType: 'VA', classId: 'CN100', className: 'ANALGESICS' },
+  { classType: 'VA', classId: 'CN103', className: 'NON-OPIOID ANALGESICS' },
+  { classType: 'SCHEDULE', classId: 'SCHEDULE2', className: 'SCHEDULE II' },
+];
+
+const RXCLASS_EDGES: RxClassEdgeInput[] = [
+  { rxcui: '161', classType: 'MOA', classId: 'N0000000108', source: 'MEDRT', relation: 'has_moa' },
+  { rxcui: '161', classType: 'PE', classId: 'N0000008836', source: 'MEDRT', relation: 'has_pe' },
+  {
+    rxcui: '161',
+    classType: 'DISEASE',
+    classId: 'D010146',
+    source: 'MEDRT',
+    relation: 'may_treat',
+  },
+  {
+    rxcui: '161',
+    classType: 'DISEASE',
+    classId: 'D010146',
+    source: 'MEDRT',
+    relation: 'may_prevent',
+  },
+  { rxcui: '161', classType: 'DISEASE', classId: 'D004342', source: 'MEDRT', relation: 'ci_with' },
+  {
+    rxcui: '161',
+    classType: 'CHEM',
+    classId: 'D000082',
+    source: 'MEDRT',
+    relation: 'has_ingredient',
+  },
+  {
+    rxcui: '1191',
+    classType: 'EPC',
+    classId: 'N0000175722',
+    source: 'FDASPL',
+    relation: 'has_epc',
+  },
+  {
+    rxcui: '1191',
+    classType: 'EPC',
+    classId: 'N0000175578',
+    source: 'FDASPL',
+    relation: 'has_epc',
+  },
+  { rxcui: '1191', classType: 'MOA', classId: 'N0000000160', source: 'MEDRT', relation: 'has_moa' },
+  { rxcui: '1191', classType: 'PE', classId: 'N0000008836', source: 'MEDRT', relation: 'has_pe' },
+  { rxcui: '198440', classType: 'VA', classId: 'CN103', source: 'VA', relation: 'has_vaclass' },
+];
+
+/** Per-source provenance rows, with the versions RxClass reported on 2026-09-24. */
+const RXCLASS_VERSIONS: Record<RxClassSource, string | null> = {
+  MEDRT: '2026.07.06',
+  FDASPL: 'MEDRT 2026.07.06',
+  FMTSME: 'MEDRT 2026.07.06',
+  VA: '2026_07_31',
+  RXNORM: '08-Sep-2026',
+  CDC: null,
+};
+
+function rxclassSourceRows(): RxClassSourceInput[] {
+  return RXCLASS_SOURCES.map((source) => {
+    const own = RXCLASS_EDGES.filter((e) => e.source === source);
+    return {
+      source,
+      version: RXCLASS_VERSIONS[source],
+      classCount: new Set(own.map((e) => `${e.classType}|${e.classId}`)).size,
+      edgeCount: own.length,
+      fetchedAt: '2026-09-24T18:18:35.103Z',
+    };
+  });
+}
+
 function rxnormRow(c: RxNavConcept): CodeInput {
   return {
     system: 'RXNORM',
@@ -267,7 +392,11 @@ function cmRow(spec: CmSpec): CodeInput {
 }
 
 function main(): void {
-  const outArg = process.argv[2];
+  const withoutClassLayer = process.argv.includes(WITHOUT_CLASS_LAYER_FLAG);
+  const emptyClassLayer = process.argv.includes(EMPTY_CLASS_LAYER_FLAG);
+  const outArg = process.argv
+    .slice(2)
+    .find((a) => a !== WITHOUT_CLASS_LAYER_FLAG && a !== EMPTY_CLASS_LAYER_FLAG);
   const outPath = outArg ? outArg : join(ROOT, 'data', 'medical-codes.db');
   mkdirSync(dirname(outPath), { recursive: true });
 
@@ -324,6 +453,10 @@ function main(): void {
   for (const e of RXNORM_RELS) w.addRxNormRel(e.rxcui, e.rel, e.target, e.targetType);
   for (const n of RXNORM_NDCS) w.addNdc(n.ndc, n.rxcui);
 
+  for (const c of RXCLASS_CLASSES) w.addRxClassClass(c);
+  for (const e of RXCLASS_EDGES) w.addRxClassEdge(e);
+  for (const s of rxclassSourceRows()) w.writeRxClassSource(s);
+
   w.commit();
 
   const meta: {
@@ -370,12 +503,30 @@ function main(): void {
       effectiveEnd: m.end,
       codeCount: w.countFor(m.system),
       sourceUrl: m.url,
+      ...(m.system === 'RXNORM' ? { builtAt: RXNAV_FETCHED_AT } : {}),
     });
   }
 
   w.finalize();
+
+  // An index built before the class layer existed has no class tables at all; one
+  // built from sources with no RxClass cache has the tables and no rows.
+  if (withoutClassLayer || emptyClassLayer) {
+    const db = new Database(outPath);
+    for (const table of RXCLASS_TABLES) {
+      db.run(withoutClassLayer ? `DROP TABLE ${table}` : `DELETE FROM ${table}`);
+    }
+    db.run('VACUUM');
+    db.close();
+  }
+
   console.log(
-    `Fixture DB written to ${outPath} — ICD10CM: ${ICD10CM.length}, ICD10PCS: ${ICD10PCS.length}, HCPCS: ${HCPCS.length}, RxNorm: ${RXNORM.length} concepts / ${RXNORM_RELS.length} edges / ${RXNORM_NDCS.length} NDCs`,
+    `Fixture DB written to ${outPath} — ICD10CM: ${ICD10CM.length}, ICD10PCS: ${ICD10PCS.length}, HCPCS: ${HCPCS.length}, RxNorm: ${RXNORM.length} concepts / ${RXNORM_RELS.length} edges / ${RXNORM_NDCS.length} NDCs, ` +
+      (withoutClassLayer
+        ? 'no RxClass layer'
+        : emptyClassLayer
+          ? 'empty RxClass tables'
+          : `RxClass: ${RXCLASS_CLASSES.length} classes / ${RXCLASS_EDGES.length} edges`),
   );
 }
 
