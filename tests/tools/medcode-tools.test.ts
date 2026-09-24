@@ -1000,11 +1000,11 @@ describe('medcode_map_codes — a bare integer that resolves nowhere', () => {
     expect(out.resolvedSystem).toBe('RXNORM');
   });
 
-  it('keeps the generic miss for a bundled RXCUI looked up in another system', async () => {
+  it('names a bundled RXCUI looked up in another system as an RxNorm concept, not CPT', async () => {
     // 161 misses in ICD-10-CM, but it is a bundled concept, not an unbundled code.
     const err = await mapError({ from: '161', direction: 'children', system: 'ICD10CM' });
-    expect(err.message).toBe('No bundled code matches "161".');
-    expect(err.data?.recovery?.hint).toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
+    expect(err.message).toContain('it is a code in RxNorm');
+    expect(err.message).not.toMatch(/CPT/);
   });
 
   it('uses the no-RxNorm variant in a build without RxNorm', async () => {
@@ -1367,6 +1367,51 @@ describe('medcode_get_code — no_codes_found under an explicit system', () => {
       ),
     );
     expect(err.message).toBe('None of the 2 requested code(s) resolved in any bundled system.');
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/52
+describe('medcode_map_codes — a hierarchy miss under an explicit system', () => {
+  it.each([
+    [
+      { from: 'E11.9', direction: 'parents', system: 'HCPCS' },
+      'No HCPCS Level II code matches "E11.9" — it is a code in ICD-10-CM. Re-call with `system` "ICD10CM" to walk it there.',
+    ],
+    [
+      { from: '161', direction: 'children', system: 'ICD10CM' },
+      'No ICD-10-CM code matches "161" — it is a code in RxNorm. Re-call with `system` "RXNORM" to walk it there.',
+    ],
+    [
+      { from: 'A0100', direction: 'children', system: 'RXNORM' },
+      'No RxNorm concept matches "A0100" — it is a code in ICD-10-CM and HCPCS Level II. Re-call with `system` "ICD10CM" or "HCPCS" to walk it there.',
+    ],
+  ])('names the system that holds %j on both surfaces', async (args, message) => {
+    const result = await runToolContract(mapCodesTool, args as never);
+    expect(result.isError).toBe(true);
+    const error = envelopeOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data?.reason).toBe('no_mapping');
+    expect(error.message).toBe(message);
+    const hint = error.data?.recovery?.hint ?? '';
+    expect(hint).not.toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
+    expect(hint).toContain('`system`');
+    expect(hint).not.toContain('medcode_get_code');
+
+    const text = contentText(result);
+    expect(text).toContain(message);
+    expect(text).toContain(hint);
+    expect(text).toContain('(reason no_mapping)');
+  });
+
+  it('keeps the generic miss for a value no bundled system holds', async () => {
+    const err = await mapError({ from: 'ZZZZZZ9', direction: 'parents', system: 'HCPCS' });
+    expect(err.message).toBe('No bundled code matches "ZZZZZZ9".');
+    expect(err.data?.recovery?.hint).toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
+  });
+
+  it('keeps the out-of-scope miss for a bare integer no bundled system holds', async () => {
+    const err = await mapError({ from: '43239', direction: 'parents', system: 'ICD10CM' });
+    expect(err.message).toBe(`No bundled code matches "43239". ${CPT_SENTENCE}`);
   });
 });
 

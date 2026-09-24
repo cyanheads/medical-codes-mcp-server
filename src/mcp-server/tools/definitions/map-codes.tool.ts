@@ -11,7 +11,12 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 
-import { CodeIndexService, getCodeIndexService } from '@/services/code-index/code-index-service.js';
+import {
+  CodeIndexService,
+  getCodeIndexService,
+  heldElsewhere,
+  noMatch,
+} from '@/services/code-index/code-index-service.js';
 import { isBareInteger, ndcCandidates } from '@/services/code-index/detect.js';
 import {
   type MapDirection,
@@ -103,6 +108,10 @@ const EXAMPLE_CODE: Record<SystemId, string> = {
 const OUT_OF_SCOPE_RECOVERY =
   'CPT and HCPCS Level I codes are not bundled. Find the procedure by description with medcode_search_codes instead — ICD-10-PCS covers inpatient procedures and HCPCS Level II covers supplies and services.';
 
+/** Recovery for a hierarchy source an explicit `system` missed while another bundled system holds it. */
+const HELD_ELSEWHERE_RECOVERY =
+  'Re-call with `system` set to the system named above to walk the code there, or omit `system` to auto-detect it.';
+
 /** Recovery for an NDC sent to a direction that reads `from` as a code or an RXCUI. */
 const NDC_RECOVERY =
   "Map an NDC with direction ndc_to_rxcui, or decode it with medcode_get_code, to reach its RxNorm product; pass that product's RXCUI to the rxcui_to_* directions.";
@@ -140,7 +149,9 @@ function ndcMiss(from: string): { message: string; recovery: string } {
 /**
  * The miss for a source that resolved nowhere, worded for the most likely cause.
  * A code system named in `from` (letters always) is one, and an `ndc_to_rxcui`
- * source is always read as an NDC. On a direction that reads `from` as a code or an
+ * source is always read as an NDC. A hierarchy source an explicit `system` missed
+ * is named as the code of the bundled system that holds it, as medcode_check_code
+ * and medcode_get_code name it. On a direction that reads `from` as a code or an
  * RXCUI, so are an NDC — recognized exactly when medcode_get_code would decode
  * it — and, failing that, a bare integer no bundled system holds. Everything else
  * keeps the generic message and the declared recovery (`null` here).
@@ -148,14 +159,15 @@ function ndcMiss(from: string): { message: string; recovery: string } {
 function sourceMiss(
   from: string,
   direction: MapDirection,
+  system: SystemId | undefined,
   svc: CodeIndexService,
 ): { message: string; recovery: string | null } {
-  const system = SYSTEM_TOKENS.get(normalizeSystemToken(from));
-  if (system) {
+  const named = SYSTEM_TOKENS.get(normalizeSystemToken(from));
+  if (named) {
     return {
       message: `"${from}" is a code system, not a code.`,
       recovery: HIERARCHY_DIRECTIONS.has(direction)
-        ? `Put the code itself in \`from\` (e.g. ${EXAMPLE_CODE[system]}) and the system in \`system\` ("${system}"). To list a system's top-level codes, call medcode_browse_hierarchy with \`system\` and no \`node\`.`
+        ? `Put the code itself in \`from\` (e.g. ${EXAMPLE_CODE[named]}) and the system in \`system\` ("${named}"). To list a system's top-level codes, call medcode_browse_hierarchy with \`system\` and no \`node\`.`
         : '`from` takes a drug name, an NDC, or an RXCUI; the drug directions resolve in RxNorm without a `system`.',
     };
   }
@@ -164,6 +176,15 @@ function sourceMiss(
   if (direction === 'name_to_rxcui') {
     return { message: `No bundled code matches "${from}".`, recovery: null };
   }
+  // Without a `system` the hierarchy lookup already searched every bundled system,
+  // so only a named one can miss a code another system holds.
+  const holders = system && HIERARCHY_DIRECTIONS.has(direction) ? svc.systemsHolding(from) : [];
+  if (system && holders.length > 0) {
+    return {
+      message: `${noMatch(system, from)} — ${heldElsewhere(holders)} to walk it there.`,
+      recovery: HELD_ELSEWHERE_RECOVERY,
+    };
+  }
   // A bare 10/11-digit NDC is also a bare integer, so it is named before the CPT test.
   if (svc.getByNdc(from).kind !== 'not_ndc') {
     return {
@@ -171,8 +192,8 @@ function sourceMiss(
       recovery: NDC_RECOVERY,
     };
   }
-  // The membership check keeps a bundled RXCUI forced into another `system` from
-  // being called an unbundled code.
+  // The membership check keeps a bundled code of another system — a digits-only
+  // ICD-10-PCS code on an rxcui_to_* direction — from being called an unbundled one.
   if (isBareInteger(from) && svc.systemsHolding(from).length === 0) {
     return {
       message: `No bundled code matches "${from}". ${svc.outOfScopeNote()}`,
@@ -398,7 +419,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
       );
     }
     if (result.kind === 'source_not_found') {
-      const miss = sourceMiss(input.from.trim(), input.direction, svc);
+      const miss = sourceMiss(input.from.trim(), input.direction, input.system, svc);
       throw ctx.fail(
         'no_mapping',
         miss.message,
