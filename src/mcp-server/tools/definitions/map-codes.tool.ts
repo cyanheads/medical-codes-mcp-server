@@ -16,6 +16,7 @@ import {
   getCodeIndexService,
   heldElsewhere,
   noMatch,
+  unmappedNdcMessage,
 } from '@/services/code-index/code-index-service.js';
 import { isBareInteger, ndcCandidates } from '@/services/code-index/detect.js';
 import {
@@ -120,7 +121,7 @@ const NDC_RECOVERY =
 const NDC_MALFORMED_RECOVERY =
   'Re-send the NDC as printed on the package, hyphenated in one of those FDA segment configurations or as bare 10/11 digits, with no other separator or prefix. To find a drug by name instead, use direction name_to_rxcui.';
 
-/** Recovery for a well-formed `ndc_to_rxcui` source the bundled NDC map does not hold. */
+/** Recovery for a well-formed NDC the bundled NDC map does not hold, on any direction. */
 const NDC_UNMAPPED_RECOVERY =
   'The bundled RxNorm set lists no product for this package. Check the NDC against the package label, or find the drug by name with direction name_to_rxcui.';
 
@@ -139,9 +140,8 @@ function ndcMiss(from: string): { message: string; recovery: string } {
       recovery: NDC_MALFORMED_RECOVERY,
     };
   }
-  const normalized = candidates.length === 1 ? ` (normalized ${candidates[0]})` : '';
   return {
-    message: `"${from}" is a valid NDC format but no bundled drug maps to it${normalized}.`,
+    message: unmappedNdcMessage(from, candidates.length === 1 ? (candidates[0] ?? null) : null),
     recovery: NDC_UNMAPPED_RECOVERY,
   };
 }
@@ -152,9 +152,10 @@ function ndcMiss(from: string): { message: string; recovery: string } {
  * source is always read as an NDC. A hierarchy source an explicit `system` missed
  * is named as the code of the bundled system that holds it, as medcode_check_code
  * and medcode_get_code name it. On a direction that reads `from` as a code or an
- * RXCUI, so are an NDC — recognized exactly when medcode_get_code would decode
- * it — and, failing that, a bare integer no bundled system holds. Everything else
- * keeps the generic message and the declared recovery (`null` here).
+ * RXCUI, so are an NDC — one medcode_get_code decodes, or a well-formed one no
+ * bundled drug maps to — and, failing that, a bare integer no bundled system
+ * holds. Everything else keeps the generic message and the declared recovery
+ * (`null` here).
  */
 function sourceMiss(
   from: string,
@@ -185,11 +186,20 @@ function sourceMiss(
       recovery: HELD_ELSEWHERE_RECOVERY,
     };
   }
-  // A bare 10/11-digit NDC is also a bare integer, so it is named before the CPT test.
-  if (svc.getByNdc(from).kind !== 'not_ndc') {
+  // A bare 10/11-digit NDC is also a bare integer, so it is named before the CPT
+  // test — as the NDC it decodes as, or, when no bundled drug maps to it, in the
+  // words ndc_to_rxcui gives the same value.
+  const ndc = svc.ndcReading(from);
+  if (ndc?.kind === 'mapped') {
     return {
       message: `"${from}" is a National Drug Code (NDC), not ${HIERARCHY_DIRECTIONS.has(direction) ? 'a code' : 'an RXCUI'}.`,
       recovery: NDC_RECOVERY,
+    };
+  }
+  if (ndc?.kind === 'unmapped') {
+    return {
+      message: unmappedNdcMessage(from, ndc.normalized),
+      recovery: NDC_UNMAPPED_RECOVERY,
     };
   }
   // The membership check keeps a bundled code of another system — a digits-only

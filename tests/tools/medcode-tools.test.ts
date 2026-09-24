@@ -1022,7 +1022,6 @@ describe('medcode_map_codes — an NDC where a code or an RXCUI belongs', () => 
     ['0904516160', 'rxcui_to_ndc', 'an RXCUI'],
     ['11111222233', 'rxcui_to_ingredients', 'an RXCUI'],
     ['11111-2222-33', 'rxcui_to_brands', 'an RXCUI'],
-    ['99999-8888-77', 'children', 'a code'],
   ])('names %s as an NDC on %s, on both surfaces', async (from, direction, notA) => {
     const result = await runToolContract(mapCodesTool, { from, direction } as never);
     const error = envelopeOf(result);
@@ -1040,11 +1039,35 @@ describe('medcode_map_codes — an NDC where a code or an RXCUI belongs', () => 
     expect(text).toContain('(reason no_mapping)');
   });
 
-  it('keeps the CPT sentence for a bare integer the NDC map does not hold', async () => {
-    // Eleven digits but no package: not an NDC get_code decodes, so still a bare-integer miss.
-    const err = await mapError({ from: '99999888877', direction: 'rxcui_to_ndc' });
-    expect(err.message).toBe(`No bundled code matches "99999888877". ${CPT_SENTENCE}`);
-  });
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/53
+  it.each([
+    ['99999888877', 'rxcui_to_ndc', ' (normalized 99999888877)'],
+    ['99999888877', 'parents', ' (normalized 99999888877)'],
+    ['9999988887', 'rxcui_to_ingredients', ''],
+    ['9999988887', 'children', ''],
+    ['99999-8888-77', 'children', ' (normalized 99999888877)'],
+  ])(
+    'words %s on %s as a valid NDC no bundled drug maps to, as ndc_to_rxcui does, on both surfaces',
+    async (from, direction, normalized) => {
+      const result = await runToolContract(mapCodesTool, { from, direction } as never);
+      const error = envelopeOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.data?.reason).toBe('no_mapping');
+      const message = `"${from}" is a valid NDC format but no bundled drug maps to it${normalized}.`;
+      expect(error.message).toBe(message);
+      expect(error.message).toBe((await mapError({ from, direction: 'ndc_to_rxcui' })).message);
+      const hint = error.data?.recovery?.hint ?? '';
+      expect(hint).toMatch(/no product for this package/);
+      expect(hint).toContain('name_to_rxcui');
+      expect(hint).not.toContain('medcode_get_code');
+
+      const text = contentText(result);
+      expect(text).toContain(message);
+      expect(text).toContain(hint);
+      expect(text).not.toMatch(/CPT/);
+      expect(text).toContain('(reason no_mapping)');
+    },
+  );
 });
 
 // https://github.com/cyanheads/medical-codes-mcp-server/issues/38
@@ -1169,6 +1192,76 @@ describe('medcode_get_code — a bare integer that resolves nowhere', () => {
       `"99213" looks like an RxNorm RXCUI or a CPT / HCPCS Level I code. ${CPT_SENTENCE_NO_RXNORM}`,
     );
   });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/53
+  it.each([
+    [{ codes: ['99999888877', 'E11.9'] }, '99999888877', ' (normalized 99999888877)'],
+    [{ codes: ['9999988887', 'E11.9'] }, '9999988887', ''],
+    [
+      { codes: ['99999888877', 'E11.9'], system: 'ICD10CM' },
+      '99999888877',
+      ' (normalized 99999888877)',
+    ],
+    [
+      { codes: ['99999-8888-77', 'E11.9'], system: 'ICD10CM' },
+      '99999-8888-77',
+      ' (normalized 99999888877)',
+    ],
+  ])(
+    'words an unmapped NDC-shaped value in %j as a valid NDC, not CPT, on both surfaces',
+    async (args, code, normalized) => {
+      const result = await runToolContract(getCodeTool, args as never);
+      expect(result.isError).toBeFalsy();
+      const out = result.structuredContent as { notFound: { code: string; reason: string }[] };
+      const reason = `"${code}" is a valid NDC format but no bundled drug maps to it${normalized}.`;
+      expect(out.notFound).toEqual([{ code, reason }]);
+      const text = contentText(result);
+      expect(text).toContain(reason);
+      expect(text).not.toMatch(/CPT/);
+    },
+  );
+
+  it('lists unmapped NDC-shaped values apart from CPT-shaped ones in no_codes_found', async () => {
+    const note =
+      'NDCs in a valid format that no bundled drug maps to: "99999888877", "99999-8888-77".';
+    for (const args of [
+      { codes: ['99999888877', '99999-8888-77', '43239'] },
+      { codes: ['99999888877', '99999-8888-77', '43239'], system: 'ICD10CM' },
+    ]) {
+      const result = await runToolContract(getCodeTool, args as never);
+      expect(result.isError).toBe(true);
+      const error = envelopeOf(result);
+      expect(error.data?.reason).toBe('no_codes_found');
+      expect(error.message).toContain(note);
+      expect(error.message).toContain(`Bare integers with no match: "43239". ${CPT_SENTENCE}`);
+      expect(error.message).not.toContain('explicit `system`: "99999');
+      expect(error.data?.recovery?.hint).toBe(declaredRecovery(getCodeTool, 'no_codes_found'));
+      const text = contentText(result);
+      expect(text).toContain(note);
+      expect(text).toContain(CPT_SENTENCE);
+    }
+  });
+
+  it.each([
+    ['99999888877', ' (normalized 99999888877)'],
+    ['9999988887', ''],
+  ])(
+    'words check_code on %s as a well-formed NDC nothing maps to, on both surfaces',
+    async (code, normalized) => {
+      const result = await runToolContract(checkCodeTool, { code } as never);
+      expect(result.isError).toBe(true);
+      const error = envelopeOf(result);
+      expect(error.data?.reason).toBe('unknown_code');
+      const message = `"${code}" is a National Drug Code (NDC) — a package identifier, not a code in any bundled code system, so it has no validity or billing verdict. It is well-formed, but no bundled drug maps to it${normalized}.`;
+      expect(error.message).toBe(message);
+      const hint = error.data?.recovery?.hint ?? '';
+      expect(hint).toContain('ndc_to_rxcui');
+      const text = contentText(result);
+      expect(text).toContain(message);
+      expect(text).toContain(hint);
+      expect(text).not.toMatch(/CPT/);
+    },
+  );
 
   it('leaves check_code on a CPT code worded as it was', async () => {
     const err = await caught(() =>

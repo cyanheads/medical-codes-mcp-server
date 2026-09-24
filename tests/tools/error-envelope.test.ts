@@ -230,6 +230,8 @@ describe('handler-thrown failures', () => {
       ['11111-2222-33', /product 198440/], // hyphenated, maps to a bundled product
       ['11111222233', /product 198440/], // the same NDC as bare 11 digits
       ['99999-8888-77', /no bundled drug maps to it/i], // well-formed, maps to nothing
+      // https://github.com/cyanheads/medical-codes-mcp-server/issues/53
+      ['99999888877', /no bundled drug maps to it/i], // bare 11 digits, maps to nothing
     ])('names %s as an NDC and recovers to the tools that decode one', async (ndc, detail) => {
       const result = await callWithRawArgs(checkCodeTool, { code: ndc });
       expect(result.isError).toBe(true);

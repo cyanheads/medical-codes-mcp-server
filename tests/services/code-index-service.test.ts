@@ -930,16 +930,22 @@ describe('checkCode on a National Drug Code', () => {
     }
   });
 
-  it('names a well-formed NDC that nothing maps to as an NDC too', () => {
-    const r = svc.checkCode('99999-8888-77');
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/53
+  it.each([
+    '99999-8888-77', // hyphenated
+    '99999888877', // bare 11 digits
+    '9999988887', // bare 10 digits
+  ])('names the well-formed NDC %s that nothing maps to as an NDC too', (value) => {
+    const r = svc.checkCode(value);
     expect(r.kind === 'resolved' && r.result).toMatchObject({ status: 'unknown', ndc: true });
     expect(r.kind === 'resolved' && r.result.whyNot).toMatch(/no bundled drug maps to it/i);
+    expect(r.kind === 'resolved' && r.result.whyNot).not.toMatch(/CPT/);
   });
 
   it.each([
     ['2-152-1', /not present in any bundled code system/], // malformed segment widths
     ['12-34-56-78', /not present in any bundled code system/], // four segments
-    ['99999888877', /No RxNorm concept matches/], // bare 11 digits with no map hit
+    ['999998888777', /No RxNorm concept matches/], // bare 12 digits: no NDC width
     ['99213', /CPT/], // a CPT code keeps its out-of-scope sentence
   ])('keeps the non-NDC message for %s', (value, message) => {
     const r = svc.checkCode(value);

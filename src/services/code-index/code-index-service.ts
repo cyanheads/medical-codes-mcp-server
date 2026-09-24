@@ -115,8 +115,9 @@ export interface CheckResult {
   alsoIn?: SystemId[];
   code: string;
   /**
-   * True on an `unknown` result whose value is a National Drug Code — a shape
-   * `medcode_get_code` decodes to its RxNorm product (see {@link getByNdc}). NDC
+   * True on an `unknown` result whose value is a National Drug Code — one
+   * `medcode_get_code` decodes to its RxNorm product, or a well-formed one no
+   * bundled drug maps to (see {@link CodeIndexService.ndcReading}). NDC
    * is a package identifier, not a code in a bundled system, so there is no
    * validity verdict to give; the flag lets the caller point at the NDC decode.
    */
@@ -437,16 +438,37 @@ export class CodeIndexService {
   }
 
   /**
-   * The not-found explanation for a value {@link getByNdc} treats as an NDC —
-   * a package identifier `checkCode` has no verdict for — or null when it would
-   * not (`not_ndc`), so every other value keeps its system-shaped message.
+   * Read a value no bundled system holds as a National Drug Code, for the misses
+   * that must say what it is. `mapped` carries the RxNorm products {@link getByNdc}
+   * decodes it to; `unmapped` is a well-formed spelling — hyphenated in an FDA
+   * segment configuration, or bare 10/11 digits — that no bundled drug maps to,
+   * with its 11-digit key when the spelling fixes one; null is no NDC spelling.
+   * Unlike getByNdc, a bare 10/11-digit miss reads as `unmapped` rather than
+   * `not_ndc`: getByNdc leaves it open because the value might still be an RXCUI,
+   * but a caller asking here has already found it in no bundled system, and no CPT
+   * code (five characters) takes that shape.
+   */
+  ndcReading(
+    value: string,
+  ): { kind: 'mapped'; rows: CodeRow[] } | { kind: 'unmapped'; normalized: string | null } | null {
+    const ndc = this.getByNdc(value);
+    if (ndc.kind === 'found') return { kind: 'mapped', rows: ndc.rows };
+    const [only, ...rest] = ndcCandidates(value).candidates;
+    if (!only) return null;
+    return { kind: 'unmapped', normalized: rest.length === 0 ? only : null };
+  }
+
+  /**
+   * The not-found explanation for a value {@link ndcReading} reads as an NDC — a
+   * package identifier `checkCode` has no verdict for — or null when it reads as
+   * none, so every other value keeps its system-shaped message.
    */
   private ndcWhyNot(value: string): string | null {
-    const ndc = this.getByNdc(value);
-    if (ndc.kind === 'not_ndc') return null;
+    const ndc = this.ndcReading(value);
+    if (!ndc) return null;
     const identity = `"${value}" is a National Drug Code (NDC) — a package identifier, not a code in any bundled code system, so it has no validity or billing verdict.`;
-    if (ndc.kind === 'no_match') {
-      return `${identity} It is well-formed, but no bundled drug maps to it (normalized ${ndc.ndc}).`;
+    if (ndc.kind === 'unmapped') {
+      return `${identity} It is well-formed, but no bundled drug maps to it${normalizedNote(ndc.normalized)}.`;
     }
     const products = ndc.rows.map((row) =>
       row.longDesc ? `${row.code} (${row.longDesc})` : row.code,
@@ -686,10 +708,10 @@ export class CodeIndexService {
       const detected = system ?? detectSystems(rawCode)[0];
       const trimmed = rawCode.trim();
       // An NDC is a package identifier, not a code in any bundled system, so it
-      // lands here — but medcode_get_code decodes it, and the shape and RxNorm
-      // messages below would misname it. It is recognized by the same test the
-      // decode uses, so check_code calls a value an NDC exactly when get_code
-      // would resolve it as one.
+      // lands here — but the shape and RxNorm messages below would misname it, a
+      // bare 10/11-digit one as a possible CPT code. It is read by the same test
+      // medcode_get_code and medcode_map_codes use, so all three name a value as a
+      // decoded or a well-formed-but-unmapped NDC alike.
       const ndcWhyNot = this.ndcWhyNot(trimmed);
       // Otherwise the named system's miss or, auto-detected (resolveSystems already
       // widened to every system, so nothing holds the value), an RXCUI-shaped miss
@@ -1299,6 +1321,21 @@ export function noMatch(system: SystemId, trimmed: string): string {
  */
 export function heldElsewhere(holders: SystemId[]): string {
   return `it is a code in ${holders.map((sys) => SYSTEM_LABELS[sys]).join(' and ')}. Re-call with \`system\` ${holders.map((sys) => `"${sys}"`).join(' or ')}`;
+}
+
+/** The ` (normalized <key>)` clause, when the NDC spelling fixes a single 11-digit key. */
+function normalizedNote(normalized: string | null): string {
+  return normalized ? ` (normalized ${normalized})` : '';
+}
+
+/**
+ * The miss for a well-formed NDC no bundled drug maps to (see
+ * {@link CodeIndexService.ndcReading}). medcode_get_code and every
+ * medcode_map_codes direction word it alike, so a value reads the same whichever
+ * tool it was sent to.
+ */
+export function unmappedNdcMessage(value: string, normalized: string | null): string {
+  return `"${value}" is a valid NDC format but no bundled drug maps to it${normalizedNote(normalized)}.`;
 }
 
 /** Format a YYYYMMDD storage date as YYYY-MM-DD; pass through anything else. */

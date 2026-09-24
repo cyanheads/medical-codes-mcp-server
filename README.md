@@ -76,7 +76,7 @@ CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally
 
 - Accepts 1–50 codes; mixed systems are fine — each code's system is detected independently from its shape
 - Decodes a National Drug Code (NDC) directly to its RxNorm product — hyphenated FDA segment configurations (4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2) or bare 10/11 digits — offline via the bundled NDC↔RxNorm map, tagged `source: "NDC"`
-- Partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason — a bare integer that resolves nowhere is named as a possible CPT / HCPCS Level I code, which is out of scope
+- Partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason — a bare integer that resolves nowhere is named as a possible CPT / HCPCS Level I code, which is out of scope, except a bare 10/11-digit one, which is named as an NDC no bundled drug maps to
 - An explicit `system` overrides auto-detection when a value is genuinely ambiguous (an ambiguous code lists its `candidateSystems`) and skips the NDC decode; `includeHierarchy` attaches each code's parent and immediate children
 - `alsoInSystems` names other bundled systems holding the same code string — it is a different code in each
 - RxNorm rows carry `billable: null` (RxNorm has no billing concept) and `shortDescription: null` (RxNorm publishes a single name); `chapter` holds the RxNorm term type (`IN`, `SCD`, `SBD`, …)
@@ -98,7 +98,7 @@ CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally
 - Discriminated `status`: `valid_billable`, `valid_not_billable`, `valid_header`, `valid`, or `terminated` — `valid` is a current RxNorm concept, returned with `billable: null` because RxNorm has no billing concept
 - `whyNot` explains non-billable/terminated cases — a non-billable or terminated code is a successful result, not an error
 - `alsoInSystems` names other bundled systems holding the same code string, since the verdict applies only to the resolved system
-- Errors: `unknown_code` (absent from the named or detected system — under an explicit `system`, a code another bundled system holds is named as that system's code; an NDC lands here too, with a recovery pointing at `medcode_get_code` and `medcode_map_codes` `ndc_to_rxcui`) and `ambiguous_system` (present in multiple systems, no `system` given)
+- Errors: `unknown_code` (absent from the named or detected system — under an explicit `system`, a code another bundled system holds is named as that system's code; an NDC lands here too, including a well-formed bare 10/11-digit one no bundled drug maps to, with a recovery pointing at `medcode_get_code` and `medcode_map_codes` `ndc_to_rxcui`) and `ambiguous_system` (present in multiple systems, no `system` given)
 
 ---
 
@@ -108,7 +108,7 @@ CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally
 - Drug directions (RxNorm): `name_to_rxcui` (matches the drug name, never the term type), `ndc_to_rxcui`/`rxcui_to_ndc` (NDC accepted hyphenated in an FDA segment configuration — 4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2 — or as bare 10/11 digits), `rxcui_to_ingredients`/`rxcui_to_brands` (each hit carries `conceptType`: `IN`/`PIN`/`MIN`/`BN`)
 - `children`, `name_to_rxcui`, and `rxcui_to_ndc` paginate via `cursor`/`limit` — one RXCUI can carry thousands of package NDCs; `limit` and `cursor` are rejected on every other direction, and `system` steers only `parents`/`children` (the drug directions accept only `RXNORM`)
 - Every hit carries `source` provenance so a chained call uses the right identifier; a resolvable source with no edge in the requested direction is a successful empty result with a notice, not an error
-- Errors: `no_mapping` (source doesn't resolve — a code-system name passed as `from`, an NDC where a code or RXCUI belongs, or a bare integer that may be an out-of-scope CPT / HCPCS Level I code, is named as such; a `parents`/`children` code an explicit `system` missed is named as the code of the bundled system that holds it; an `ndc_to_rxcui` miss says whether the spelling is malformed or a well-formed NDC no bundled drug maps to), `field_not_applicable` (a `system`, `limit`, or `cursor` the direction does not use), `direction_unavailable` (RxNorm not bundled in this build), `ambiguous_system`
+- Errors: `no_mapping` (source doesn't resolve — a code-system name passed as `from`, an NDC where a code or RXCUI belongs (a well-formed one no bundled drug maps to in the words `ndc_to_rxcui` uses), or a bare integer that may be an out-of-scope CPT / HCPCS Level I code, is named as such; a `parents`/`children` code an explicit `system` missed is named as the code of the bundled system that holds it; an `ndc_to_rxcui` miss says whether the spelling is malformed or a well-formed NDC no bundled drug maps to), `field_not_applicable` (a `system`, `limit`, or `cursor` the direction does not use), `direction_unavailable` (RxNorm not bundled in this build), `ambiguous_system`
 
 ---
 

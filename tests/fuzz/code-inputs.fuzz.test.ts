@@ -332,7 +332,8 @@ describe('RxNorm row invariants', () => {
   });
 
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/43
-  it('names an unresolved value as an NDC exactly when get_code decodes it as one', () => {
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/53
+  it('names an unresolved value as an NDC exactly when get_code and map_codes read it as one', () => {
     const spellings = [
       ...MALFORMED_IDENTIFIERS,
       '11111-2222-33',
@@ -350,19 +351,22 @@ describe('RxNorm row invariants', () => {
     let ndcs = 0;
     for (const raw of spellings) {
       const r = svc.checkCode(raw);
-      const decodesAsNdc = svc.getByNdc(raw).kind !== 'not_ndc';
+      const readsAsNdc = svc.ndcReading(raw) !== null;
       // An NDC is never a code check_code answers, so it must reach the miss branch.
-      if (decodesAsNdc) {
+      if (readsAsNdc) {
         ndcs += 1;
         expect(r.kind === 'resolved' && r.result.status, JSON.stringify(raw)).toBe('unknown');
       }
       if (r.kind !== 'resolved' || r.result.status !== 'unknown') continue;
-      expect(r.result.ndc === true, `ndc flag for ${JSON.stringify(raw)}`).toBe(decodesAsNdc);
+      expect(r.result.ndc === true, `ndc flag for ${JSON.stringify(raw)}`).toBe(readsAsNdc);
       expect(/NDC/.test(r.result.whyNot ?? ''), `NDC wording for ${JSON.stringify(raw)}`).toBe(
-        decodesAsNdc,
+        readsAsNdc,
       );
+      // A well-formed NDC is never worded as a possible CPT code.
+      if (readsAsNdc) expect(r.result.whyNot, JSON.stringify(raw)).not.toMatch(/CPT/);
     }
-    // Seven of the spellings decode (six to a product, one well-formed with no match).
-    expect(ndcs).toBe(7);
+    // Nine of the spellings are NDCs: six decode to a product, and three are
+    // well-formed (hyphenated, bare 11, bare 10 digits) with no match.
+    expect(ndcs).toBe(9);
   });
 });
