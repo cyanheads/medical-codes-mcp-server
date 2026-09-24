@@ -92,7 +92,7 @@ const ServerConfigSchema = z.object({
   dbPath: z.preprocess(emptyAsUndefined, z.string().optional())
     .describe('Absolute path override for the bundled SQLite database.'),
   maxResults: z.coerce.number().int().min(1).max(200).default(50)
-    .describe('Cap on rows returned by search and browse tools (default 50, ceiling 200).'),
+    .describe('Default page size when a call sends no `limit` (search, browse, paginated map_codes directions) and get_code’s attached-children cap (default 50, ceiling 200).'),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
@@ -130,7 +130,7 @@ await createApp({
 });
 ```
 
-`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. This server uses it to tell the agent which tool is the 80% entry point, that a non-billable/terminated code is a successful `medcode_check_code` result, and that the RxNorm drug crosswalks are live (including direct NDC → drug decode).
+`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. This server uses it to tell the agent which tool is the 80% entry point, that a non-billable/terminated code is a successful `medcode_check_code` result, that the RxNorm drug crosswalks are live (including direct NDC → drug decode), and that the RxClass drug-class directions exist, with a `ci_` relation read as a contraindication and DEA schedules and VA classes recorded on drug products, not ingredients.
 
 ### Session posture and shutdown
 
@@ -224,6 +224,10 @@ src/
 scripts/
   build-index.ts                        # Build-time ingest — bakes federal source files into data/medical-codes.db
   build-fixture-db.ts                   # Generates the small synthetic fixture DB the tests run against
+  ingest/
+    fetch-rxnav.ts                      # Build-time RxNorm cache from the keyless RxNav API
+    fetch-rxclass.ts                    # Build-time RxClass cache (drug classes), keyed on the RxNav cache
+    parsers.ts                          # Source-file and cache parsers the build script calls
 data/
   medical-codes.db                      # The bundled SQLite + FTS5 index, opened read-only at runtime
 ```

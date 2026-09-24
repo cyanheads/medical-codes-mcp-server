@@ -36,7 +36,7 @@
 
 ## Overview
 
-US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm — from a bundled offline SQLite index built from public-domain CDC/NCHS, CMS, and NLM federal releases. Decode, search, validate billability, and crosswalk codes and drugs (including NDC lookups) from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm — from a bundled offline SQLite index built from public-domain CDC/NCHS, CMS, and NLM federal releases, plus the RxClass drug classes of the RxNorm drugs. Decode, search, validate billability, and crosswalk codes, drugs (including NDC lookups), and drug classes from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 ### Tools
 
@@ -45,9 +45,9 @@ US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm — from 
 | `medcode_get_code` | Decode 1–50 codes to their official descriptions. Auto-detects the system per code; partial-success `found` / `notFound`. |
 | `medcode_search_codes` | Full-text search over official descriptions — go from a clinical description to the code. |
 | `medcode_check_code` | Validate a code's existence, currency, and billability, with a `whyNot` for non-billable/terminated cases. |
-| `medcode_map_codes` | Crosswalk a code within its hierarchy (`parents`/`children`) or a drug across RxNorm (name ↔ RXCUI, NDC ↔ RXCUI, RXCUI → ingredients/brands). |
+| `medcode_map_codes` | Crosswalk a code within its hierarchy (`parents`/`children`), a drug across RxNorm (name ↔ RXCUI, NDC ↔ RXCUI, RXCUI → ingredients/brands), or a drug to its RxClass classes and a class to its member drugs. |
 | `medcode_browse_hierarchy` | Walk a system's hierarchy for discovery without a search term. |
-| `medcode_list_systems` | List bundled systems with release identifiers, effective dates, and code counts (provenance). |
+| `medcode_list_systems` | List bundled systems with release identifiers, effective dates, and code counts, and the RxClass layer with each source's version (provenance). |
 
 ## How it works
 
@@ -61,8 +61,11 @@ Only freely-redistributable, public-domain US federal code sets are bundled, bak
 | **ICD-10-PCS** | [CMS](https://www.cms.gov/medicare/coding-billing/icd-10-codes) — US federal, public domain | Inpatient procedures (axis-based 7-character codes) |
 | **HCPCS Level II** | [CMS](https://www.cms.gov/medicare/coding-billing/healthcare-common-procedure-system) — US federal, public domain | Supplies, drugs, and non-physician services |
 | **RxNorm** | [NLM RxNav](https://rxnav.nlm.nih.gov/) — public domain | Drugs: name ↔ RXCUI, NDC ↔ RXCUI crosswalk, ingredients, and brands |
+| **RxClass drug classes** | [NLM RxClass](https://lhncbc.nlm.nih.gov/RxNav/applications/RxClassIntro.html) — US government sources only | Classes of the RxNorm drugs: pharmacologic class, mechanism of action, physiologic effect, pharmacokinetics, therapeutic category, chemical structure, diseases treated/prevented and contraindications, VA class, DEA schedule, CVX vaccine code |
 
 **RxNorm** bundles the current normalized drug vocabulary — ingredients, brand names, clinical & branded drugs, and packs, with their NDC and ingredient/brand crosswalks — sourced at build time from the keyless [RxNav REST API](https://rxnav.nlm.nih.gov/), which serves the public-domain normalized layer only. The full UMLS-licensed RxNorm release is intentionally excluded, so the package stays freely redistributable.
+
+**RxClass** is a class layer over those drugs, not a code system: 20,707 classes and 86,837 drug–class edges, fetched at build time from the keyless [RxClass API](https://rxnav.nlm.nih.gov/REST/rxclass/). Six sources are bundled, all US government works: `MEDRT` (VA MED-RT — mechanism, physiologic effect, pharmacokinetics, chemical structure, and disease relations), `FDASPL` (FDA established pharmacologic classes and related classes from structured product labels), `FMTSME` (therapeutic categories), `VA` (VA National Formulary classes), `RXNORM` (DEA controlled-substance schedules), and `CDC` (CVX vaccine codes). Four are excluded: `ATC` and `ATCPROD`, whose WHO terms bar copying and distribution for commercial purposes; `SNOMEDCT`, which is under the SNOMED CT Affiliate license; and `DAILYMED`, which repeats FDASPL's edges almost exactly (8,694 of its 8,710) and publishes no version.
 
 > This product uses publicly available data courtesy of the U.S. National Library of Medicine (NLM), National Institutes of Health, Department of Health and Human Services; NLM is not responsible for the product and does not endorse or recommend this or any other product.
 
@@ -106,9 +109,13 @@ CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally
 
 - Hierarchy directions `parents`/`children` walk one level per call (depth-1); ICD-10-PCS codes have no prefix parent, and RxNorm concepts no code hierarchy
 - Drug directions (RxNorm): `name_to_rxcui` (matches the drug name, never the term type), `ndc_to_rxcui`/`rxcui_to_ndc` (NDC accepted hyphenated in an FDA segment configuration — 4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2 — or as bare 10/11 digits), `rxcui_to_ingredients`/`rxcui_to_brands` (each hit carries `conceptType`: `IN`/`PIN`/`MIN`/`BN`)
-- `children`, `name_to_rxcui`, and `rxcui_to_ndc` paginate via `cursor`/`limit` — one RXCUI can carry thousands of package NDCs; `limit` and `cursor` are rejected on every other direction, and `system` steers only `parents`/`children` (the drug directions accept only `RXNORM`)
-- Every hit carries `source` provenance so a chained call uses the right identifier; a resolvable source with no edge in the requested direction is a successful empty result with a notice, not an error
-- Errors: `no_mapping` (source doesn't resolve — a code-system name passed as `from`, an NDC where a code or RXCUI belongs (a well-formed one no bundled drug maps to in the words `ndc_to_rxcui` uses), or a bare integer that may be an out-of-scope CPT / HCPCS Level I code, is named as such; a `parents`/`children` code an explicit `system` missed is named as the code of the bundled system that holds it; an `ndc_to_rxcui` miss says whether the spelling is malformed or a well-formed NDC no bundled drug maps to), `field_not_applicable` (a `system`, `limit`, or `cursor` the direction does not use), `direction_unavailable` (RxNorm not bundled in this build), `ambiguous_system`
+- Drug-class directions (RxClass): `rxcui_to_classes` returns an RXCUI's classes, and `class_to_rxcuis` a class ID's direct member RXCUIs, each with its RxNorm name and `conceptType`. Each hit carries `classType`, `source` (the RxClass source asserting it), and `relation` (`has_epc`, `may_treat`, …) — one hit per class × source × relation. A relation starting `ci_` (`ci_with`, `ci_moa`, `ci_pe`, `ci_chemclass`) is a contraindication, not an indication
+- RxClass attaches most classes to ingredients, so a drug product also returns its ingredients' classes, naming the ingredient in `via` (an `IN` over its `PIN`); inheritance runs upward only. DEA schedules and VA classes are recorded on drug products, not ingredients: map a product for those — an ingredient's empty `SCHEDULE` result says so rather than reading as unscheduled. Membership is direct: a class whose drugs all attach to its subclasses (`N0000193873` "Diuretic") returns no members, and the class hierarchy is not walked
+- Class IDs match case-insensitively, and a one-digit CVX vaccine code reads as its zero-padded ID (`3` is CVX `03`)
+- `classType` (`EPC`, `MOA`, `PE`, `PK`, `TC`, `CHEM`, `DISEASE`, `VA`, `SCHEDULE`, `CVX`) narrows the two class directions and is rejected on every other
+- `children`, `name_to_rxcui`, `rxcui_to_ndc`, `rxcui_to_classes`, and `class_to_rxcuis` paginate via `cursor`/`limit` — one RXCUI can carry thousands of package NDCs and one class thousands of members; `limit` and `cursor` are rejected on every other direction, and `system` steers only `parents`/`children` (the drug and class directions accept only `RXNORM`)
+- Every hit carries `source` provenance so a chained call uses the right identifier; a resolvable source with no edge in the requested direction is a successful empty result with a notice, not an error — a brand name has no classes, for instance
+- Errors: `no_mapping` (source doesn't resolve — a code-system name passed as `from`, an NDC where a code or RXCUI belongs (a well-formed one no bundled drug maps to in the words `ndc_to_rxcui` uses), a class ID where an RXCUI belongs, or a bare integer that may be an out-of-scope CPT / HCPCS Level I code, is named as such, and a code-system name is recovered to the one input the direction takes; a `parents`/`children` code an explicit `system` missed is named as the code of the bundled system that holds it; an `ndc_to_rxcui` miss says whether the spelling is malformed or a well-formed NDC no bundled drug maps to; a `class_to_rxcuis` miss is worded for a class ID, naming an RXCUI or class type sent in its place), `field_not_applicable` (a `system`, `classType`, `limit`, or `cursor` the direction does not use), `direction_unavailable` (RxNorm, or for the class directions the RxClass layer, not bundled in this build), `ambiguous_system`
 
 ---
 
@@ -124,7 +131,9 @@ CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally
 ### `medcode_list_systems` <sub>tool</sub>
 
 - No input; returns one entry per bundled system with `releaseId`, `effectiveStart`/`effectiveEnd`, `codeCount`, `sourceUrl`, and `builtAt`
-- Confirms exactly which ICD-10-CM/PCS fiscal year, HCPCS release, and RxNorm snapshot are baked into the running build
+- `builtAt` dates the system's data: for ICD-10-CM, ICD-10-PCS, and HCPCS, the time the index was built from the named release; for RxNorm, which publishes no release label, the date the RxNav snapshot was fetched, so a rebuild from the same snapshot reports the same date
+- `classLayer` reports the RxClass layer apart from the code systems: its class and edge counts, and per source the RxClass version (null where RxClass publishes none — CDC), the classes and edges it contributes, and the date the RxClass snapshot was fetched; null on a build without the layer
+- Confirms exactly which ICD-10-CM/PCS fiscal year, HCPCS release, RxNorm snapshot, and RxClass sources are baked into the running build
 
 ## Features
 
@@ -265,7 +274,7 @@ The server is offline and keyless — there are no required variables. Two serve
 | Variable | Description | Default |
 |:---|:---|:---|
 | `MEDCODE_DB_PATH` | Absolute path override for the bundled SQLite index. Set only to point at a custom-built or externally-mounted database. | packaged `data/medical-codes.db` |
-| `MEDCODE_MAX_RESULTS` | Cap on rows returned by `medcode_search_codes` / `medcode_browse_hierarchy`. | `50` (ceiling `200`) |
+| `MEDCODE_MAX_RESULTS` | Default page size when a call sends no `limit` — `medcode_search_codes`, `medcode_browse_hierarchy`, and the paginated `medcode_map_codes` directions — and the number of children `medcode_get_code` attaches with `includeHierarchy`. | `50` (ceiling `200`) |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |
 | `MCP_HTTP_ENDPOINT_PATH` | Endpoint path where the MCP server is mounted. | `/mcp` |
@@ -302,13 +311,15 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Building the bundled index
 
-The bundled `data/medical-codes.db` ships in the npm package and Docker image but, at >100 MB, is **not committed to git** — fetch it from the [GitHub Release assets](https://github.com/cyanheads/medical-codes-mcp-server/releases) or rebuild it locally with the build script. You only rebuild when refreshing to a new federal release. The script never downloads: extract the canonical `.gov` source files (ICD-10-CM/PCS order files, HCPCS `ANWEB.txt` — URLs in the script header) into a directory, then point the script at it:
+The bundled `data/medical-codes.db` ships in the npm package and Docker image but, at >100 MB, is **not committed to git**. To get a prebuilt copy without rebuilding, take it from the npm package (`data/medical-codes.db`) or from the `medical-codes-mcp-server.mcpb` bundle attached to each [GitHub Release](https://github.com/cyanheads/medical-codes-mcp-server/releases) — a zip archive holding the index at `data/medical-codes.db`. You only rebuild when refreshing to a new federal release. The build script never downloads: extract the canonical `.gov` source files (ICD-10-CM/PCS order files, HCPCS `ANWEB.txt` — URLs in the script header) into a directory, cache RxNorm and RxClass into it with the two fetchers, then point the script at it:
 
 ```sh
-bun run scripts/build-index.ts --from-dir <dir-with-source-files> --fy 2026
+bun run scripts/ingest/fetch-rxnav.ts --out <dir>/rxnav        # RxNorm, from the keyless RxNav API
+bun run scripts/ingest/fetch-rxclass.ts --rxnav <dir>/rxnav --out <dir>/rxclass   # RxClass, after RxNorm
+bun run scripts/build-index.ts --from-dir <dir> --fy 2026
 ```
 
-It parses the source files and emits the single `.db` file. It runs at build time only — the server never downloads anything.
+It parses the source files and caches and emits the single `.db` file. RxNorm is dated by the time its RxNav fetch completed and the RxClass sources by theirs, both recorded in the caches, so a rebuild from the same caches reports the same dates. The build runs at build time only — the server never downloads anything.
 
 ### Docker
 
