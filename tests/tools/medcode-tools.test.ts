@@ -49,6 +49,95 @@ describe('medcode_list_systems', () => {
     expect(out.systems.find((s) => s.system === 'RXNORM')?.label).toBe('RxNorm');
     expect(out).toEqual(expect.schemaMatching(listSystemsTool.output));
   });
+
+  it('renders the release table for the four code systems', async () => {
+    const out = await listSystemsTool.handler(listSystemsTool.input.parse({}), createMockContext());
+    const text = listSystemsTool.format!(out)
+      .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+      .join('\n');
+    expect(text).toContain(
+      [
+        '## Bundled code systems',
+        '',
+        '| System | Release | Effective | Codes |',
+        '|:---|:---|:---|---:|',
+        '| ICD-10-CM (ICD10CM) | ICD-10-CM FY2026 (fixture) | 2025-10-01 → 2026-09-30 | 12 |',
+        '| ICD-10-PCS (ICD10PCS) | ICD-10-PCS FY2026 (fixture) | 2025-10-01 → 2026-09-30 | 4 |',
+        '| HCPCS Level II (HCPCS) | HCPCS 2026 (fixture) | 2026-01-01 → 2026-12-31 | 9 |',
+        '| RxNorm (RXNORM) | RxNorm (current normalized set) (fixture) | — | 5 |',
+      ].join('\n'),
+    );
+    for (const s of out.systems) {
+      expect(text).toContain(`**${s.label}** source: ${s.sourceUrl}`);
+      expect(text).toContain(s.builtAt);
+    }
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/55
+  it("names RxNorm's date as the RxNav snapshot fetch date, not a build time, on both surfaces", async () => {
+    const builtAt = (
+      listSystemsTool.output.shape.systems.element as unknown as {
+        shape: { builtAt: { description?: string } };
+      }
+    ).shape.builtAt.description;
+    expect(builtAt).toMatch(/RxNav snapshot/);
+    expect(builtAt).toMatch(/fetch/i);
+    expect(builtAt).not.toMatch(/last baked/);
+
+    const out = await listSystemsTool.handler(listSystemsTool.input.parse({}), createMockContext());
+    const text = listSystemsTool.format!(out)
+      .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+      .join('\n');
+    const rxnorm = out.systems.find((s) => s.system === 'RXNORM');
+    expect(text).toContain(`(RxNav snapshot fetched ${rxnorm?.builtAt})`);
+    expect(text).not.toMatch(/\*\*RxNorm\*\* source: \S+ \(built /);
+    for (const s of out.systems.filter((sys) => sys.system !== 'RXNORM')) {
+      expect(text).toContain(`**${s.label}** source: ${s.sourceUrl} (built ${s.builtAt})`);
+    }
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/34
+  it('reports the RxClass layer apart from the code systems, with each source on both surfaces', async () => {
+    const result = await runToolContract(listSystemsTool, {});
+    const out = result.structuredContent as {
+      classLayer: {
+        classCount: number;
+        edgeCount: number;
+        sourceUrl: string;
+        sources: {
+          classCount: number;
+          edgeCount: number;
+          fetchedAt: string;
+          source: string;
+          version: string | null;
+        }[];
+      } | null;
+      systems: { system: string }[];
+    };
+    // The class layer is not a code system: `systems` stays the four the other tools accept.
+    expect(out.systems.map((s) => s.system)).toEqual(['ICD10CM', 'ICD10PCS', 'HCPCS', 'RXNORM']);
+    const fetchedAt = '2026-09-24T18:18:35.103Z';
+    expect(out.classLayer).toEqual({
+      classCount: 12,
+      edgeCount: 11,
+      sourceUrl: 'https://rxnav.nlm.nih.gov/REST/rxclass/',
+      sources: [
+        { source: 'MEDRT', version: '2026.07.06', classCount: 6, edgeCount: 8, fetchedAt },
+        { source: 'FDASPL', version: 'MEDRT 2026.07.06', classCount: 2, edgeCount: 2, fetchedAt },
+        { source: 'FMTSME', version: 'MEDRT 2026.07.06', classCount: 0, edgeCount: 0, fetchedAt },
+        { source: 'VA', version: '2026_07_31', classCount: 1, edgeCount: 1, fetchedAt },
+        { source: 'RXNORM', version: '08-Sep-2026', classCount: 0, edgeCount: 0, fetchedAt },
+        { source: 'CDC', version: null, classCount: 0, edgeCount: 0, fetchedAt },
+      ],
+    });
+
+    const text = contentText(result);
+    expect(text).toContain('## RxClass drug-class layer');
+    expect(text).toContain('12 classes and 11 drug–class edges');
+    expect(text).toContain('https://rxnav.nlm.nih.gov/REST/rxclass/');
+    expect(text).toContain(`| MEDRT | 2026.07.06 | 6 | 8 | ${fetchedAt} |`);
+    expect(text).toContain(`| CDC | none published | 0 | 0 | ${fetchedAt} |`);
+  });
 });
 
 describe('medcode_get_code', () => {
@@ -816,10 +905,25 @@ describe('medcode_map_codes — a field the direction does not use is rejected',
     rxcui_to_ndc: '1049640',
     rxcui_to_ingredients: '198440',
     rxcui_to_brands: '198440',
+    // https://github.com/cyanheads/medical-codes-mcp-server/issues/34
+    rxcui_to_classes: '1049640',
+    class_to_rxcuis: 'N0000008836',
   } as const;
   const DIRECTIONS = Object.keys(SOURCES) as (keyof typeof SOURCES)[];
   const HIERARCHY = new Set(['parents', 'children']);
-  const PAGINATED = new Set(['children', 'name_to_rxcui', 'rxcui_to_ndc']);
+  const CLASS = new Set(['rxcui_to_classes', 'class_to_rxcuis']);
+  const PAGINATED = new Set([
+    'children',
+    'name_to_rxcui',
+    'rxcui_to_ndc',
+    'rxcui_to_classes',
+    'class_to_rxcuis',
+  ]);
+  /** A class type each class source carries, and one it does not. */
+  const CLASS_TYPES = {
+    rxcui_to_classes: { held: 'EPC', absent: 'SCHEDULE' },
+    class_to_rxcuis: { held: 'PE', absent: 'EPC' },
+  } as const;
   const cursorAt = (offset: number, limit: number) =>
     Buffer.from(JSON.stringify({ offset, limit })).toString('base64url');
 
@@ -855,6 +959,26 @@ describe('medcode_map_codes — a field the direction does not use is rejected',
           await expectRejected({ from, direction, system }, ['system']);
         }
       }
+    });
+
+    it(`classType — ${CLASS.has(direction) ? 'narrows the result' : 'rejected'}`, async () => {
+      if (!CLASS.has(direction)) {
+        await expectRejected({ from, direction, classType: 'EPC' }, ['classType']);
+        expect((await mapError({ from, direction, classType: 'CVX' })).message).toContain(
+          '`classType` ("CVX")',
+        );
+        return;
+      }
+      const types = CLASS_TYPES[direction as keyof typeof CLASS_TYPES];
+      const all = await mapCall({ from, direction });
+      const held = await mapCall({ from, direction, classType: types.held });
+      expect(held.out.hits.length).toBeGreaterThan(0);
+      expect(held.out.hits.every((h) => h.classType === types.held)).toBe(true);
+      expect(held.out.hits).toEqual(all.out.hits.filter((h) => h.classType === types.held));
+      // A type the source has no class of is an empty result with a notice, not an error.
+      const absent = await mapCall({ from, direction, classType: types.absent });
+      expect(absent.out.hits).toEqual([]);
+      expect(absent.enrich?.notice).toContain(types.absent);
     });
 
     it(`limit — ${paginated ? 'caps the page' : 'rejected'}`, async () => {
@@ -912,6 +1036,17 @@ describe('medcode_map_codes — a field the direction does not use is rejected',
         cursor: cursorAt(0, 1),
       },
       ['system', 'limit', 'cursor'],
+    );
+    await expectRejected(
+      {
+        from: '198440',
+        direction: 'rxcui_to_brands',
+        system: 'HCPCS',
+        classType: 'EPC',
+        limit: 1,
+        cursor: cursorAt(0, 1),
+      },
+      ['system', 'classType', 'limit', 'cursor'],
     );
   });
 
@@ -1284,6 +1419,7 @@ describe('medcode_map_codes — a code system name in `from`', () => {
     'rxcui_to_ndc',
     'rxcui_to_ingredients',
     'rxcui_to_brands',
+    'rxcui_to_classes',
   ];
   const TOKENS = [
     ['ICD10CM', 'ICD10CM'],
@@ -1309,11 +1445,42 @@ describe('medcode_map_codes — a code system name in `from`', () => {
         expect(hint).toContain(`\`system\` ("${system}")`);
         expect(hint).toContain('medcode_browse_hierarchy');
       } else {
-        expect(hint).toMatch(/drug name, an NDC, or an RXCUI/);
+        expect(hint, direction).toMatch(DRUG_INPUT[direction] ?? /RXCUI/);
         expect(hint).not.toContain('medcode_browse_hierarchy');
       }
     }
   });
+
+  /** The input each drug direction takes, as its system-token recovery must name it (#56). */
+  const DRUG_INPUT: Record<string, RegExp> = {
+    name_to_rxcui: /^`from` takes a drug name on name_to_rxcui/,
+    ndc_to_rxcui: /^`from` takes an NDC on ndc_to_rxcui/,
+    rxcui_to_ndc: /^`from` takes an RXCUI on rxcui_to_ndc/,
+    rxcui_to_ingredients: /^`from` takes an RXCUI on rxcui_to_ingredients/,
+    rxcui_to_brands: /^`from` takes an RXCUI on rxcui_to_brands/,
+    rxcui_to_classes: /^`from` takes an RXCUI on rxcui_to_classes/,
+  };
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/56
+  it.each(Object.keys(DRUG_INPUT))(
+    'offers only the input %s accepts in its system-token recovery, on both surfaces',
+    async (direction) => {
+      const result = await runToolContract(mapCodesTool, { from: 'ICD10CM', direction } as never);
+      const hint = envelopeOf(result).data?.recovery?.hint ?? '';
+      expect(hint).toMatch(DRUG_INPUT[direction] as RegExp);
+      const offered = ['a drug name', 'an NDC', 'an RXCUI'].filter((input) =>
+        hint.startsWith(`\`from\` takes ${input}`),
+      );
+      expect(offered).toHaveLength(1);
+      expect(hint).not.toMatch(/, an NDC, or an RXCUI|a drug name, an NDC/);
+      if (direction.startsWith('rxcui_to_')) {
+        // An RXCUI is reached from a name or a package — the recovery names how.
+        expect(hint).toContain('name_to_rxcui');
+        expect(hint).toContain('ndc_to_rxcui');
+      }
+      expect(contentText(result)).toContain(hint);
+    },
+  );
 
   it('carries the message and the hierarchy recovery on both surfaces', async () => {
     const result = await runToolContract(mapCodesTool, {
@@ -1329,13 +1496,13 @@ describe('medcode_map_codes — a code system name in `from`', () => {
     expect(text).toContain('medcode_browse_hierarchy');
   });
 
-  it('gives the drug-direction recovery for RXNORM on rxcui_to_ingredients', async () => {
+  it('gives the RXCUI recovery for RXNORM on rxcui_to_ingredients', async () => {
     const result = await runToolContract(mapCodesTool, {
       from: 'RXNORM',
       direction: 'rxcui_to_ingredients',
     } as never);
     const hint = envelopeOf(result).data?.recovery?.hint ?? '';
-    expect(hint).toMatch(/drug name, an NDC, or an RXCUI/);
+    expect(hint).toMatch(/^`from` takes an RXCUI on rxcui_to_ingredients/);
     expect(contentText(result)).toContain(hint);
   });
 
@@ -1556,5 +1723,302 @@ describe('medcode_map_codes — an ndc_to_rxcui miss says which case it is', () 
   it('keeps the code-system hint ahead of the NDC wording', async () => {
     const err = await mapError({ from: 'RXNORM', direction: 'ndc_to_rxcui' });
     expect(err.message).toBe('"RXNORM" is a code system, not a code.');
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/34
+describe('medcode_map_codes — rxcui_to_classes', () => {
+  /** The fixed fields of a class hit, in the order the direction returns them. */
+  const hit = (
+    value: string,
+    classType: string,
+    relation: string,
+    source: string,
+    description: string,
+    via?: string,
+  ) => ({
+    source,
+    system: null,
+    value,
+    description,
+    classType,
+    relation,
+    ...(via ? { via } : {}),
+  });
+
+  it("returns a product's own class and its ingredient's classes, naming the ingredient in via", async () => {
+    const { out, enrich } = await mapCall({ from: '198440', direction: 'rxcui_to_classes' });
+    expect(out.resolvedSystem).toBe('RXNORM');
+    expect(out.hits).toEqual([
+      hit('N0000000108', 'MOA', 'has_moa', 'MEDRT', 'Prostaglandin Receptor Antagonists', '161'),
+      hit('N0000008836', 'PE', 'has_pe', 'MEDRT', 'Decreased Prostaglandin Production', '161'),
+      hit('D000082', 'CHEM', 'has_ingredient', 'MEDRT', 'Acetaminophen', '161'),
+      hit('D004342', 'DISEASE', 'ci_with', 'MEDRT', 'Drug Hypersensitivity', '161'),
+      hit('D010146', 'DISEASE', 'may_prevent', 'MEDRT', 'Pain', '161'),
+      hit('D010146', 'DISEASE', 'may_treat', 'MEDRT', 'Pain', '161'),
+      // The product's own VA class — no via.
+      hit('CN103', 'VA', 'has_vaclass', 'VA', 'NON-OPIOID ANALGESICS'),
+    ]);
+    expect(enrich).toMatchObject({ truncated: false, shown: 7, cap: 50 });
+    expect(out).toEqual(expect.schemaMatching(mapCodesTool.output));
+  });
+
+  it('returns the classes of a product with no class of its own entirely through its ingredient', async () => {
+    const { out } = await mapCall({ from: '1049640', direction: 'rxcui_to_classes' });
+    expect(out.hits).toEqual([
+      hit('N0000175722', 'EPC', 'has_epc', 'FDASPL', 'Nonsteroidal Anti-inflammatory Drug', '1191'),
+      hit('N0000175578', 'EPC', 'has_epc', 'FDASPL', 'Platelet Aggregation Inhibitor', '1191'),
+      hit('N0000000160', 'MOA', 'has_moa', 'MEDRT', 'Cyclooxygenase Inhibitors', '1191'),
+      hit('N0000008836', 'PE', 'has_pe', 'MEDRT', 'Decreased Prostaglandin Production', '1191'),
+    ]);
+  });
+
+  it("inherits upward only: an ingredient never carries its products' classes", async () => {
+    const { out } = await mapCall({ from: '161', direction: 'rxcui_to_classes' });
+    expect(out.hits).toHaveLength(6);
+    expect(out.hits.every((h) => h.via === undefined)).toBe(true);
+    expect(out.hits.map((h) => h.value)).not.toContain('CN103');
+  });
+
+  it('returns an empty success with a brand-name notice for an RXCUI with no class', async () => {
+    const { out, enrich } = await mapCall({ from: '202433', direction: 'rxcui_to_classes' });
+    expect(out).toMatchObject({ resolvedSystem: 'RXNORM', hits: [] });
+    expect(enrich).toMatchObject({ truncated: false, shown: 0 });
+    expect(enrich?.notice).toBe(
+      '"202433" resolved in RXNORM but has no rxcui_to_classes — no bundled RxClass source classifies it or its ingredients. Brand-name concepts carry no classes: find the brand\'s products with direction name_to_rxcui and map one of those, or map an ingredient\'s RXCUI.',
+    );
+  });
+
+  it('names the classType in the notice when the filter leaves nothing', async () => {
+    const { out, enrich } = await mapCall({
+      from: '161',
+      direction: 'rxcui_to_classes',
+      classType: 'EPC',
+    });
+    expect(out.hits).toEqual([]);
+    expect(enrich?.notice).toContain('has no EPC class');
+    expect(enrich?.notice).toContain('Omit `classType`');
+  });
+
+  it.each([
+    ['SCHEDULE', 'DEA schedules on drug products', 'does not mean it is unscheduled'],
+    ['VA', 'VA classes on drug products', 'says nothing about its products'],
+  ])(
+    'tells an ingredient with no %s class that RxClass records it on products',
+    async (classType, where, caution) => {
+      const { out, enrich } = await mapCall({
+        from: '161',
+        direction: 'rxcui_to_classes',
+        classType,
+      });
+      expect(out.hits).toEqual([]);
+      expect(enrich?.notice).toContain('an ingredient (IN)');
+      expect(enrich?.notice).toContain(where);
+      expect(enrich?.notice).toContain(caution);
+      expect(enrich?.notice).toContain('name_to_rxcui');
+      expect(enrich?.notice).not.toContain('on itself or its ingredients');
+    },
+  );
+
+  it('keeps the plain classType notice on a drug product, where schedules are recorded', async () => {
+    const { enrich } = await mapCall({
+      from: '198440',
+      direction: 'rxcui_to_classes',
+      classType: 'SCHEDULE',
+    });
+    expect(enrich?.notice).toBe(
+      '"198440" resolved in RXNORM but has no SCHEDULE class in the bundled RxClass sources, on itself or its ingredients. Omit `classType` to list its classes of every type.',
+    );
+  });
+
+  it('walks every page past the cap to the same set the unpaged call returns', async () => {
+    const full = (await mapCall({ from: '198440', direction: 'rxcui_to_classes', limit: 200 })).out
+      .hits;
+    const walked: typeof full = [];
+    const flags: unknown[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await mapCall({
+        from: '198440',
+        direction: 'rxcui_to_classes',
+        limit: 3,
+        cursor,
+      });
+      expect(page.enrich).toMatchObject({ cap: 3, shown: page.out.hits.length });
+      flags.push(page.enrich?.truncated);
+      walked.push(...page.out.hits);
+      cursor = page.enrich?.nextCursor as string | undefined;
+    } while (cursor);
+    expect(flags).toEqual([true, true, false]);
+    expect(walked).toEqual(full);
+  });
+
+  it.each([
+    ['999999', `No bundled code matches "999999". ${CPT_SENTENCE}`],
+    ['11111222233', '"11111222233" is a National Drug Code (NDC), not an RXCUI.'],
+    ['N0000008836', '"N0000008836" is an RxClass class ID, not an RXCUI.'],
+    ['RxNorm', '"RxNorm" is a code system, not a code.'],
+    ['ZZZZZZ9', 'No bundled code matches "ZZZZZZ9".'],
+  ])('fails %s with no_mapping in the rxcui_to_* wording', async (from, message) => {
+    const result = await runToolContract(mapCodesTool, {
+      from,
+      direction: 'rxcui_to_classes',
+    } as never);
+    const error = envelopeOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data?.reason).toBe('no_mapping');
+    expect(error.message).toBe(message);
+    const text = contentText(result);
+    expect(text).toContain(message);
+    expect(text).toContain(error.data?.recovery?.hint ?? '<missing hint>');
+    expect(text).toContain('(reason no_mapping)');
+  });
+
+  it('words each miss the way the other rxcui_to_* directions word it', async () => {
+    for (const from of ['999999', '11111222233', '9999988887', 'RxNorm', 'ZZZZZZ9']) {
+      const classes = await mapError({ from, direction: 'rxcui_to_classes' });
+      const ingredients = await mapError({ from, direction: 'rxcui_to_ingredients' });
+      expect(classes.message, from).toBe(ingredients.message);
+      // The system-token recovery names its own direction (#56); otherwise identical.
+      expect(classes.data?.recovery?.hint, from).toBe(
+        ingredients.data?.recovery?.hint?.replace('rxcui_to_ingredients', 'rxcui_to_classes'),
+      );
+    }
+  });
+
+  it('sends a class ID sent the wrong way to class_to_rxcuis', async () => {
+    const err = await mapError({ from: 'n0000008836', direction: 'rxcui_to_classes' });
+    expect(err.message).toBe('"n0000008836" is an RxClass class ID, not an RXCUI.');
+    expect(err.data?.recovery?.hint).toContain('class_to_rxcuis');
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/34
+describe('medcode_map_codes — class_to_rxcuis', () => {
+  const CLASS_ID_HINT = /rxcui_to_classes returns it in `value`/;
+
+  it('returns direct members with their RxNorm name and concept type', async () => {
+    const { out, enrich } = await mapCall({ from: 'N0000008836', direction: 'class_to_rxcuis' });
+    expect(out.resolvedSystem).toBeNull();
+    expect(out.hits).toEqual([
+      {
+        source: 'MEDRT',
+        system: 'RXNORM',
+        value: '161',
+        description: 'acetaminophen',
+        conceptType: 'IN',
+        classType: 'PE',
+        relation: 'has_pe',
+      },
+      {
+        source: 'MEDRT',
+        system: 'RXNORM',
+        value: '1191',
+        description: 'aspirin',
+        conceptType: 'IN',
+        classType: 'PE',
+        relation: 'has_pe',
+      },
+    ]);
+    expect(enrich).toMatchObject({ truncated: false, shown: 2, cap: 50 });
+    expect(out).toEqual(expect.schemaMatching(mapCodesTool.output));
+  });
+
+  it('returns one hit per member × relation, and matches the class ID case-insensitively', async () => {
+    const { out } = await mapCall({ from: ' d010146 ', direction: 'class_to_rxcuis' });
+    expect(out.from).toBe('d010146');
+    expect(out.hits.map((h) => [h.value, h.relation])).toEqual([
+      ['161', 'may_prevent'],
+      ['161', 'may_treat'],
+    ]);
+  });
+
+  it('walks every page past the cap to the same set the unpaged call returns', async () => {
+    const full = (await mapCall({ from: 'N0000008836', direction: 'class_to_rxcuis' })).out.hits;
+    const first = await mapCall({ from: 'N0000008836', direction: 'class_to_rxcuis', limit: 1 });
+    expect(first.enrich).toMatchObject({ truncated: true, shown: 1, cap: 1 });
+    const second = await mapCall({
+      from: 'N0000008836',
+      direction: 'class_to_rxcuis',
+      limit: 1,
+      cursor: first.enrich?.nextCursor as string,
+    });
+    expect(second.enrich).toMatchObject({ truncated: false, shown: 1, cap: 1 });
+    expect(second.enrich?.nextCursor).toBeUndefined();
+    expect([...first.out.hits, ...second.out.hits]).toEqual(full);
+  });
+
+  it.each([
+    ['N0000193873', 'the EPC class "Diuretic"'],
+    ['CN100', 'the VA class "ANALGESICS"'],
+    ['SCHEDULE2', 'the SCHEDULE class "SCHEDULE II"'],
+  ])('returns an empty success naming the memberless class %s', async (from, named) => {
+    const { out, enrich } = await mapCall({ from, direction: 'class_to_rxcuis' });
+    expect(out.hits).toEqual([]);
+    expect(enrich).toMatchObject({ truncated: false, shown: 0 });
+    expect(enrich?.notice).toBe(
+      `"${from}" resolved to ${named}, which has no direct member — its drugs attach to its subclasses, and this index lists direct members only, without walking the class hierarchy. Map a drug to its more specific classes with direction rxcui_to_classes.`,
+    );
+  });
+
+  it('names the class type a classType filter excluded', async () => {
+    const { out, enrich } = await mapCall({
+      from: 'N0000008836',
+      direction: 'class_to_rxcuis',
+      classType: 'EPC',
+    });
+    expect(out.hits).toEqual([]);
+    expect(enrich?.notice).toBe(
+      '"N0000008836" is the PE class "Decreased Prostaglandin Production", not a class of type EPC. Re-call with `classType` "PE", or omit `classType`.',
+    );
+  });
+
+  it('names the class in the notice past the last page', async () => {
+    const cursor = Buffer.from(JSON.stringify({ offset: 50, limit: 1 })).toString('base64url');
+    const { enrich } = await mapCall({ from: 'N0000008836', direction: 'class_to_rxcuis', cursor });
+    expect(enrich?.notice).toBe(
+      '"N0000008836" resolved to the PE class "Decreased Prostaglandin Production", but this page starts past the last class_to_rxcuis result. Re-call without a `cursor` to start from the first page.',
+    );
+  });
+
+  it.each([
+    ['N9999999999', 'No bundled RxClass class has the ID "N9999999999".', CLASS_ID_HINT],
+    // A bare integer is no CPT code here: CVX class IDs are bare integers.
+    ['43239', 'No bundled RxClass class has the ID "43239".', CLASS_ID_HINT],
+    ['A10BA02', 'No bundled RxClass class has the ID "A10BA02".', /ATC/],
+    ['161', '"161" is an RxNorm concept (RXCUI), not a class ID.', /rxcui_to_classes/],
+    ['ICD10CM', '"ICD10CM" is a code system, not a class ID.', CLASS_ID_HINT],
+    [
+      'epc',
+      '"epc" is a class type, not a class ID — pass it as `classType` alongside a class ID of that type.',
+      CLASS_ID_HINT,
+    ],
+  ])(
+    'fails %s with no_mapping, worded for a class ID, on both surfaces',
+    async (from, message, hint) => {
+      const result = await runToolContract(mapCodesTool, {
+        from,
+        direction: 'class_to_rxcuis',
+      } as never);
+      const error = envelopeOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.data?.reason).toBe('no_mapping');
+      expect(error.message).toBe(message);
+      expect(error.data?.recovery?.hint).toMatch(hint);
+      expect(error.data?.recovery?.hint).not.toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
+      const text = contentText(result);
+      expect(text).toContain(message);
+      expect(text).toContain(error.data?.recovery?.hint ?? '<missing hint>');
+      expect(text).not.toMatch(/CPT/);
+      expect(text).toContain('(reason no_mapping)');
+    },
+  );
+
+  it('keeps direction_unavailable ahead of the class fields in a build without RxNorm', async () => {
+    const err = await withoutRxNorm(() =>
+      mapError({ from: 'N0000008836', direction: 'class_to_rxcuis', classType: 'PE', limit: 1 }),
+    );
+    expect(err.data?.reason).toBe('direction_unavailable');
+    expect(err.message).toContain('needs RxNorm');
   });
 });

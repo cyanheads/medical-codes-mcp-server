@@ -242,6 +242,76 @@ describe('medcode_map_codes format', () => {
     expect(text).toContain('- **E11** (ICD10CM) via ICD10CM: Type 2 diabetes mellitus');
   });
 
+  // The rendered text of every direction that predates the class directions, pinned
+  // whole: a hit with no class fields must render exactly as it always has.
+  it.each([
+    [
+      { from: 'E11.9', direction: 'parents' },
+      '## parents: E11.9\n**Resolved system:** ICD10CM\n- **E11** (ICD10CM) via ICD10CM: Type 2 diabetes mellitus',
+    ],
+    [
+      { from: 'A00', direction: 'children' },
+      '## children: A00\n**Resolved system:** ICD10CM\n- **A00.0** (ICD10CM) via ICD10CM: Cholera due to Vibrio cholerae 01, biovar cholerae\n- **A00.1** (ICD10CM) via ICD10CM: Cholera due to Vibrio cholerae 01, biovar eltor',
+    ],
+    [
+      { from: 'a', direction: 'name_to_rxcui' },
+      '## name_to_rxcui: a\n**Resolved system:** RXNORM\n- **161** (RXNORM) via RXNORM: acetaminophen\n- **1191** (RXNORM) via RXNORM: aspirin\n- **198440** (RXNORM) via RXNORM: Acetaminophen 500 MG Oral Tablet\n- **1049640** (RXNORM) via RXNORM: Aspirin 325 MG Oral Tablet',
+    ],
+    [
+      { from: '11111-2222-33', direction: 'ndc_to_rxcui' },
+      '## ndc_to_rxcui: 11111-2222-33\n**Resolved system:** RXNORM\n- **198440** (RXNORM) via NDC: Acetaminophen 500 MG Oral Tablet',
+    ],
+    [
+      { from: '1049640', direction: 'rxcui_to_ndc' },
+      '## rxcui_to_ndc: 1049640\n**Resolved system:** RXNORM\n- **00904516140** via NDC\n- **00904516160** via NDC\n- **00904516161** via NDC\n- **00904516180** via NDC\n- **00904516189** via NDC',
+    ],
+    [
+      { from: '198440', direction: 'rxcui_to_ingredients' },
+      '## rxcui_to_ingredients: 198440\n**Resolved system:** RXNORM\n- **161** (RXNORM) via has_ingredient [IN]: acetaminophen',
+    ],
+    [
+      { from: '198440', direction: 'rxcui_to_brands' },
+      '## rxcui_to_brands: 198440\n**Resolved system:** RXNORM\n- **202433** (RXNORM) via has_tradename [BN]: Tylenol',
+    ],
+  ])('renders %j exactly as before', async (args, expected) => {
+    const out = await mapCodesTool.handler(
+      mapCodesTool.input.parse(args),
+      createMockContext({ errors: mapCodesTool.errors }),
+    );
+    expect(textOf(mapCodesTool.format!(out))).toBe(expected);
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/34
+  it("renders a class hit's type, source, relation, and via, spelling out a contraindication", async () => {
+    const out = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: '198440', direction: 'rxcui_to_classes' }),
+      createMockContext({ errors: mapCodesTool.errors }),
+    );
+    const text = textOf(mapCodesTool.format!(out));
+    expect(text).toContain('## rxcui_to_classes: 198440');
+    expect(text).toContain(
+      '- **N0000000108** via MEDRT · MOA · has_moa · inherited via ingredient 161: Prostaglandin Receptor Antagonists',
+    );
+    expect(text).toContain(
+      '- **D004342** via MEDRT · DISEASE · ci_with (contraindication) · inherited via ingredient 161: Drug Hypersensitivity',
+    );
+    expect(text).toContain(
+      '- **D010146** via MEDRT · DISEASE · may_treat · inherited via ingredient 161: Pain',
+    );
+    // The product's own class names no ingredient.
+    expect(text).toContain('- **CN103** via VA · VA · has_vaclass: NON-OPIOID ANALGESICS');
+  });
+
+  it("renders a class member's RxNorm name, concept type, and edge", async () => {
+    const out = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: 'N0000008836', direction: 'class_to_rxcuis' }),
+      createMockContext({ errors: mapCodesTool.errors }),
+    );
+    expect(textOf(mapCodesTool.format!(out))).toBe(
+      '## class_to_rxcuis: N0000008836\n- **161** (RXNORM) via MEDRT [IN] · PE · has_pe: acetaminophen\n- **1191** (RXNORM) via MEDRT [IN] · PE · has_pe: aspirin',
+    );
+  });
+
   it('omits the resolved-system line for a system-less crosswalk', () => {
     const out = mapCodesTool.output.parse({
       from: '198440',

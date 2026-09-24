@@ -94,6 +94,17 @@ describe('handler-thrown failures', () => {
       args: { from: '11111-2222-33', direction: 'ndc_to_rxcui', limit: 1 },
       reason: 'field_not_applicable',
     },
+    // https://github.com/cyanheads/medical-codes-mcp-server/issues/34
+    {
+      tool: mapCodesTool,
+      args: { from: 'E11.9', direction: 'parents', classType: 'EPC' },
+      reason: 'field_not_applicable',
+    },
+    {
+      tool: mapCodesTool,
+      args: { from: ABSENT, direction: 'rxcui_to_classes' },
+      reason: 'no_mapping',
+    },
   ];
 
   for (const { tool, args, reason } of CASES) {
@@ -125,6 +136,16 @@ describe('handler-thrown failures', () => {
     // https://github.com/cyanheads/medical-codes-mcp-server/issues/50
     [{ from: '11-1112-22233', direction: 'ndc_to_rxcui' }, 'name_to_rxcui'],
     [{ from: '99999-8888-77', direction: 'ndc_to_rxcui' }, 'name_to_rxcui'],
+    // https://github.com/cyanheads/medical-codes-mcp-server/issues/34
+    [{ from: 'N9999999999', direction: 'class_to_rxcuis' }, 'rxcui_to_classes'],
+    [{ from: 'N0000008836', direction: 'rxcui_to_classes' }, 'class_to_rxcuis'],
+    // https://github.com/cyanheads/medical-codes-mcp-server/issues/56
+    [
+      { from: 'ICD10CM', direction: 'rxcui_to_ingredients' },
+      'takes an RXCUI on rxcui_to_ingredients',
+    ],
+    [{ from: 'ICD10CM', direction: 'name_to_rxcui' }, 'takes a drug name on name_to_rxcui'],
+    [{ from: 'ICD10CM', direction: 'ndc_to_rxcui' }, 'takes an NDC on ndc_to_rxcui'],
   ])('replaces the declared no_mapping recovery for %j on both surfaces', async (args, names) => {
     const declared = mapCodesTool.errors?.find((entry) => entry.reason === 'no_mapping');
     const result = await callWithRawArgs(mapCodesTool, args);
@@ -299,6 +320,26 @@ describe('argument rejections', () => {
       expect(envelope.error.message).toContain(accepted);
     }
     expect(textOf(result.content)).toContain('ICD10CM');
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/34
+  it.each([
+    ['a value outside the class types', 'ATC'],
+    ['a blank value, which the enum does not read as omitted', ''],
+  ])('rejects a classType that is %s, naming the accepted types', async (_label, classType) => {
+    const result = await callWithRawArgs(mapCodesTool, {
+      from: '161',
+      direction: 'rxcui_to_classes',
+      classType,
+    });
+    expect(result.isError).toBe(true);
+    const envelope = result.structuredContent as ErrorEnvelope;
+    expect(envelope.error.code).toBe(-32602);
+    expect(envelope.error.data?.reason).toBe('invalid_arguments');
+    for (const accepted of ['EPC', 'MOA', 'DISEASE', 'SCHEDULE', 'CVX']) {
+      expect(envelope.error.message).toContain(accepted);
+    }
+    expect(textOf(result.content)).toContain('(reason invalid_arguments)');
   });
 
   it('rejects a value that violates a declared bound', async () => {

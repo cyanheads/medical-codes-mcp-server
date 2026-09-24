@@ -66,6 +66,25 @@ it('executes and renders all six tools against the shipped index', async () => {
   expect(mapped.hits.map((hit) => hit.value)).toEqual(['2679323']);
   expect(textOf(mapCodesTool.format!(mapped))).toContain('2679323');
 
+  const classes = await mapCodesTool.handler(
+    mapCodesTool.input.parse({ from: '861007', direction: 'rxcui_to_classes', classType: 'EPC' }),
+    createMockContext({ errors: mapCodesTool.errors }),
+  );
+  expect(classes).toEqual(expect.schemaMatching(mapCodesTool.output));
+  expect(classes.hits.map((hit) => [hit.value, hit.via])).toEqual([['N0000175565', '6809']]);
+  expect(textOf(mapCodesTool.format!(classes))).toContain(
+    'inherited via ingredient 6809: Biguanide',
+  );
+
+  const members = await mapCodesTool.handler(
+    mapCodesTool.input.parse({ from: 'N0000175565', direction: 'class_to_rxcuis' }),
+    createMockContext({ errors: mapCodesTool.errors }),
+  );
+  expect(members).toEqual(expect.schemaMatching(mapCodesTool.output));
+  expect(members.hits.map((hit) => hit.value)).toContain('6809');
+  expect(systems.classLayer?.sources.map((s) => s.source)).toContain('MEDRT');
+  expect(textOf(listSystemsTool.format!(systems))).toContain('## RxClass drug-class layer');
+
   const browsed = await browseHierarchyTool.handler(
     browseHierarchyTool.input.parse({ system: 'ICD10PCS' }),
     createMockContext({ errors: browseHierarchyTool.errors }),

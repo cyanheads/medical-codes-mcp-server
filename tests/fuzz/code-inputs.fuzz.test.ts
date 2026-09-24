@@ -5,12 +5,13 @@
  * @module tests/fuzz/code-inputs.fuzz.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { mapCodesTool } from '@/mcp-server/tools/definitions/map-codes.tool.js';
 import { searchCodesTool } from '@/mcp-server/tools/definitions/search-codes.tool.js';
 import type { CodeIndexService } from '@/services/code-index/code-index-service.js';
 import { detectSystems, ndcCandidates } from '@/services/code-index/detect.js';
-import type { SystemId } from '@/services/code-index/types.js';
+import { RXCLASS_CLASS_TYPES, type SystemId } from '@/services/code-index/types.js';
 import {
   parseHcpcsAnweb,
   parseIcd10cmOrder,
@@ -59,6 +60,12 @@ const SEARCH_CORPUS = [
   'diabetes\0neuropathy',
   'a  '.repeat(256),
 ] as const;
+
+/** Sends a raw argument bag as a client would, including values the schema rejects. */
+const callWithRawArgs = runToolContract as unknown as (
+  tool: unknown,
+  args: Record<string, unknown>,
+) => ReturnType<typeof runToolContract>;
 
 let svc: CodeIndexService;
 
@@ -144,6 +151,48 @@ describe('index query fuzz', () => {
     }
   });
 
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/34
+  it('drives the class directions over malformed identifiers and every class type', () => {
+    for (const raw of [...MALFORMED_IDENTIFIERS, ...SEARCH_CORPUS]) {
+      for (const direction of ['rxcui_to_classes', 'class_to_rxcuis'] as const) {
+        for (const classType of [undefined, ...RXCLASS_CLASS_TYPES]) {
+          let page: ReturnType<CodeIndexService['mapCode']>;
+          try {
+            page = svc.mapCode(raw, direction, undefined, { offset: 0, limit: 7 }, classType);
+          } catch (error) {
+            throw new Error(`${direction} threw for ${JSON.stringify(raw)} / ${classType}`, {
+              cause: error,
+            });
+          }
+          // None of these is a bundled RXCUI or class ID.
+          expect(page.kind, `${direction} ${JSON.stringify(raw)}`).toBe('source_not_found');
+        }
+      }
+    }
+  });
+
+  it('answers every malformed class-direction call with a declared outcome on both surfaces', async () => {
+    const reasons = new Set<string>();
+    for (const raw of [...MALFORMED_IDENTIFIERS, ...SEARCH_CORPUS]) {
+      for (const direction of ['rxcui_to_classes', 'class_to_rxcuis']) {
+        const result = await callWithRawArgs(mapCodesTool, { from: raw, direction });
+        expect(result.isError, `${direction} ${JSON.stringify(raw)}`).toBe(true);
+        const { error } = result.structuredContent as {
+          error: { data?: { reason?: string }; message: string };
+        };
+        const reason = error.data?.reason ?? '<none>';
+        reasons.add(reason);
+        // A blank value never reaches the handler; everything else is an unmapped source.
+        expect(['no_mapping', 'invalid_arguments']).toContain(reason);
+        const text = (result.content as { text?: string }[]).map((c) => c.text ?? '').join('\n');
+        expect(text).toContain(`(reason ${reason})`);
+        expect(text).not.toMatch(/SQLite|SQLITE_|\bat .+\.ts:\d+/);
+        if (direction === 'class_to_rxcuis') expect(text).not.toMatch(/CPT/);
+      }
+    }
+    expect([...reasons].sort()).toEqual(['invalid_arguments', 'no_mapping']);
+  });
+
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/35
   it('crosswalks an NDC exactly when get_code decodes it as one', () => {
     // The last nine spell the fixture key 11111222233 in a configuration the FDA
@@ -193,6 +242,8 @@ describe('index query fuzz', () => {
       ['198440', 'rxcui_to_ndc'],
       ['A00', 'children'],
       ['E11', 'children'],
+      ['198440', 'rxcui_to_classes'],
+      ['N0000008836', 'class_to_rxcuis'],
     ] as const;
 
     for (const [from, direction] of sources) {

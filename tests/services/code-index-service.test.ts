@@ -755,6 +755,8 @@ describe('mapCode — a page past the end is not an unmapped source', () => {
     ['name_to_rxcui', 'a'],
     ['rxcui_to_ndc', '1049640'],
     ['children', 'A00'],
+    ['rxcui_to_classes', '198440'],
+    ['class_to_rxcuis', 'N0000008836'],
   ] as const)('returns ok-empty for %s past the last page', (direction, from) => {
     // The same source one call earlier returns hits, so reporting the out-of-range
     // window as source_not_found makes the tool contradict itself.
@@ -776,6 +778,8 @@ describe('mapCode — a page past the end is not an unmapped source', () => {
   it.each([
     ['children', 'E1140'],
     ['rxcui_to_ndc', '161'],
+    ['rxcui_to_classes', '202433'],
+    ['class_to_rxcuis', 'N0000193873'],
   ] as const)('does not call %s past-the-end when the source has no edges at all', (d, from) => {
     // Same out-of-range offset, opposite cause: nothing was skipped, because there
     // was nothing to skip. Flagging these as past-the-end would send the caller
@@ -797,6 +801,101 @@ describe('mapCode — a page past the end is not an unmapped source', () => {
     expect(svc.mapCode('999999999', 'rxcui_to_ndc', undefined, beyond).kind).toBe(
       'source_not_found',
     );
+    expect(svc.mapCode('999999999', 'rxcui_to_classes', undefined, beyond).kind).toBe(
+      'source_not_found',
+    );
+    expect(svc.mapCode('N9999999999', 'class_to_rxcuis', undefined, beyond).kind).toBe(
+      'source_not_found',
+    );
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/34
+describe('mapCode (RxClass class directions)', () => {
+  const firstPage = { offset: 0, limit: 200 };
+  const values = (r: ReturnType<CodeIndexService['mapCode']>) =>
+    r.kind === 'ok'
+      ? r.hits.map((h) => `${h.classType}:${h.value}:${h.relation}:${h.via ?? ''}`)
+      : [];
+
+  it('reconstructs each direction from consecutive pages of every size', () => {
+    for (const [from, direction] of [
+      ['198440', 'rxcui_to_classes'],
+      ['161', 'rxcui_to_classes'],
+      ['D010146', 'class_to_rxcuis'],
+      ['N0000008836', 'class_to_rxcuis'],
+    ] as const) {
+      const full = values(svc.mapCode(from, direction, undefined, firstPage));
+      expect(full.length).toBeGreaterThan(1);
+      for (const limit of [1, 2, 3]) {
+        const walked: string[] = [];
+        for (let offset = 0; offset < full.length + limit; offset += limit) {
+          walked.push(...values(svc.mapCode(from, direction, undefined, { offset, limit })));
+        }
+        expect(walked, `${direction} ${from} limit ${limit}`).toEqual(full);
+      }
+    }
+  });
+
+  it('never repeats a class × source × relation on one RXCUI', () => {
+    for (const from of ['161', '1191', '198440', '1049640', '202433']) {
+      const page = svc.mapCode(from, 'rxcui_to_classes', undefined, firstPage);
+      if (page.kind !== 'ok') throw new Error(`${from} did not resolve`);
+      const keys = page.hits.map((h) => `${h.classType}|${h.value}|${h.source}|${h.relation}`);
+      expect(new Set(keys).size).toBe(keys.length);
+    }
+  });
+
+  it('narrows both directions to one class type', () => {
+    const narrowed = svc.mapCode('198440', 'rxcui_to_classes', undefined, firstPage, 'DISEASE');
+    expect(values(narrowed)).toEqual([
+      'DISEASE:D004342:ci_with:161',
+      'DISEASE:D010146:may_prevent:161',
+      'DISEASE:D010146:may_treat:161',
+    ]);
+    const members = svc.mapCode('D010146', 'class_to_rxcuis', undefined, firstPage, 'DISEASE');
+    expect(values(members)).toHaveLength(2);
+    const excluded = svc.mapCode('D010146', 'class_to_rxcuis', undefined, firstPage, 'CHEM');
+    expect(excluded).toMatchObject({ kind: 'ok', hits: [] });
+  });
+
+  it('names the class nodes a class ID resolves to, whatever the classType filter', () => {
+    const page = svc.mapCode('n0000193873', 'class_to_rxcuis', undefined, firstPage, 'MOA');
+    expect(page).toMatchObject({
+      kind: 'ok',
+      resolvedSystem: null,
+      hits: [],
+      sourceClasses: [{ classType: 'EPC', className: 'Diuretic' }],
+    });
+    expect(svc.classNodes(' cn103 ')).toEqual([
+      { classType: 'VA', className: 'NON-OPIOID ANALGESICS' },
+    ]);
+    expect(svc.classNodes('161')).toEqual([]);
+  });
+
+  it('ignores classType on every other direction', () => {
+    expect(svc.mapCode('198440', 'rxcui_to_ingredients', undefined, firstPage, 'EPC')).toEqual(
+      svc.mapCode('198440', 'rxcui_to_ingredients', undefined, firstPage),
+    );
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/34
+describe('hasClassLayer / classLayer', () => {
+  it('reports the fixture class layer with every bundled source in order', () => {
+    expect(svc.hasClassLayer()).toBe(true);
+    const layer = svc.classLayer();
+    expect(layer?.classCount).toBe(12);
+    expect(layer?.edgeCount).toBe(11);
+    expect(layer?.sources.map((s) => s.source)).toEqual([
+      'MEDRT',
+      'FDASPL',
+      'FMTSME',
+      'VA',
+      'RXNORM',
+      'CDC',
+    ]);
+    expect(layer?.sources.find((s) => s.source === 'CDC')?.version).toBeNull();
   });
 });
 

@@ -16,7 +16,7 @@ import { logger, requestContextService, runtimeCaps } from '@cyanheads/mcp-ts-co
 
 import { getServerConfig } from '@/config/server-config.js';
 import { detectSystems, ICD10PCS_PARTIAL_RE, isBareInteger, ndcCandidates } from './detect.js';
-import { displayCode, icd10cmParent, storageCode } from './schema.js';
+import { displayCode, icd10cmParent, RXCLASS_TABLES, storageCode } from './schema.js';
 import {
   type BuildMetaRow,
   type CheckStatus,
@@ -25,6 +25,10 @@ import {
   type MapDirection,
   type Page,
   type PcsAxisRow,
+  RXCLASS_CLASS_TYPES,
+  RXCLASS_SOURCES,
+  type RxClassSourceRow,
+  type RxClassType,
   SYSTEM_IDS,
   SYSTEM_LABELS,
   SYSTEM_TRAITS,
@@ -129,18 +133,45 @@ export interface CheckResult {
 
 /** One crosswalk hit with the edge/provenance that produced it. */
 export interface MapHit {
+  /** The RxClass class type, on the class directions' hits only. */
+  classType?: RxClassType;
   /**
-   * The target's RxNorm concept type, carried straight off the edge's
-   * `rxnorm_rel.target_type`: `IN` / `PIN` / `MIN` on ingredient hits, `BN` on
-   * brand hits. Absent on every other direction — hierarchy targets are codes,
-   * which have no RxNorm concept type.
+   * The target's RxNorm concept type: `IN` / `PIN` / `MIN` on ingredient hits and
+   * `BN` on brand hits (carried straight off the edge's `rxnorm_rel.target_type`),
+   * and the member's term type on `class_to_rxcuis` hits. Absent on every other
+   * direction — hierarchy targets are codes and class targets are classes, neither
+   * of which has an RxNorm concept type.
    */
   conceptType?: string;
   description?: string;
-  /** The system or relationship that answered (e.g. 'ICD10CM', 'has_ingredient'). */
+  /** The RxClass relationship (lowercased rela), on the class directions' hits only. */
+  relation?: string;
+  /**
+   * The system or relationship that answered (e.g. 'ICD10CM', 'has_ingredient');
+   * on the class directions, the RxClass source asserting the edge (e.g. 'MEDRT').
+   */
   source: string;
   system: SystemId | null;
   value: string;
+  /**
+   * On `rxcui_to_classes` only: the ingredient RXCUI a product inherits the class
+   * through. Absent when the class attaches to the source RXCUI itself.
+   */
+  via?: string;
+}
+
+/** A class node the `class_to_rxcuis` source resolved to (one ID can name a class in two types). */
+export interface ClassNode {
+  className: string;
+  classType: RxClassType;
+}
+
+/** The RxClass layer's provenance: its size and one row per bundled source. */
+export interface ClassLayerInfo {
+  /** Every class node bundled, including hierarchy nodes with no direct member. */
+  classCount: number;
+  edgeCount: number;
+  sources: RxClassSourceRow[];
 }
 
 /**
@@ -161,6 +192,17 @@ export interface MapPage {
   kind: 'ok';
   pastEnd?: boolean;
   resolvedSystem: SystemId | null;
+  /**
+   * On `class_to_rxcuis` only: the class node(s) the source ID names, whatever
+   * `classType` filtered — what an empty page's notice names.
+   */
+  sourceClasses?: ClassNode[];
+  /**
+   * On an empty `rxcui_to_classes` result only: the source RXCUI's RxNorm term
+   * type (`IN`, `BN`, `SCD`, …) — what an empty page's notice explains the
+   * absence by, since RxClass records some class types on products alone.
+   */
+  sourceConceptType?: string;
 }
 
 /** A FTS search hit. */
@@ -192,6 +234,16 @@ const FALLBACK_DB_FILENAME = 'medical-codes.db';
  */
 const LONG_DESC_ONLY_SYSTEMS = SYSTEM_IDS.filter((sys) => !SYSTEM_TRAITS[sys].shortDescription);
 const LONG_DESC_ONLY_SQL = LONG_DESC_ONLY_SYSTEMS.map((sys) => `'${sys}'`).join(', ');
+
+/**
+ * An SQL sort key putting class types in {@link RXCLASS_CLASS_TYPES} order — EPC,
+ * MOA, PE first, so a drug's pharmacologic classes lead its disease relations —
+ * for the class column `column`. Inlined from the closed class-type enum.
+ */
+function classTypeOrder(column: string): string {
+  const arms = RXCLASS_CLASS_TYPES.map((type, i) => `WHEN '${type}' THEN ${i}`).join(' ');
+  return `CASE ${column} ${arms} END`;
+}
 
 /**
  * Resolve the bundled DB path. An explicit `MEDCODE_DB_PATH` wins; otherwise the
@@ -825,15 +877,18 @@ export class CodeIndexService {
 
   /**
    * Crosswalk a value across systems or within a hierarchy. The hierarchy
-   * directions (`parents`/`children`) and the RxNorm-backed drug directions both
-   * resolve here; the tool guards drug directions on `hasRxNorm()` (a graceful
-   * fallback for a build without the RxNorm tables) before calling.
+   * directions (`parents`/`children`), the RxNorm-backed drug directions, and the
+   * RxClass class directions all resolve here; the tool guards the drug directions
+   * on `hasRxNorm()` and the class directions on `hasClassLayer()` (graceful
+   * fallbacks for a build without those tables) before calling. `classType`
+   * narrows the class directions and is ignored by every other.
    */
   mapCode(
     from: string,
     direction: MapDirection,
     system?: SystemId,
     page: Page = { offset: 0, limit: getServerConfig().maxResults },
+    classType?: RxClassType,
   ): MapPage | { kind: 'ambiguous'; systems: SystemId[] } | { kind: 'source_not_found' } {
     if (direction === 'parents' || direction === 'children') {
       const { systems: present, alsoIn } = this.resolveSystems(from, system);
@@ -895,10 +950,193 @@ export class CodeIndexService {
       };
     }
 
+    if (direction === 'rxcui_to_classes') return this.classesOf(from, page, classType);
+    if (direction === 'class_to_rxcuis') return this.membersOf(from, page, classType);
+
     // Drug directions — RxNorm-backed. The tool short-circuits these with
     // `direction_unavailable` only when the RxNorm tables are absent from the
     // build; with RxNorm bundled (the shipped default) they resolve here.
     return this.mapDrug(from, direction, page);
+  }
+
+  /**
+   * An RXCUI's RxClass classes, one page at a time. RxClass attaches most classes
+   * to ingredients, so a drug product (`SCD`/`SBD`/`GPCK`/`BPCK`) also carries the
+   * classes of the ingredients its `has_ingredient` edges name, with `via` naming
+   * the ingredient — upward only: an ingredient never inherits its products'
+   * product-level classes (VA, CSA schedule).
+   *
+   * One hit per class × source × relation. When the same edge is reached more than
+   * once, the source's own edge wins (no `via`), then an `IN` over its `PIN`, then
+   * the lowest RXCUI — so `861007`, whose `IN` 6809 and `PIN` 235743 carry the same
+   * MED-RT edges, lists each once, via 6809. The dedupe runs in SQL ahead of
+   * `ORDER BY (type order, class name, class ID, source, relation)`, which is a
+   * total order over the deduped set, so offset pages neither skip nor repeat.
+   */
+  private classesOf(
+    from: string,
+    page: Page,
+    classType?: RxClassType,
+  ): MapPage | { kind: 'source_not_found' } {
+    const rxcui = from.trim();
+    const typeFilter = classType ? ' AND e.class_type = ?' : '';
+    const typeParams = classType ? [classType] : [];
+    const sql = `WITH candidate AS (
+        SELECT e.class_type, e.class_id, e.source, e.relation, NULL AS via, 0 AS via_rank
+          FROM rxclass_edge e
+         WHERE e.rxcui = ?${typeFilter}
+        UNION ALL
+        SELECT e.class_type, e.class_id, e.source, e.relation, r.target AS via,
+               CASE r.target_type WHEN 'IN' THEN 1 WHEN 'PIN' THEN 2 ELSE 3 END AS via_rank
+          FROM rxnorm_rel r
+          JOIN rxclass_edge e ON e.rxcui = r.target
+         WHERE r.rxcui = ? AND r.rel = 'has_ingredient'${typeFilter}
+      ), ranked AS (
+        SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY class_type, class_id, source, relation
+                    ORDER BY via_rank, length(via), via) AS pick
+          FROM candidate
+      )
+      SELECT r.class_type, r.class_id, r.source, r.relation, r.via, k.class_name
+        FROM ranked r
+        JOIN rxclass_class k ON k.class_type = r.class_type AND k.class_id = r.class_id
+       WHERE r.pick = 1`;
+    const params = [rxcui, ...typeParams, rxcui, ...typeParams];
+    const { rows, hasMore } = this.fetchPage(
+      `${sql} ORDER BY ${classTypeOrder('r.class_type')}, k.class_name, r.class_id, r.source, r.relation`,
+      params,
+      page,
+    );
+    const pastEnd = rows.length === 0 && page.offset > 0 && this.hasAnyRow(sql, params);
+    // An empty result is only an unmapped source when the RXCUI is not a bundled
+    // concept: a brand name, or a concept no bundled source classifies, resolves.
+    const source = rows.length === 0 && !pastEnd ? this.getRow(storageCode(rxcui), 'RXNORM') : null;
+    if (rows.length === 0 && !pastEnd && !source) return { kind: 'source_not_found' };
+    return {
+      kind: 'ok',
+      resolvedSystem: 'RXNORM',
+      hasMore,
+      pastEnd,
+      ...(source?.chapter ? { sourceConceptType: source.chapter } : {}),
+      hits: rows.map((r) => ({
+        source: r.source as string,
+        system: null,
+        value: r.class_id as string,
+        description: r.class_name as string,
+        classType: r.class_type as RxClassType,
+        relation: r.relation as string,
+        ...(r.via ? { via: r.via as string } : {}),
+      })),
+    };
+  }
+
+  /**
+   * An RxClass class's direct member RXCUIs, one page at a time, each with its
+   * RxNorm name and term type. Direct only: a class whose members all attach to
+   * its subclasses (`N0000193873` "Diuretic") resolves with no members. The class
+   * ID is matched as {@link storedClassId} spells it, across types — a few MeSH
+   * IDs name both a `CHEM` and a `DISEASE` class — and `classType` narrows to one.
+   * `ORDER BY (type order, RXCUI as a number, source, relation)` is a total order
+   * for one class ID.
+   */
+  private membersOf(
+    from: string,
+    page: Page,
+    classType?: RxClassType,
+  ): MapPage | { kind: 'source_not_found' } {
+    const classId = storedClassId(from);
+    const sourceClasses = this.classNodes(classId);
+    if (sourceClasses.length === 0) return { kind: 'source_not_found' };
+    const typeFilter = classType ? ' AND e.class_type = ?' : '';
+    const params = classType ? [classId, classType] : [classId];
+    const sql = `SELECT e.rxcui, e.class_type, e.source, e.relation, c.long_desc, c.chapter
+        FROM rxclass_edge e
+        JOIN codes c ON c.system = 'RXNORM' AND c.code = e.rxcui
+       WHERE e.class_id = ?${typeFilter}`;
+    const { rows, hasMore } = this.fetchPage(
+      `${sql} ORDER BY ${classTypeOrder('e.class_type')}, length(e.rxcui), e.rxcui, e.source, e.relation`,
+      params,
+      page,
+    );
+    return {
+      kind: 'ok',
+      resolvedSystem: null,
+      sourceClasses,
+      hasMore,
+      pastEnd: rows.length === 0 && page.offset > 0 && this.hasAnyRow(sql, params),
+      hits: rows.map((r) => ({
+        source: r.source as string,
+        system: 'RXNORM' as const,
+        value: r.rxcui as string,
+        ...(r.long_desc ? { description: r.long_desc as string } : {}),
+        ...(r.chapter ? { conceptType: r.chapter as string } : {}),
+        classType: r.class_type as RxClassType,
+        relation: r.relation as string,
+      })),
+    };
+  }
+
+  /** The class nodes an RxClass class ID names ({@link storedClassId}), in class-type order. */
+  classNodes(classId: string): ClassNode[] {
+    const rows = this.db
+      .query(
+        `SELECT class_type, class_name FROM rxclass_class WHERE class_id = ? ORDER BY ${classTypeOrder('class_type')}`,
+      )
+      .all(storedClassId(classId)) as { class_name: string; class_type: string }[];
+    return rows.map((r) => ({ classType: r.class_type as RxClassType, className: r.class_name }));
+  }
+
+  /**
+   * Whether this build carries the RxClass class layer. An index built before the
+   * layer existed (a custom `MEDCODE_DB_PATH`) has none of its tables, and one
+   * built from sources with no RxClass cache has the tables and no rows — neither
+   * carries the layer, so an empty one must not answer every RXCUI as unclassified.
+   * The schema is read first, since counting rows in a missing table would throw.
+   */
+  hasClassLayer(): boolean {
+    const tables = this.db
+      .query(
+        `SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN (${RXCLASS_TABLES.map((t) => `'${t}'`).join(', ')})`,
+      )
+      .get() as { n: number };
+    return (
+      tables.n === RXCLASS_TABLES.length &&
+      !!this.db.query('SELECT 1 AS hit FROM rxclass_edge LIMIT 1').get()
+    );
+  }
+
+  /**
+   * The RxClass layer's size and per-source provenance — each source's RxClass
+   * version and fetch time, and the classes and edges it contributes — or null
+   * when the build has no class layer.
+   */
+  classLayer(): ClassLayerInfo | null {
+    if (!this.hasClassLayer()) return null;
+    const rows = this.db
+      .query('SELECT source, version, class_count, edge_count, fetched_at FROM rxclass_source')
+      .all() as {
+      class_count: number;
+      edge_count: number;
+      fetched_at: string;
+      source: RxClassSourceRow['source'];
+      version: string | null;
+    }[];
+    const order = new Map(RXCLASS_SOURCES.map((s, i) => [s, i]));
+    const sources = rows
+      .map((r) => ({
+        source: r.source,
+        version: r.version,
+        classCount: Number(r.class_count),
+        edgeCount: Number(r.edge_count),
+        fetchedAt: r.fetched_at,
+      }))
+      .sort((a, b) => (order.get(a.source) ?? 99) - (order.get(b.source) ?? 99));
+    const classes = this.db.query('SELECT COUNT(*) AS n FROM rxclass_class').get() as { n: number };
+    return {
+      classCount: Number(classes.n),
+      edgeCount: sources.reduce((sum, s) => sum + s.edgeCount, 0),
+      sources,
+    };
   }
 
   /**
@@ -1321,6 +1559,17 @@ export function noMatch(system: SystemId, trimmed: string): string {
  */
 export function heldElsewhere(holders: SystemId[]): string {
   return `it is a code in ${holders.map((sys) => SYSTEM_LABELS[sys]).join(' and ')}. Re-call with \`system\` ${holders.map((sys) => `"${sys}"`).join(' or ')}`;
+}
+
+/**
+ * An RxClass class ID as the layer stores it: trimmed and uppercased, with a
+ * one-digit CVX vaccine code zero-padded (`3` → `03`), the form CDC publishes and
+ * RxClass keys on. CVX codes are the only all-digit class IDs, and `0` ("Vaccine
+ * Groups") is the only one-digit one, so the padding names no other class.
+ */
+function storedClassId(raw: string): string {
+  const id = raw.trim().toUpperCase();
+  return /^[1-9]$/.test(id) ? `0${id}` : id;
 }
 
 /** The ` (normalized <key>)` clause, when the NDC spelling fixes a single 11-digit key. */
