@@ -5,7 +5,7 @@
  *
  * The server is offline and keyless — it reads a bundled SQLite + FTS5 database
  * built at package-build time. The only runtime knobs are the DB path override
- * and the result cap.
+ * and the default page size.
  * @module config/server-config
  */
 
@@ -37,7 +37,9 @@ const ServerConfigSchema = z.object({
     .min(1)
     .max(200)
     .default(50)
-    .describe('Cap on rows returned by search and browse tools (default 50, hard ceiling 200).'),
+    .describe(
+      'Default page size when a call sends no `limit` — for medcode_search_codes, medcode_browse_hierarchy, and the paginated medcode_map_codes directions — and the number of children medcode_get_code attaches with includeHierarchy (default 50, hard ceiling 200).',
+    ),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;

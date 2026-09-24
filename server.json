@@ -46,7 +46,7 @@
         },
         {
           "name": "MEDCODE_MAX_RESULTS",
-          "description": "Cap on rows returned by search and browse tools (default 50, hard ceiling 200).",
+          "description": "Default page size when a call sends no limit (search, browse, and the paginated map_codes directions), and the number of children get_code attaches with includeHierarchy (default 50, hard ceiling 200).",
           "format": "string",
           "isRequired": false,
           "default": "50"
@@ -116,7 +116,7 @@
         },
         {
           "name": "MEDCODE_MAX_RESULTS",
-          "description": "Cap on rows returned by search and browse tools (default 50, hard ceiling 200).",
+          "description": "Default page size when a call sends no limit (search, browse, and the paginated map_codes directions), and the number of children get_code attaches with includeHierarchy (default 50, hard ceiling 200).",
           "format": "string",
           "isRequired": false,
           "default": "50"
