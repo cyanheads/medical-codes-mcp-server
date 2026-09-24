@@ -10,3 +10,16 @@
 /biome.json
 /tsconfig*.json
 /vitest.config.ts
+/tests/
+/coverage/
+/.sources/
+/src/
+/scripts/
+/docs/
+/.github/
+/.vscode/
+/.dockerignore
+/.gitattributes
+/.npmignore
+/devcheck.config.json
+/CITATION.cff

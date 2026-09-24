@@ -196,3 +196,6 @@ repomix-output*
 duckdata/
 .claude
 .agents
+# Federal source files and RxNav/RxClass fetch caches — input to
+# scripts/build-index.ts, which bakes data/medical-codes.db before the image build.
+/.sources/
