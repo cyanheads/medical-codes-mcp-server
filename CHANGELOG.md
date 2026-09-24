@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-09-24
+
+medcode_map_codes maps a drug to its RxClass drug classes and a class to its member drugs, over a class layer baked into the bundled index from six US-government RxClass sources.
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-09-24 · ⚠️ Breaking
 
 RxNorm results stop passing stored placeholders off as facts (billable and shortDescription are null, check_code answers valid), medcode_map_codes rejects fields a direction ignores, and not-found errors name the likely cause instead of a generic miss.

@@ -1,6 +1,6 @@
 # medical-codes-mcp-server - Directory Structure
 
-Generated on: 2026-09-24 17:40:06
+Generated on: 2026-09-24 20:14:59
 
 ```text
 medical-codes-mcp-server/
@@ -27,6 +27,7 @@ medical-codes-mcp-server/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
+│   ├── 0.4.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -119,6 +120,7 @@ medical-codes-mcp-server/
 │       └── SKILL.md
 ├── scripts/
 │   ├── ingest/
+│   │   ├── fetch-rxclass.ts
 │   │   ├── fetch-rxnav.ts
 │   │   └── parsers.ts
 │   ├── _db-writer.ts
@@ -169,16 +171,31 @@ medical-codes-mcp-server/
 │   ├── app/
 │   │   └── server-wiring.test.ts
 │   ├── fixtures/
+│   │   └── rxclass/
+│   │       ├── byrxcui-161.json
+│   │       ├── byrxcui-1801150.json
+│   │       ├── byrxcui-6809.json
+│   │       ├── byrxcui-861007.json
+│   │       ├── byrxcui-89717.json
+│   │       ├── classes.json
+│   │       └── versions.json
 │   ├── fuzz/
 │   │   └── code-inputs.fuzz.test.ts
 │   ├── helpers/
 │   │   ├── bundled-index.ts
 │   │   └── index-fixture.ts
 │   ├── ingest/
-│   │   └── parsers.test.ts
+│   │   ├── parsers.test.ts
+│   │   └── rxclass-parser.test.ts
 │   ├── integration/
+│   │   ├── bundled-class-directions.test.ts
+│   │   ├── bundled-class-layer.test.ts
 │   │   └── bundled-index-correctness.test.ts
 │   ├── scripts/
+│   │   ├── build-index.test.ts
+│   │   ├── db-writer.test.ts
+│   │   ├── fixture-class-layer.test.ts
+│   │   ├── mcpbignore.test.ts
 │   │   └── packaging-regex.test.ts
 │   ├── services/
 │   │   ├── code-index-lifecycle.test.ts
@@ -186,6 +203,8 @@ medical-codes-mcp-server/
 │   ├── smoke/
 │   │   └── tool-surface.smoke.test.ts
 │   └── tools/
+│       ├── class-layer-absent.test.ts
+│       ├── class-layer-empty.test.ts
 │       ├── correctness-critical.test.ts
 │       ├── error-envelope.test.ts
 │       ├── format-rendering.test.ts
