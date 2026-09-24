@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-09-24 · ⚠️ Breaking
+
+RxNorm results stop passing stored placeholders off as facts (billable and shortDescription are null, check_code answers valid), medcode_map_codes rejects fields a direction ignores, and not-found errors name the likely cause instead of a generic miss.
+
 ## [0.2.9](changelog/0.2.x/0.2.9.md) — 2026-09-19
 
 Adopts @cyanheads/mcp-ts-core 0.13.6: argument rejections carry an InvalidParams envelope with a synthesized recovery hint, client bookkeeping keys and case-varied parameter spellings no longer trip strict inputs, and the server declares a stateless session with a teardown hook that closes its SQLite handle.
