@@ -112,8 +112,9 @@ CREATE TABLE rxclass_source (
  *    only (a few MeSH IDs are both `CHEM` and `DISEASE`), hence the composite key.
  *  - `rxclass_edge` — one row per RXCUI × class × asserting source × relation, for
  *    bundled RXCUIs only, exactly as RxClass attaches them (mostly at `IN`/`PIN`/
- *    `MIN`; VA classes and CSA schedules at the product). No inherited rows: a
- *    product reaches its ingredients' classes through `rxnorm_rel has_ingredient`.
+ *    `MIN`; CSA schedules only at the product, VA classes almost only there). No
+ *    inherited rows: a product reaches its ingredients' classes through
+ *    `rxnorm_rel has_ingredient`.
  *    `relation` is the RxClass rela, lowercased to RxClass's own `relas` vocabulary.
  *  - `rxclass_source` — per bundled source: its RxClass version (null when RxClass
  *    publishes none), the classes it asserts at least one edge to, its edge count,

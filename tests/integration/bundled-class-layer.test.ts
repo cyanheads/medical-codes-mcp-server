@@ -66,6 +66,29 @@ describe('shipped class layer', () => {
     ).toEqual({ n: 0 });
   });
 
+  it('records DEA schedules only on products and VA classes almost only there', () => {
+    const onIngredients = (classType: string) =>
+      db
+        .query(
+          `SELECT COUNT(*) AS n FROM rxclass_edge e
+             JOIN codes c ON c.system = 'RXNORM' AND c.code = e.rxcui
+            WHERE e.class_type = ? AND c.chapter IN ('IN', 'PIN', 'MIN')`,
+        )
+        .get(classType);
+    const total = (classType: string) =>
+      db.query('SELECT COUNT(*) AS n FROM rxclass_edge WHERE class_type = ?').get(classType);
+    // The SCHEDULE notice says "never on ingredients"; the VA notice says "rarely".
+    expect(onIngredients('SCHEDULE')).toEqual({ n: 0 });
+    expect(onIngredients('VA')).toEqual({ n: 46 });
+    expect(total('VA')).toEqual({ n: 19_704 });
+    expect(edges('2129')).toContainEqual({
+      class_type: 'VA',
+      class_id: 'GA204',
+      source: 'VA',
+      relation: 'has_vaclass',
+    });
+  });
+
   it('attaches FDA classes to the ingredient and VA classes to the product', () => {
     expect(edges('6809')).toContainEqual({
       class_type: 'EPC',

@@ -130,7 +130,7 @@ await createApp({
 });
 ```
 
-`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. This server uses it to tell the agent which tool is the 80% entry point, that a non-billable/terminated code is a successful `medcode_check_code` result, that the RxNorm drug crosswalks are live (including direct NDC → drug decode), and that the RxClass drug-class directions exist, with a `ci_` relation read as a contraindication and DEA schedules and VA classes recorded on drug products, not ingredients.
+`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. This server uses it to tell the agent which tool is the 80% entry point, that a non-billable/terminated code is a successful `medcode_check_code` result, that the RxNorm drug crosswalks are live (including direct NDC → drug decode), and that the RxClass drug-class directions exist, with a `ci_` relation read as a contraindication and DEA schedules recorded only on drug products and VA classes almost only there.
 
 ### Session posture and shutdown
 
