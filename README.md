@@ -13,7 +13,7 @@
 
 <div align="center">
 
-[![Install in Claude Desktop](https://img.shields.io/badge/Install_in-Claude_Desktop-D97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/cyanheads/medical-codes-mcp-server/releases/latest/download/medical-codes-mcp-server.mcpb) [![Install in Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=medical-codes-mcp-server&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBjeWFuaGVhZHMvbWVkaWNhbC1jb2Rlcy1tY3Atc2VydmVyIl19) [![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=for-the-badge&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect?url=vscode:mcp/install?%7B%22name%22%3A%22medical-codes-mcp-server%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40cyanheads/medical-codes-mcp-server%22%5D%7D)
+[![Install in Claude Desktop](https://img.shields.io/badge/Install_in-Claude_Desktop-D97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/cyanheads/medical-codes-mcp-server/releases/latest/download/medical-codes-mcp-server.mcpb) [![Install in Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=medical-codes-mcp-server&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBjeWFuaGVhZHMvbWVkaWNhbC1jb2Rlcy1tY3Atc2VydmVyIl19) [![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=for-the-badge&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect?url=vscode:mcp/install?%7B%22name%22%3A%22medical-codes-mcp-server%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40cyanheads%2Fmedical-codes-mcp-server%22%5D%7D)
 
 </div>
 
@@ -64,6 +64,8 @@ Only freely-redistributable, public-domain US federal code sets are bundled, bak
 
 **RxNorm** bundles the current normalized drug vocabulary — ingredients, brand names, clinical & branded drugs, and packs, with their NDC and ingredient/brand crosswalks — sourced at build time from the keyless [RxNav REST API](https://rxnav.nlm.nih.gov/), which serves the public-domain normalized layer only. The full UMLS-licensed RxNorm release is intentionally excluded, so the package stays freely redistributable.
 
+> This product uses publicly available data courtesy of the U.S. National Library of Medicine (NLM), National Institutes of Health, Department of Health and Human Services; NLM is not responsible for the product and does not endorse or recommend this or any other product.
+
 CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally absent — not freely redistributable, so they cannot ship in an offline package.
 
 **US scope.** ICD-10-CM and ICD-10-PCS are the US clinical modifications, not the WHO ICD-10/ICD-11 base or another country's national modification.
@@ -74,17 +76,18 @@ CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally
 
 - Accepts 1–50 codes; mixed systems are fine — each code's system is detected independently from its shape
 - Decodes a National Drug Code (NDC) directly to its RxNorm product — hyphenated FDA segment configurations (4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2) or bare 10/11 digits — offline via the bundled NDC↔RxNorm map, tagged `source: "NDC"`
-- Partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason
-- An explicit `system` overrides auto-detection when a value is genuinely ambiguous (an ambiguous code lists its `candidateSystems`); `includeHierarchy` attaches each code's parent and immediate children
+- Partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason — a bare integer that resolves nowhere is named as a possible CPT / HCPCS Level I code, which is out of scope
+- An explicit `system` overrides auto-detection when a value is genuinely ambiguous (an ambiguous code lists its `candidateSystems`) and skips the NDC decode; `includeHierarchy` attaches each code's parent and immediate children
 - `alsoInSystems` names other bundled systems holding the same code string — it is a different code in each
-- Errors: `no_codes_found` when none of the requested codes resolve in any bundled system
+- RxNorm rows carry `billable: null` (RxNorm has no billing concept) and `shortDescription: null` (RxNorm publishes a single name); `chapter` holds the RxNorm term type (`IN`, `SCD`, `SBD`, …)
+- Errors: `no_codes_found` when none of the requested codes resolve in any bundled system — or, under an explicit `system`, in that system, with any other bundled system that holds a code named
 
 ---
 
 ### `medcode_search_codes` <sub>tool</sub>
 
-- Every search term must appear — matched first as a token prefix, then as a substring, so inflected and compound forms are also found
-- Filter by `system`, `billableOnly` (exclude headers/categories), and `chapter`
+- Every search term must appear — matched first as a token prefix, then as a substring, so inflected and compound forms are also found; an RxNorm concept matches on its drug name alone, never its term type
+- Filter by `system`, `billableOnly` (exclude headers/categories, and every RxNorm concept — RxNorm has no billing concept), and `chapter` (for RxNorm, the term type)
 - Ranked by full-text relevance; results echo the resolved `system` per row
 - Paginates via `cursor`/`limit` (default `MEDCODE_MAX_RESULTS`, ceiling 200); discloses `truncated`/`nextCursor`, and returns a notice with the parsed query when nothing matches
 
@@ -92,20 +95,20 @@ CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally
 
 ### `medcode_check_code` <sub>tool</sub>
 
-- Discriminated `status`: `valid_billable`, `valid_not_billable`, `valid_header`, or `terminated`
+- Discriminated `status`: `valid_billable`, `valid_not_billable`, `valid_header`, `valid`, or `terminated` — `valid` is a current RxNorm concept, returned with `billable: null` because RxNorm has no billing concept
 - `whyNot` explains non-billable/terminated cases — a non-billable or terminated code is a successful result, not an error
 - `alsoInSystems` names other bundled systems holding the same code string, since the verdict applies only to the resolved system
-- Errors: `unknown_code` (absent from every bundled system) and `ambiguous_system` (present in multiple systems, no `system` given)
+- Errors: `unknown_code` (absent from the named or detected system — under an explicit `system`, a code another bundled system holds is named as that system's code; an NDC lands here too, with a recovery pointing at `medcode_get_code` and `medcode_map_codes` `ndc_to_rxcui`) and `ambiguous_system` (present in multiple systems, no `system` given)
 
 ---
 
 ### `medcode_map_codes` <sub>tool</sub>
 
-- Hierarchy directions `parents`/`children` walk one level per call (depth-1); ICD-10-PCS codes have no prefix parent
-- Drug directions (RxNorm): `name_to_rxcui`, `ndc_to_rxcui`/`rxcui_to_ndc` (NDC accepted hyphenated or as bare 10/11 digits), `rxcui_to_ingredients`/`rxcui_to_brands` (each hit carries `conceptType`: `IN`/`PIN`/`MIN`/`BN`)
-- `children`, `name_to_rxcui`, and `rxcui_to_ndc` paginate via `cursor`/`limit` — one RXCUI can carry thousands of package NDCs
+- Hierarchy directions `parents`/`children` walk one level per call (depth-1); ICD-10-PCS codes have no prefix parent, and RxNorm concepts no code hierarchy
+- Drug directions (RxNorm): `name_to_rxcui` (matches the drug name, never the term type), `ndc_to_rxcui`/`rxcui_to_ndc` (NDC accepted hyphenated in an FDA segment configuration — 4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2 — or as bare 10/11 digits), `rxcui_to_ingredients`/`rxcui_to_brands` (each hit carries `conceptType`: `IN`/`PIN`/`MIN`/`BN`)
+- `children`, `name_to_rxcui`, and `rxcui_to_ndc` paginate via `cursor`/`limit` — one RXCUI can carry thousands of package NDCs; `limit` and `cursor` are rejected on every other direction, and `system` steers only `parents`/`children` (the drug directions accept only `RXNORM`)
 - Every hit carries `source` provenance so a chained call uses the right identifier; a resolvable source with no edge in the requested direction is a successful empty result with a notice, not an error
-- Errors: `no_mapping` (source doesn't resolve), `direction_unavailable` (RxNorm not bundled in this build), `ambiguous_system`
+- Errors: `no_mapping` (source doesn't resolve — a code-system name passed as `from`, an NDC where a code or RXCUI belongs, or a bare integer that may be an out-of-scope CPT / HCPCS Level I code, is named as such; an `ndc_to_rxcui` miss says whether the spelling is malformed or a well-formed NDC no bundled drug maps to), `field_not_applicable` (a `system`, `limit`, or `cursor` the direction does not use), `direction_unavailable` (RxNorm not bundled in this build), `ambiguous_system`
 
 ---
 
@@ -131,7 +134,7 @@ ICD-10 / HCPCS / RxNorm-specific:
 
 - Bundled SQLite + FTS5 index — offline, keyless, deterministic; no runtime network I/O, no rate limit
 - Code-shape auto-detection routes a code to its system automatically; an explicit `system` disambiguates collisions
-- Real billable/validity signal from the source releases — the order-file billable flag drives `medcode_check_code`, not a heuristic
+- Real billable/validity signal from the source releases — the order-file billable flag drives `medcode_check_code`, not a heuristic; RxNorm, which has no billing concept, reports `billable: null` rather than a verdict
 
 Agent-friendly output:
 

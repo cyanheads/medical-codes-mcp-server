@@ -265,7 +265,7 @@ export function hcpcsSectionRows(presentLetters: Iterable<string>): CodeInput[] 
   });
 }
 
-/** A parsed RxNorm prescribable bundle: code rows + relationship + NDC edges. */
+/** A parsed RxNorm bundle: code rows + relationship + NDC edges. */
 export interface RxNormParseResult {
   codes: CodeInput[];
   ndcs: { ndc: string; rxcui: string }[];
@@ -288,7 +288,7 @@ export interface RxNavProduct {
 }
 
 /**
- * Parse the cached RxNorm Prescribable Content acquired over the keyless RxNav
+ * Parse the cached RxNorm normalized drug set acquired over the keyless RxNav
  * REST API (see `scripts/ingest/fetch-rxnav.ts`). NLM gates the RxNorm RRF bulk
  * files behind UMLS/UTS auth, so the offline, keyless, redistributable build is
  * sourced from RxNav — which serves the public-domain RxNorm normalized
@@ -310,6 +310,9 @@ export function parseRxNav(concepts: RxNavConcept[], products: RxNavProduct[]): 
   for (const c of concepts) {
     if (!c?.rxcui || !c?.name || seen.has(c.rxcui)) continue;
     seen.add(c.rxcui);
+    // RxNorm has no billing concept and no short description; `billable` and
+    // `shortDesc` are placeholders the service never reads for RXNORM (it decodes
+    // both to null via SYSTEM_TRAITS). The term type the service does read is `chapter`.
     codes.push({
       system: 'RXNORM',
       code: c.rxcui,

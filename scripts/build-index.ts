@@ -18,11 +18,11 @@
  *      → icd10pcs_order_<FY>.txt  (+ icd10pcs_tabular_<FY>.xml for pcs_axes)
  *  - HCPCS Level II annual file: CMS HCPCS page
  *      → HCPC<yr>_CONTR_ANWEB.txt
- *  - RxNorm Prescribable Content: the keyless RxNav REST API, NOT the RRF files.
+ *  - RxNorm normalized drug set: the keyless RxNav REST API, NOT the RRF files.
  *      NLM gates the RxNorm RRF bulk downloads (including the prescribable subset)
  *      behind UMLS/UTS authentication, so they can't source an offline, keyless,
  *      redistributable package. Instead, run `scripts/ingest/fetch-rxnav.ts` first
- *      to cache the prescribable concepts + NDCs + ingredient/brand edges under
+ *      to cache the concepts + NDCs + ingredient/brand edges under
  *      `<from-dir>/rxnav/`; this script reads that cache (still no download here).
  *      RxNav serves the public-domain RxNorm normalized vocabulary, never the
  *      UMLS-licensed source vocabularies — the same redistribution profile.

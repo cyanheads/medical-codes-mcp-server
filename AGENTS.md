@@ -36,7 +36,7 @@ import { getCodeIndexService } from '@/services/code-index/code-index-service.js
 import { SYSTEM_IDS } from '@/services/code-index/types.js';
 
 export const checkCodeTool = tool('medcode_check_code', {
-  title: 'medical-codes-mcp-server',
+  title: 'Check Medical Code',
   description: 'Validate whether a US medical code exists, is current, and is billable …',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
@@ -47,9 +47,10 @@ export const checkCodeTool = tool('medcode_check_code', {
   output: z.object({
     system: z.string().describe('The system the code was resolved in, echoed for chaining.'),
     code: z.string().describe('The code in display form (ICD-10-CM carries the dot).'),
-    status: z.enum(['valid_billable', 'valid_not_billable', 'valid_header', 'terminated'])
+    status: z.enum(['valid_billable', 'valid_not_billable', 'valid_header', 'valid', 'terminated'])
       .describe('Discriminated validity status.'),
-    billable: z.boolean().describe('True only when status is valid_billable.'),
+    billable: z.boolean().nullable()
+      .describe('True only when status is valid_billable; null when the system has no billing concept.'),
     whyNot: z.string().nullable().describe('Explanation for non-billable/terminated, or null.'),
   }),
 
@@ -78,7 +79,7 @@ export const checkCodeTool = tool('medcode_check_code', {
 });
 ```
 
-Output design conventions this server follows: echo the resolved `system` on every result (provenance for chaining); split validity from existence (a non-billable/terminated code is a successful result with a `whyNot`); partial-success batch shapes (`medcode_get_code` returns `found` / `notFound`); and `ctx.enrich` for truncation disclosure on `medcode_search_codes` / `medcode_browse_hierarchy`.
+Output design conventions this server follows: echo the resolved `system` on every result (provenance for chaining); split validity from existence (a non-billable/terminated code is a successful result with a `whyNot`); publish `null` for a field the system's release does not carry (RxNorm `billable` and `shortDescription`, driven by `SYSTEM_TRAITS` in `types.ts`) rather than the placeholder the row stores; partial-success batch shapes (`medcode_get_code` returns `found` / `notFound`); and `ctx.enrich` for truncation disclosure on `medcode_search_codes` / `medcode_browse_hierarchy`.
 
 ### Server config
 
@@ -110,7 +111,7 @@ For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("
 
 ### Server identity and instructions
 
-`createApp()` carries the server identity forwarded to the SDK's `initialize` response and the server manifest (`/.well-known/mcp.json`). The display identity is the **hyphenated repo name** on every surface — `name` and `title` are both `medical-codes-mcp-server`, never a Title Case "Medical Codes MCP Server". Don't duplicate `description` into `createApp()` — it derives from `package.json` (the canonical source).
+`createApp()` carries the server identity forwarded to the SDK's `initialize` response and the server manifest (`/.well-known/mcp.json`). The display identity is the **hyphenated repo name** on every surface — `name` and `title` are both `medical-codes-mcp-server`, never a Title Case "Medical Codes MCP Server". This rule is the server's alone: each tool's `title` is its own UI name (`'Check Medical Code'`), never the server name. Don't duplicate `description` into `createApp()` — it derives from `package.json` (the canonical source).
 
 ```ts
 await createApp({

@@ -1,5 +1,5 @@
 /**
- * @fileoverview Build-time acquisition of RxNorm Prescribable Content over the
+ * @fileoverview Build-time acquisition of the RxNorm normalized drug set over the
  * KEYLESS RxNav REST API (https://rxnav.nlm.nih.gov/REST/) — no UMLS license and
  * no API key. NLM gates the RxNorm RRF bulk files (including the prescribable
  * subset) behind UMLS/UTS authentication, so the RRF path is not usable for an
@@ -15,7 +15,7 @@
  * profile the RRF prescribable subset was chosen for.
  *
  * Strategy (all keyless):
- *  1. `allconcepts.json?tty=<CONCEPT_TTYS>` → the prescribable concept set in one
+ *  1. `allconcepts.json?tty=<CONCEPT_TTYS>` → the current concept set in one
  *     call (ingredients, brand names, and clinical/branded drug + pack products).
  *     These become `codes(RXNORM)` rows — name→RXCUI search and get_code on an
  *     RXCUI both read this.
@@ -27,7 +27,7 @@
  * The cache is resumable: products already present in `products.jsonl` are
  * skipped, so an interrupted fetch continues where it left off. NDCs come back
  * 11-digit from RxNav; the runtime normalizes user input to 11-digit before
- * lookup (see `normalizeNdc`).
+ * lookup (see `ndcCandidates` in `src/services/code-index/detect.ts`).
  *
  * Usage:
  *   bun run scripts/ingest/fetch-rxnav.ts [--out .sources/rxnav] [--limit N] [--concurrency 10]
@@ -44,7 +44,7 @@ const BASE = 'https://rxnav.nlm.nih.gov/REST';
 
 /**
  * Concept TTYs stored as `codes(RXNORM)` rows. Ingredients (IN/PIN/MIN), brand
- * names (BN), and the prescribable drug products + packs (SCD/SBD/GPCK/BPCK) —
+ * names (BN), and the clinical/branded drug products + packs (SCD/SBD/GPCK/BPCK) —
  * the set that answers name→RXCUI, get_code on an RXCUI, and the ingredient/brand
  * crosswalk targets. Drug components and dose forms are intentionally excluded:
  * they are not lookup targets for any bundled direction and would only add noise.
