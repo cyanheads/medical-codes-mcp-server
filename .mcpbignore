@@ -3,6 +3,8 @@
 /.claude/
 /.agents/
 /framework-skills/
+/docs/idea.md
+/logs/
 /Dockerfile
 /bun.lock
 /bunfig.toml
@@ -12,6 +14,7 @@
 /vitest.config.ts
 /tests/
 /coverage/
+/.cache/
 /.sources/
 /src/
 /scripts/
