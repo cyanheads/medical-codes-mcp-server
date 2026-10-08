@@ -135,7 +135,6 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
       throw ctx.fail(
         'unknown_node',
         result.reason ?? `Node "${input.node}" does not exist in ${input.system}.`,
-        { ...ctx.recoveryFor('unknown_node') },
       );
     }
 

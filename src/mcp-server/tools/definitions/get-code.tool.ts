@@ -301,7 +301,6 @@ export const getCodeTool = tool('medcode_get_code', {
       throw ctx.fail(
         'no_codes_found',
         `None of the ${input.codes.length} requested code(s) resolved in ${scope}.${notes}`,
-        { ...ctx.recoveryFor('no_codes_found') },
       );
     }
 

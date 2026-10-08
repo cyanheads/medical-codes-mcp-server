@@ -569,7 +569,6 @@ export const mapCodesTool = tool('medcode_map_codes', {
       throw ctx.fail(
         'direction_unavailable',
         `The "${input.direction}" crosswalk needs RxNorm, which is not present in this build of the index.`,
-        { ...ctx.recoveryFor('direction_unavailable') },
       );
     }
     if (CLASS_DIRECTION_SET.has(input.direction) && !svc.hasClassLayer()) {
@@ -596,11 +595,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
       throw ctx.fail(
         'field_not_applicable',
         `Not used by direction "${input.direction}": ${named.join(', ')}.`,
-        {
-          direction: input.direction,
-          fields: rejected,
-          ...ctx.recoveryFor('field_not_applicable'),
-        },
+        { direction: input.direction, fields: rejected },
       );
     }
 
@@ -611,7 +606,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
       throw ctx.fail(
         'ambiguous_system',
         `"${input.from.trim()}" exists in multiple systems: ${result.systems.join(', ')}.`,
-        { candidateSystems: result.systems, ...ctx.recoveryFor('ambiguous_system') },
+        { candidateSystems: result.systems },
       );
     }
     if (result.kind === 'source_not_found') {
@@ -619,7 +614,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
       throw ctx.fail(
         'no_mapping',
         miss.message,
-        miss.recovery ? { recovery: { hint: miss.recovery } } : ctx.recoveryFor('no_mapping'),
+        miss.recovery ? { recovery: { hint: miss.recovery } } : undefined,
       );
     }
 

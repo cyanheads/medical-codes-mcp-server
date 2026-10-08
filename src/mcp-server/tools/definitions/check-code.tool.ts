@@ -95,7 +95,7 @@ export const checkCodeTool = tool('medcode_check_code', {
       throw ctx.fail(
         'ambiguous_system',
         `"${input.code.trim()}" exists in multiple systems: ${outcome.systems.join(', ')}.`,
-        { candidateSystems: outcome.systems, ...ctx.recoveryFor('ambiguous_system') },
+        { candidateSystems: outcome.systems },
       );
     }
 
@@ -104,7 +104,7 @@ export const checkCodeTool = tool('medcode_check_code', {
       throw ctx.fail(
         'unknown_code',
         r.whyNot ?? `Unknown code "${input.code.trim()}".`,
-        r.ndc ? { recovery: { hint: NDC_RECOVERY } } : { ...ctx.recoveryFor('unknown_code') },
+        r.ndc ? { recovery: { hint: NDC_RECOVERY } } : undefined,
       );
     }
 

@@ -869,6 +869,15 @@ function mapError(args: MapArgs): Promise<ThrownError> {
   ) as Promise<ThrownError>;
 }
 
+/**
+ * Run map_codes through the tool contract and return its error envelope. A throw
+ * that carries no `recovery` of its own gets the declared one here, as it does on
+ * the wire, so assertions on the declared hint read this, not {@link mapError}.
+ */
+async function mapEnvelope(args: MapArgs): Promise<ThrownError> {
+  return envelopeOf(await runToolContract(mapCodesTool, args as never));
+}
+
 /** Every text block a content-only client receives. */
 function contentText(result: Awaited<ReturnType<typeof runToolContract>>): string {
   return (result.content as { text?: string; type: string }[])
@@ -928,7 +937,7 @@ describe('medcode_map_codes — a field the direction does not use is rejected',
     Buffer.from(JSON.stringify({ offset, limit })).toString('base64url');
 
   async function expectRejected(args: MapArgs, fields: string[]) {
-    const err = await mapError(args);
+    const err = await mapEnvelope(args);
     expect(err.data?.reason, JSON.stringify(args)).toBe('field_not_applicable');
     expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
     expect(err.data?.fields).toEqual(fields);
@@ -1108,7 +1117,7 @@ describe('medcode_map_codes — a bare integer that resolves nowhere', () => {
   );
 
   it('keeps the generic miss on name_to_rxcui, which reads the value as a name', async () => {
-    const err = await mapError({ from: '43239', direction: 'name_to_rxcui' });
+    const err = await mapEnvelope({ from: '43239', direction: 'name_to_rxcui' });
     expect(err.data?.reason).toBe('no_mapping');
     expect(err.message).toBe('No bundled code matches "43239".');
     expect(err.data?.recovery?.hint).toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
@@ -1124,7 +1133,7 @@ describe('medcode_map_codes — a bare integer that resolves nowhere', () => {
 
   it('keeps the generic miss for a value that is not a bare integer', async () => {
     for (const from of ['ZZZZZZ9', '432.39', '43239A']) {
-      const err = await mapError({ from, direction: 'parents' });
+      const err = await mapEnvelope({ from, direction: 'parents' });
       expect(err.message).toBe(`No bundled code matches "${from}".`);
       expect(err.data?.recovery?.hint).toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
     }
@@ -1510,7 +1519,7 @@ describe('medcode_map_codes — a code system name in `from`', () => {
     'keeps the generic miss for %s, which names no bundled system',
     async (from) => {
       for (const direction of ['parents', 'rxcui_to_ingredients']) {
-        const err = await mapError({ from, direction });
+        const err = await mapEnvelope({ from, direction });
         expect(err.message).toBe(`No bundled code matches "${from}".`);
         expect(err.data?.recovery?.hint).toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
       }
@@ -1664,7 +1673,7 @@ describe('medcode_map_codes — a hierarchy miss under an explicit system', () =
   });
 
   it('keeps the generic miss for a value no bundled system holds', async () => {
-    const err = await mapError({ from: 'ZZZZZZ9', direction: 'parents', system: 'HCPCS' });
+    const err = await mapEnvelope({ from: 'ZZZZZZ9', direction: 'parents', system: 'HCPCS' });
     expect(err.message).toBe('No bundled code matches "ZZZZZZ9".');
     expect(err.data?.recovery?.hint).toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
   });

@@ -118,8 +118,8 @@ describe('handler-thrown failures', () => {
       const envelope = result.structuredContent as ErrorEnvelope;
       expect(envelope.error.code).toBe(declared?.code);
       expect(envelope.error.data?.reason).toBe(reason);
-      // The declared `recovery` is what reaches the wire — a ctx.fail site that
-      // forgot to forward ctx.recoveryFor() would leave this undefined.
+      // The declared `recovery` is what reaches the wire when the throw site
+      // carries no hint of its own — the framework fills it from the contract.
       expect(envelope.error.data?.recovery?.hint).toBe(declared?.recovery);
 
       const text = textOf(result.content);
