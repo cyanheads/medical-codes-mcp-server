@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.2](changelog/0.4.x/0.4.2.md) — 2026-10-25
+
+Bundled index rebuilt for ICD-10 FY2027, HCPCS 2026 October, and fresh RxNorm/RxClass snapshots; auto-detect misses name every system a code fits, dotted ICD-10-CM codes resolve unambiguously, HCPCS billability follows the termination date, and content[] text is Markdown-escaped.
+
 ## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-10-08
 
 Framework 0.13.6 → 0.13.14: numeric and boolean strings, a lone string for codes, and null optional fields are repaired before validation; tool errors carry a request ID; the server.json HTTP entry starts the HTTP transport; Docker builds install dependencies on the build platform.
