@@ -9,6 +9,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  hcpcsRelease,
   hcpcsSectionRows,
   parseHcpcsAnweb,
   parseIcd10cmOrder,
@@ -178,6 +179,24 @@ describe('parseHcpcsAnweb', () => {
     expect(row?.billable).toBe(true);
   });
 
+  it('keeps a code billable on its termination date, the last date CMS allows it', () => {
+    // CMS record layout field 29: "Last date for which a procedure or modifier
+    // code may be used by Medicare providers."
+    const text = anwebLine({
+      code: 'C9145',
+      long: 'Injection, aprepitant, (aponvie), 1 mg',
+      short: 'Inj, aponvie, 1 mg',
+      effective: '20230401',
+      terminated: '20260331',
+    });
+    expect(parseHcpcsAnweb(text, '20260330')[0]).toMatchObject({ billable: true });
+    expect(parseHcpcsAnweb(text, '20260331')[0]).toMatchObject({
+      billable: true,
+      terminated: '20260331',
+    });
+    expect(parseHcpcsAnweb(text, '20260401')[0]).toMatchObject({ billable: false });
+  });
+
   it('reads the code from pos 1-5, not pos 4-8', () => {
     // Regression: a real code row has the code at pos 1-5 (no leading filler).
     const [row] = parseHcpcsAnweb(anwebLine({ code: 'J0120', long: 'Injection' }), '20260101');
@@ -235,6 +254,69 @@ describe('parseHcpcsAnweb', () => {
     const modifierLine = `   A1${'00100'}7${'Dressing for one wound'.padEnd(80)}`.padEnd(292);
     const rows = parseHcpcsAnweb(modifierLine, '20260101');
     expect(rows).toEqual([]);
+    // The October layout right-trims modifier continuation rows the same way.
+    expect(parseHcpcsAnweb('   AQ002008(hpsa)', '20260101')).toEqual([]);
+  });
+
+  it('parses a right-trimmed file (October layout) to the same rows as a padded one (January layout)', () => {
+    // The January file pads every row to 320 characters; the October file
+    // right-trims them, so a continuation row ends at its last description
+    // character (E0110's is 49 long) and the file uses CRLF line endings.
+    const padded = [
+      anwebLine({
+        code: 'E0110',
+        long: 'Crutches, forearm, includes crutches of various materials, adjustable or fixed,',
+        short: 'Crutch forearm pair',
+        seq: '00100',
+        recId: '3',
+        effective: '19860101',
+        actionEffective: '19960101',
+      }),
+      anwebLine({
+        code: 'E0110',
+        long: 'pair, complete with tips and handgrips',
+        seq: '00200',
+        recId: '4',
+      }),
+    ];
+    const trimmed = padded.map((line) => line.trimEnd());
+    expect(trimmed[1]).toBe('E0110002004pair, complete with tips and handgrips');
+
+    const fromPadded = parseHcpcsAnweb(padded.join('\n'), '20261024');
+    const fromTrimmed = parseHcpcsAnweb(trimmed.join('\r\n'), '20261024');
+    expect(fromTrimmed).toEqual(fromPadded);
+    expect(fromTrimmed).toEqual([
+      expect.objectContaining({
+        code: 'E0110',
+        longDesc:
+          'Crutches, forearm, includes crutches of various materials, adjustable or fixed, pair, complete with tips and handgrips',
+        shortDesc: 'Crutch forearm pair',
+        effective: '19860101',
+        terminated: null,
+        billable: true,
+      }),
+    ]);
+  });
+});
+
+describe('hcpcsRelease', () => {
+  it.each([
+    ['HCPC2026_JAN_ANWEB_01122026.txt', 'HCPCS 2026 January', '2026-01-01'],
+    ['HCPC2026_APR_ANWEB_v2.txt', 'HCPCS 2026 April', '2026-04-01'],
+    ['HCPC2026_JUL_ANWEB.txt', 'HCPCS 2026 July', '2026-07-01'],
+    ['HCPC2026_OCT_ANWEB_09232026.txt', 'HCPCS 2026 October', '2026-10-01'],
+    ['hcpc2027_jan_anweb.txt', 'HCPCS 2027 January', '2027-01-01'],
+  ])('labels %s as %s, effective %s through the year end', (fileName, releaseId, start) => {
+    expect(hcpcsRelease(fileName)).toEqual({
+      releaseId,
+      effectiveStart: start,
+      effectiveEnd: `${start.slice(0, 4)}-12-31`,
+    });
+  });
+
+  it('rejects a file name that names no year and quarter', () => {
+    expect(() => hcpcsRelease('anweb.txt')).toThrow(/HCPC<year>_<JAN\|APR\|JUL\|OCT>_ANWEB/);
+    expect(() => hcpcsRelease('HCPC2026_CONTR_ANWEB.txt')).toThrow(/quarter/);
   });
 });
 

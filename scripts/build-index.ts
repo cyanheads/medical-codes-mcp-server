@@ -13,11 +13,13 @@
  * Canonical sources (static bulk downloads, no key, no runtime API):
  *  - ICD-10-CM order file: CDC NCHS FTP
  *      ftp.cdc.gov/pub/Health_Statistics/NCHS/Publications/ICD10CM/<FY>/
- *      → icd10cm-order-<FY>.txt (+ icd10cm-order-addenda-<FY>.txt overlay)
+ *      icd10cm-code-descriptions-<FY>.zip → icd10cm-order-<FY>.txt (the zip nests
+ *      it in a subfolder; extract it flat — the probe does not recurse)
  *  - ICD-10-PCS order file: CMS ICD-10 page
- *      → icd10pcs_order_<FY>.txt  (+ icd10pcs_tabular_<FY>.xml for pcs_axes)
- *  - HCPCS Level II annual file: CMS HCPCS page
- *      → HCPC<yr>_CONTR_ANWEB.txt
+ *      → icd10pcs_order_<FY>.txt  (+ icd10pcs_tables_<FY>.xml for pcs_axes)
+ *  - HCPCS Level II quarterly file: CMS HCPCS quarterly-update page
+ *      → HCPC<yr>_<JAN|APR|JUL|OCT>_ANWEB_<posted>.txt — the file name sets the
+ *      release label and effective dates (`hcpcsRelease`), so keep it as published
  *  - RxNorm normalized drug set: the keyless RxNav REST API, NOT the RRF files.
  *      NLM gates the RxNorm RRF bulk downloads (including the prescribable subset)
  *      behind UMLS/UTS authentication, so they can't source an offline, keyless,
@@ -37,17 +39,21 @@
  * Usage:
  *   bun run scripts/ingest/fetch-rxnav.ts                                    # once, for RxNorm
  *   bun run scripts/ingest/fetch-rxclass.ts                                  # then, for RxClass
- *   bun run scripts/build-index.ts --from-dir ./.sources --fy 2026 [--out data/medical-codes.db]
+ *   bun run scripts/build-index.ts --from-dir ./.sources --fy 2027 [--out data/medical-codes.db]
  *   Expected files in --from-dir (match the names above; the script probes common variants).
+ *   `--fy` labels the ICD-10-CM/PCS releases only; HCPCS takes its release from
+ *   the ANWEB file name. Hold one file per layer in --from-dir — the probe takes
+ *   the first name that matches.
  * @module scripts/build-index
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createDbWriter, type DbWriter } from './_db-writer.ts';
 import {
+  hcpcsRelease,
   hcpcsSectionRows,
   parseHcpcsAnweb,
   parseIcd10cmOrder,
@@ -158,9 +164,10 @@ function ingestIcd10pcs(w: DbWriter, dir: string, fy: string): boolean {
   return true;
 }
 
-function ingestHcpcs(w: DbWriter, dir: string, year: string): boolean {
+function ingestHcpcs(w: DbWriter, dir: string): boolean {
   const file = findFile(dir, 'anweb');
   if (!file) return false;
+  const release = hcpcsRelease(basename(file));
   const rows = parseHcpcsAnweb(readFileSync(file, 'utf-8'));
   w.begin();
   for (const r of rows) w.addCode(r);
@@ -172,13 +179,11 @@ function ingestHcpcs(w: DbWriter, dir: string, year: string): boolean {
   w.commit();
   w.writeMeta({
     system: 'HCPCS',
-    releaseId: `HCPCS ${year}`,
-    effectiveStart: `${year}-01-01`,
-    effectiveEnd: `${year}-12-31`,
+    ...release,
     codeCount: w.countFor('HCPCS'),
     sourceUrl: 'https://www.cms.gov/medicare/coding-billing/healthcare-common-procedure-system',
   });
-  console.log(`  HCPCS: ${w.countFor('HCPCS')} codes`);
+  console.log(`  HCPCS: ${w.countFor('HCPCS')} codes (${release.releaseId})`);
   return true;
 }
 
@@ -273,13 +278,12 @@ function ingestRxClass(w: DbWriter, dir: string, concepts: RxNavConcept[] | null
 
 function main(): void {
   const fromDir = arg('--from-dir');
-  const fy = arg('--fy') ?? '2026';
-  const year = arg('--year') ?? fy;
+  const fy = arg('--fy');
   const outPath = arg('--out') ?? join(ROOT, 'data', 'medical-codes.db');
 
-  if (!fromDir) {
+  if (!fromDir || !fy || !/^\d{4}$/.test(fy)) {
     console.error(
-      'Usage: bun run scripts/build-index.ts --from-dir <dir-with-source-files> [--fy 2026] [--out data/medical-codes.db]\n' +
+      'Usage: bun run scripts/build-index.ts --from-dir <dir-with-source-files> --fy <ICD-10 fiscal year, e.g. 2027> [--out data/medical-codes.db]\n' +
         'This script never downloads — extract the federal source files into <dir> first (URLs in the file header).\n' +
         'For tests / local smoke, run scripts/build-fixture-db.ts instead.',
     );
@@ -294,7 +298,7 @@ function main(): void {
 
   const icd10cm = ingestIcd10cm(w, fromDir, fy);
   const icd10pcs = ingestIcd10pcs(w, fromDir, fy);
-  const hcpcs = ingestHcpcs(w, fromDir, year);
+  const hcpcs = ingestHcpcs(w, fromDir);
   const rxnormConcepts = ingestRxNorm(w, fromDir); // only if the RxNav cache (<dir>/rxnav/) is present
   const built = {
     icd10cm,

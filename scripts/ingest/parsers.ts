@@ -9,8 +9,9 @@
  *  - ICD-10-CM / ICD-10-PCS order files: fixed-width, variable-length lines.
  *    pos 1-5 order#, pos 7-13 code (no dot, space-padded to 7), pos 15 flag
  *    (1=billable/valid leaf, 0=header), pos 17-76 short desc, pos 78+ long desc.
- *  - HCPCS ANWEB.txt: fixed-width, 320 chars/row (verified against the CMS
- *    record-layout doc in the annual ZIP). pos 1-5 code, pos 12-91 long desc,
+ *  - HCPCS ANWEB.txt: fixed-width, up to 320 chars/row, right-trimmed in some
+ *    quarterly files (verified against the CMS record-layout doc in each quarterly
+ *    ZIP). pos 1-5 code, pos 12-91 long desc,
  *    pos 92-119 short desc, pos 269-276 Code Added Date (effective), pos 277-284
  *    Action Effective Date, pos 285-292 Termination Date (YYYYMMDD, blank=active).
  *  - RxNorm RRF: pipe-delimited. RXNCONSO (RXCUI,LAT,…,SAB,TTY,CODE,STR,…),
@@ -156,9 +157,10 @@ export function parseIcd10pcsAxes(xml: string): PcsAxisInput[] {
 }
 
 /**
- * Parse a HCPCS Level II `ANWEB.txt` annual file (fixed-width, 320 chars/row).
- * Column positions verified against the CMS record-layout doc shipped in the
- * annual ZIP (`HCPC<yr>_recordlayout.txt`):
+ * Parse a HCPCS Level II `ANWEB.txt` quarterly file (fixed-width, 320 chars/row
+ * in the January layout, right-trimmed in the October layout). Column positions
+ * verified against the CMS record-layout doc shipped in each quarterly ZIP
+ * (`HCPC<yr>_recordlayout.txt`):
  *  - pos 1-5    HCPCS code (a 5-char code row). The modifier rows carry a 2-char
  *               modifier at pos 4-5 with pos 1-3 blank; they trim to a sub-5-char
  *               value and are filtered out (modifiers aren't lookup codes — the
@@ -179,7 +181,8 @@ export function parseIcd10pcsAxes(xml: string): PcsAxisInput[] {
  *
  * Terminated codes remain in the file with a termination date; the row carries it
  * so `medcode_check_code` can report `terminated`. A code is billable when its
- * termination date is blank or in the future relative to `asOf`.
+ * termination date is blank or on or after `asOf` — CMS defines it as the last
+ * date the code may be used (record layout field 29).
  */
 export function parseHcpcsAnweb(text: string, asOf = todayYyyymmdd()): CodeInput[] {
   /** Accumulator per code: primary-row fields + ordered long-desc chunks. */
@@ -194,7 +197,10 @@ export function parseHcpcsAnweb(text: string, asOf = todayYyyymmdd()): CodeInput
   const byCode = new Map<string, Acc>();
 
   for (const line of text.split(/\r?\n/)) {
-    if (line.length < 119) continue; // need through the short-description column
+    // Need through the record id (pos 11). Every later field is read by slice, so
+    // a right-trimmed row (the October layout ends each row at its last non-blank
+    // column) parses the same as a padded one (the January layout's 320 chars).
+    if (line.length < 11) continue;
     const code = field(line, 1, 5).replace(/\s+/g, '');
     // Real Level II codes are 5 chars at pos 1-5. Modifier rows (2-char value at
     // pos 4-5, blank pos 1-3) trim short — skip them.
@@ -230,7 +236,9 @@ export function parseHcpcsAnweb(text: string, asOf = todayYyyymmdd()): CodeInput
       .map((c) => c.text)
       .join(' ')
       .trim();
-    const active = !acc.terminated || acc.terminated > asOf;
+    // The termination date is the last date the code may be used, so it is still
+    // billable on that day.
+    const active = !acc.terminated || acc.terminated >= asOf;
     rows.push({
       system: 'HCPCS',
       code,
@@ -245,6 +253,45 @@ export function parseHcpcsAnweb(text: string, asOf = todayYyyymmdd()): CodeInput
     });
   }
   return rows;
+}
+
+/** The release a HCPCS quarterly file carries, as `build_meta` records it. */
+export interface HcpcsRelease {
+  effectiveEnd: string;
+  effectiveStart: string;
+  releaseId: string;
+}
+
+const HCPCS_QUARTERS = {
+  JAN: { month: '01', name: 'January' },
+  APR: { month: '04', name: 'April' },
+  JUL: { month: '07', name: 'July' },
+  OCT: { month: '10', name: 'October' },
+} as const;
+
+/**
+ * Read the release from a CMS quarterly HCPCS file name
+ * (`HCPC2026_OCT_ANWEB_09232026.txt` → `HCPCS 2026 October`, effective
+ * 2026-10-01 – 2026-12-31). The file itself carries no release label; CMS names
+ * each quarterly file by year and quarter, and a quarter's file stays current
+ * until the next one posts, so the end is the year end. Throws on a name without
+ * both, rather than guessing a release.
+ */
+export function hcpcsRelease(fileName: string): HcpcsRelease {
+  const m = /^HCPC(\d{4})_([A-Z]{3})_ANWEB/i.exec(fileName);
+  const quarter = m?.[2]?.toUpperCase();
+  if (!m || !quarter || !Object.hasOwn(HCPCS_QUARTERS, quarter)) {
+    throw new Error(
+      `HCPCS file name "${fileName}" names no release — expected HCPC<year>_<JAN|APR|JUL|OCT>_ANWEB…, the CMS quarterly file name the release year and quarter are read from`,
+    );
+  }
+  const year = m[1];
+  const { month, name } = HCPCS_QUARTERS[quarter as keyof typeof HCPCS_QUARTERS];
+  return {
+    releaseId: `HCPCS ${year} ${name}`,
+    effectiveStart: `${year}-${month}-01`,
+    effectiveEnd: `${year}-12-31`,
+  };
 }
 
 /**

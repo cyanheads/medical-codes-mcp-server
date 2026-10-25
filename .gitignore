@@ -73,8 +73,9 @@ worker-configuration.d.ts
 repomix-output*
 # The bundled SQLite index (data/medical-codes.db) is a deterministic build
 # artifact (>100 MB), kept out of git but shipped in the npm tarball (.npmignore
-# does not exclude it) and the Docker image. Obtain it from the GitHub Release
-# assets or rebuild it with scripts/build-index.ts. Everything under the root
+# does not exclude it) and the Docker image. Obtain it from the npm package or
+# from the .mcpb bundle attached to each GitHub Release (a zip holding it at
+# data/medical-codes.db), or rebuild it with scripts/build-index.ts. Everything under the root
 # data/ (scratch DBs, source extracts) is ignored too — anchored so it cannot
 # also swallow a nested src/data/ or tests/**/data/.
 /data/

@@ -1,10 +1,11 @@
 /**
  * @fileoverview `scripts/build-index.ts` end to end over a tiny source directory:
- * an RxNav cache for the metformin family plus an RxClass cache built from the
- * captured responses in `tests/fixtures/rxclass/`. Pins that the snapshot dates
- * the index reports come from the caches (each fetcher's `meta.json`), not from
- * the moment the index is built — so rebuilding from an unchanged cache reports
- * the same dates.
+ * an RxNav cache for the metformin family, an RxClass cache built from the
+ * captured responses in `tests/fixtures/rxclass/`, and a one-code October-layout
+ * HCPCS file. Pins that the snapshot dates the index reports come from the caches
+ * (each fetcher's `meta.json`), not from the moment the index is built — so
+ * rebuilding from an unchanged cache reports the same dates — and that the HCPCS
+ * release comes from the quarterly file name, never from `--fy`.
  * @module tests/scripts/build-index.test
  */
 
@@ -64,14 +65,29 @@ function writeSources(): string {
   copyFileSync(join(RXCLASS_FIXTURES, 'classes.json'), join(rxclass, 'classes.json'));
   copyFileSync(join(RXCLASS_FIXTURES, 'versions.json'), join(rxclass, 'versions.json'));
   writeFileSync(join(rxclass, 'meta.json'), JSON.stringify({ fetchedAt: RXCLASS_FETCHED_AT }));
+
+  // An October-layout HCPCS file: right-trimmed rows, CRLF line endings, and the
+  // release named only by the file name.
+  const primary =
+    'E0110001003Crutches, forearm, includes crutches of various materials, adjustable or fixed, Crutch forearm pair';
+  writeFileSync(
+    join(sources, 'HCPC2026_OCT_ANWEB_09232026.txt'),
+    [
+      `${primary.padEnd(268)}1986010119960101`,
+      'E0110002004pair, complete with tips and handgrips',
+      '',
+    ].join('\r\n'),
+  );
   return sources;
 }
 
+/** Build with `--fy 2027` alone — the ICD fiscal year must not relabel HCPCS. */
 function build(sources: string, out: string): void {
-  execFileSync('bun', ['run', 'scripts/build-index.ts', '--from-dir', sources, '--out', out], {
-    cwd: ROOT,
-    stdio: 'pipe',
-  });
+  execFileSync(
+    'bun',
+    ['run', 'scripts/build-index.ts', '--from-dir', sources, '--fy', '2027', '--out', out],
+    { cwd: ROOT, stdio: 'pipe' },
+  );
 }
 
 function read<T>(path: string, sql: string): T[] {
@@ -113,5 +129,33 @@ describe('build-index snapshot dates', () => {
     for (const row of rows) expect(row.fetched_at).toBe(RXCLASS_FETCHED_AT);
     expect(rows.find((r) => r.source === 'MEDRT')?.version).toBe('2026.07.06');
     expect(read(second, sql)).toEqual(rows);
+  });
+});
+
+describe('build-index HCPCS release', () => {
+  it('labels the release and its effective dates from the quarterly file name', () => {
+    const sql =
+      "SELECT release_id, effective_start, effective_end, code_count FROM build_meta WHERE system = 'HCPCS'";
+    expect(read(first, sql)).toEqual([
+      {
+        release_id: 'HCPCS 2026 October',
+        effective_start: '2026-10-01',
+        effective_end: '2026-12-31',
+        code_count: 2, // E0110 plus its letter bucket E
+      },
+    ]);
+  });
+
+  it('keeps the long description a right-trimmed continuation row carries', () => {
+    const sql =
+      "SELECT short_desc, long_desc, effective FROM codes WHERE system = 'HCPCS' AND code = 'E0110'";
+    expect(read(first, sql)).toEqual([
+      {
+        short_desc: 'Crutch forearm pair',
+        long_desc:
+          'Crutches, forearm, includes crutches of various materials, adjustable or fixed, pair, complete with tips and handgrips',
+        effective: '19860101',
+      },
+    ]);
   });
 });
