@@ -10,7 +10,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getCodeIndexService } from '@/services/code-index/code-index-service.js';
 import { SYSTEM_IDS, SYSTEM_LABELS, SYSTEM_TRAITS } from '@/services/code-index/types.js';
 import { encodeNextCursor, resolvePage } from './_pagination.js';
-import { renderCodeLine } from './_render.js';
+import { literal, renderCodeLine } from './_render.js';
 import { nonBlankString } from './_schema.js';
 
 const SOURCE_URL =
@@ -19,7 +19,7 @@ const SOURCE_URL =
 export const searchCodesTool = tool('medcode_search_codes', {
   title: 'Search Medical Codes',
   description:
-    'Find US medical codes whose official descriptions match a described concept, via full-text search over the bundled index. Every search term must appear — matched first as a token prefix, then as a substring so inflected and compound forms are also found (a "neuropathy" search surfaces "mononeuropathy"/"polyneuropathy" siblings too, not only a standalone "neuropathy" token). An RxNorm concept matches on its drug name alone, never its term type (SBD, IN, …) — narrow by type with `chapter`. Filter by `system` (ICD10CM/ICD10PCS/HCPCS/RXNORM), `billableOnly` to exclude headers/categories, and `chapter`. Use when you have a clinical description and need the code — the reverse of medcode_get_code. Results echo the resolved system per row for chaining, rank exact prefix matches ahead of substring-only matches with a deterministic tie-break, and disclose truncation with a `nextCursor`: pass it back as `cursor` to page through the full ranked set.',
+    'Find US medical codes whose official descriptions match a described concept, via full-text search over the bundled index. Every search term must appear — matched first as a token prefix, then as a substring so inflected and compound forms are also found (a "neuropathy" search surfaces "mononeuropathy"/"polyneuropathy" siblings too, not only a standalone "neuropathy" token). An RxNorm concept matches on its drug name alone, never its term type (SBD, IN, …) — narrow by type with `chapter`. Filter by `system` (ICD10CM/ICD10PCS/HCPCS/RXNORM), `billableOnly` to exclude headers/categories and terminated HCPCS codes, and `chapter`. Use when you have a clinical description and need the code — the reverse of medcode_get_code. Results echo the resolved system per row for chaining, rank exact prefix matches ahead of substring-only matches with a deterministic tie-break, and disclose truncation with a `nextCursor`: pass it back as `cursor` to page through the full ranked set.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -35,7 +35,7 @@ export const searchCodesTool = tool('medcode_search_codes', {
       .boolean()
       .default(false)
       .describe(
-        'When true, return only billable leaf codes (exclude headers/categories). RxNorm has no billing concept, so this excludes every RxNorm concept.',
+        'When true, return only billable leaf codes (exclude headers/categories and HCPCS codes whose last valid date has passed). RxNorm has no billing concept, so this excludes every RxNorm concept.',
       ),
     chapter: z
       .string()
@@ -83,7 +83,7 @@ export const searchCodesTool = tool('medcode_search_codes', {
               .boolean()
               .nullable()
               .describe(
-                'True when the code is a billable leaf. Null when the system has no billing concept (RxNorm).',
+                'True when the code is a billable leaf. False for headers/categories, non-billable codes, and HCPCS codes whose last valid date has passed. Null when the system has no billing concept (RxNorm).',
               ),
             header: z.boolean().describe('True when the code is a non-billable category/header.'),
             chapter: z
@@ -125,9 +125,11 @@ export const searchCodesTool = tool('medcode_search_codes', {
   },
 
   enrichmentTrailer: {
+    // structuredContent carries the notice as written; content[] reads it back the same.
+    notice: { render: (notice: string) => `> ${literal(notice)}` },
     appliedFilters: {
       render: (f: { system: string | null; billableOnly: boolean; chapter: string | null }) =>
-        `**Filters:** system=${f.system ?? 'any'}, billableOnly=${f.billableOnly}, chapter=${f.chapter ?? 'any'}`,
+        `**Filters:** system=${f.system ?? 'any'}, billableOnly=${f.billableOnly}, chapter=${f.chapter === null ? 'any' : literal(f.chapter)}`,
     },
   },
 

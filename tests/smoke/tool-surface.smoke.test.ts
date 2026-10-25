@@ -29,7 +29,7 @@ it('executes and renders all six tools against the shipped index', async () => {
     createMockContext(),
   );
   expect(systems).toEqual(expect.schemaMatching(listSystemsTool.output));
-  expect(textOf(listSystemsTool.format!(systems))).toContain('ICD-10-CM FY2026');
+  expect(textOf(listSystemsTool.format!(systems))).toContain('ICD-10-CM FY2027');
 
   const decoded = await getCodeTool.handler(
     getCodeTool.input.parse({ codes: ['E11.9'] }),

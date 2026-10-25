@@ -10,7 +10,12 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { mapCodesTool } from '@/mcp-server/tools/definitions/map-codes.tool.js';
 import { searchCodesTool } from '@/mcp-server/tools/definitions/search-codes.tool.js';
 import type { CodeIndexService } from '@/services/code-index/code-index-service.js';
-import { detectSystems, ndcCandidates } from '@/services/code-index/detect.js';
+import {
+  detectSystems,
+  isIcd10cmDisplayForm,
+  ndcCandidates,
+} from '@/services/code-index/detect.js';
+import { storageCode } from '@/services/code-index/schema.js';
 import { RXCLASS_CLASS_TYPES, type SystemId } from '@/services/code-index/types.js';
 import {
   parseHcpcsAnweb,
@@ -105,6 +110,52 @@ describe('identifier parser fuzz', () => {
       }
     },
   );
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/61
+describe('a dot in the input', () => {
+  /** Fixture codes of every system, header rows included, plus shaped values none holds. */
+  const CODES = [
+    ...['A00', 'A000', 'A01', 'A010', 'A0100', 'B00', 'E11', 'E119', 'E1140', 'I10'],
+    ...['0DTJ4ZZ', '0DTJ0ZZ', '02703DZ', 'J0120', 'E0110', 'A4206', 'K0552', 'J', 'A'],
+    ...['161', '198440', '1049640', 'R9999', 'A019999', '1049631', 'ZZZ9999', 'E1199'],
+  ];
+  /** Every single-dot spelling of each code, as typed and in lower case with padding. */
+  const SPELLINGS = CODES.flatMap((code) =>
+    Array.from({ length: code.length + 1 }, (_, i) => `${code.slice(0, i)}.${code.slice(i)}`),
+  ).flatMap((dotted) => [dotted, ` ${dotted.toLowerCase()} `]);
+
+  it('moves a resolution only from ambiguous to ICD-10-CM, and only in display form', () => {
+    let moved = 0;
+    for (const raw of SPELLINGS) {
+      // The same characters undotted are what the dot-blind resolution answers.
+      const base = svc.getByCode(storageCode(raw));
+      const got = svc.getByCode(raw);
+      const checked = svc.checkCode(raw);
+      const checkedBase = svc.checkCode(storageCode(raw));
+      if (
+        isIcd10cmDisplayForm(raw) &&
+        base.kind === 'ambiguous' &&
+        base.systems.includes('ICD10CM')
+      ) {
+        moved += 1;
+        const others = base.systems.filter((sys) => sys !== 'ICD10CM');
+        expect(got.kind === 'found' && got.row.system, raw).toBe('ICD10CM');
+        expect(got.kind === 'found' && got.alsoIn, raw).toEqual(others);
+        expect(checked.kind === 'resolved' && checked.result.system, raw).toBe('ICD10CM');
+        expect(checked.kind === 'resolved' && checked.result.alsoIn, raw).toEqual(others);
+        continue;
+      }
+      expect(got, raw).toEqual(base);
+      expect(checked.kind, raw).toBe(checkedBase.kind);
+      if (checked.kind === 'resolved' && checkedBase.kind === 'resolved') {
+        expect(checked.result.system, raw).toBe(checkedBase.result.system);
+        expect(checked.result.status, raw).toBe(checkedBase.result.status);
+      }
+    }
+    // A01.00 as typed and padded: the fixture's one ICD-10-CM / HCPCS collision.
+    expect(moved).toBe(2);
+  });
 });
 
 describe('federal-source parser fuzz', () => {

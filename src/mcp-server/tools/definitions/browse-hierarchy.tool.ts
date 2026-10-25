@@ -17,7 +17,7 @@ import { getCodeIndexService } from '@/services/code-index/code-index-service.js
 import { storageCode } from '@/services/code-index/schema.js';
 import { SYSTEM_IDS } from '@/services/code-index/types.js';
 import { encodeNextCursor, resolvePage } from './_pagination.js';
-import { renderCodeLine } from './_render.js';
+import { literal, renderCodeLine, tableRow } from './_render.js';
 import { nonBlankString } from './_schema.js';
 
 const SOURCE_URL =
@@ -33,7 +33,7 @@ const CodeNodeSchema = z
       .boolean()
       .nullable()
       .describe(
-        'True when the code is a billable leaf. Null when the system has no billing concept.',
+        'True when the code is a billable leaf. False for headers/categories, non-billable codes, and HCPCS codes whose last valid date has passed. Null when the system has no billing concept.',
       ),
     header: z.boolean().describe('True when the code is a non-billable category/header.'),
     chapter: z.string().nullable().describe('Chapter/range bucket, or null.'),
@@ -117,12 +117,17 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
       ),
   },
 
+  enrichmentTrailer: {
+    // structuredContent carries the notice as written; content[] reads it back the same.
+    notice: { render: (notice: string) => `> ${literal(notice)}` },
+  },
+
   errors: [
     {
       reason: 'unknown_node',
       code: JsonRpcErrorCode.NotFound,
       when: 'The node does not exist in the system — for ICD-10-PCS, also when it uses a character outside the axis alphabet or begins no bundled code.',
-      recovery: 'Omit `node` to list top-level entries, or verify the node code.',
+      recovery: 'Omit node to list top-level entries, or verify the node code.',
     },
   ],
 
@@ -201,7 +206,7 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
         '| Position | Value | Meaning |',
         '|---:|:---|:---|',
       );
-      for (const a of result.axes) lines.push(`| ${a.position} | ${a.value} | ${a.meaning} |`);
+      for (const a of result.axes) lines.push(tableRow([a.position, a.value, a.meaning]));
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

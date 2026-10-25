@@ -17,6 +17,7 @@ import { listSystemsTool } from '@/mcp-server/tools/definitions/list-systems.too
 import { mapCodesTool } from '@/mcp-server/tools/definitions/map-codes.tool.js';
 import type { CodeIndexService } from '@/services/code-index/code-index-service.js';
 import { ensureBundledIndex } from '../helpers/bundled-index.ts';
+import { readCommonMark } from '../helpers/commonmark.ts';
 
 interface Hit {
   classType?: string;
@@ -189,7 +190,7 @@ describe('rxcui_to_classes on the shipped index', () => {
     expect(page.notice).toContain('DEA schedules on drug products');
     expect(page.notice).toContain('does not mean it is unscheduled');
     expect(page.notice).toContain('name_to_rxcui');
-    expect(text).toContain(page.notice as string);
+    expect(readCommonMark(text)).toContain(page.notice as string);
     const scheduled = await mapPage({
       from: product?.rxcui,
       direction: 'rxcui_to_classes',
@@ -204,7 +205,7 @@ describe('rxcui_to_classes on the shipped index', () => {
     const { page, text } = await mapPage({ from: '151827', direction: 'rxcui_to_classes' });
     expect(page.hits).toEqual([]);
     expect(page.notice).toMatch(/Brand-name concepts carry no classes/);
-    expect(text).toContain(page.notice as string);
+    expect(readCommonMark(text)).toContain(page.notice as string);
   });
 
   it('pages the largest class set (1116179, 178 classes) to the same set a single page holds', async () => {
@@ -218,11 +219,11 @@ describe('rxcui_to_classes on the shipped index', () => {
 });
 
 describe('class_to_rxcuis on the shipped index', () => {
-  it('walks CSA schedule II through nextCursor to its 628 direct members', async () => {
+  it('walks CSA schedule II through nextCursor to its 620 direct members', async () => {
     const { hits, pages } = await walk({ from: 'SCHEDULE2', direction: 'class_to_rxcuis' });
     expect(pages).toBe(13);
-    expect(hits).toHaveLength(628);
-    expect(new Set(hits.map((h) => h.value)).size).toBe(628);
+    expect(hits).toHaveLength(620);
+    expect(new Set(hits.map((h) => h.value)).size).toBe(620);
     const members = db
       .query("SELECT COUNT(DISTINCT rxcui) AS n FROM rxclass_edge WHERE class_id = 'SCHEDULE2'")
       .get() as { n: number };
@@ -278,18 +279,25 @@ describe('class_to_rxcuis on the shipped index', () => {
     const { page, text } = await mapPage({ from: 'N0000193873', direction: 'class_to_rxcuis' });
     expect(page.hits).toEqual([]);
     expect(page.notice).toContain('the EPC class "Diuretic", which has no direct member');
-    expect(text).toContain(page.notice as string);
+    expect(readCommonMark(text)).toContain(page.notice as string);
   });
 
-  it('walks the largest class (D004342, 3,181 edges) to completion at the page ceiling', async () => {
+  it('quotes a bracketed class name in the notice as RxClass spells it, on both surfaces', async () => {
+    const { page, text } = await mapPage({ from: 'Z2', direction: 'class_to_rxcuis' });
+    expect(page.hits).toEqual([]);
+    expect(page.notice).toContain('the CHEM class "Substances [EXT]"');
+    expect(readCommonMark(text)).toContain(page.notice as string);
+  });
+
+  it('walks the largest class (D004342, 3,177 edges) to completion at the page ceiling', async () => {
     const { hits, pages } = await walk({
       from: 'D004342',
       direction: 'class_to_rxcuis',
       limit: 200,
     });
     expect(pages).toBe(16);
-    expect(hits).toHaveLength(3181);
-    expect(new Set(hits.map((h) => `${h.value}|${h.source}|${h.relation}`)).size).toBe(3181);
+    expect(hits).toHaveLength(3177);
+    expect(new Set(hits.map((h) => `${h.value}|${h.source}|${h.relation}`)).size).toBe(3177);
   });
 
   it('resolves a CVX class ID, a bare integer, as a class', async () => {
@@ -396,19 +404,19 @@ describe('medcode_list_systems on the shipped index', () => {
         }),
       );
     }
-    expect(out.classLayer.classCount).toBe(20_707);
-    expect(out.classLayer.edgeCount).toBe(86_837);
+    expect(out.classLayer.classCount).toBe(20_723);
+    expect(out.classLayer.edgeCount).toBe(87_269);
 
     const text = textOf(result);
-    expect(text).toContain('| MEDRT | 2026.07.06 | 5803 | 55590 |');
-    expect(text).toContain('| CDC | none published | 113 | 983 |');
+    expect(text).toContain('| MEDRT | 2026.09.08 | 5812 | 55819 |');
+    expect(text).toContain('| CDC | none published | 114 | 1044 |');
   });
 
   it('dates RxNorm by its RxNav snapshot, not the index build', async () => {
     const result = await call(listSystemsTool, {});
     const text = textOf(result);
     expect(text).toContain(
-      '- **RxNorm** source: https://rxnav.nlm.nih.gov/ (RxNav snapshot fetched 2026-06-22T00:44:15.018Z)',
+      '- **RxNorm** source: https://rxnav.nlm.nih.gov/ (RxNav snapshot fetched 2026-10-25T01:11:21.811Z)',
     );
   });
 });

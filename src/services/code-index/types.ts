@@ -47,7 +47,11 @@ export const SYSTEM_TRAITS: Record<SystemId, { billing: boolean; shortDescriptio
  * hold a placeholder for a system {@link SYSTEM_TRAITS} marks as lacking them.
  */
 export interface CodeRow {
-  /** 1 = billable leaf code. 0 = not billable (header/category or completeness-only). */
+  /**
+   * 1 = billable leaf code. 0 = not billable (header/category or completeness-only).
+   * On a row with a termination date this is the build-date reading of that date,
+   * which the service re-reads at call time instead.
+   */
   billable: number;
   /** Chapter label (ICD-10-CM/PCS) or range bucket (HCPCS). NULL when not applicable. */
   chapter: string | null;
@@ -62,7 +66,10 @@ export interface CodeRow {
   parent: string | null;
   shortDesc: string | null;
   system: SystemId;
-  /** Termination date (YYYYMMDD) when the code is retired. NULL = active. */
+  /**
+   * Termination date (YYYYMMDD) — the last date the code may be used, which can
+   * still be ahead (HCPCS only). NULL = no termination scheduled.
+   */
   terminated: string | null;
 }
 

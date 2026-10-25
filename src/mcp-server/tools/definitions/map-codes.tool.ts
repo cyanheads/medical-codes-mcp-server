@@ -31,6 +31,7 @@ import {
   type SystemId,
 } from '@/services/code-index/types.js';
 import { encodeNextCursor, resolvePage } from './_pagination.js';
+import { literal, literalAtHeadingEnd } from './_render.js';
 import { nonBlankString } from './_schema.js';
 
 const SOURCE_URL =
@@ -58,7 +59,7 @@ const CLASS_DIRECTION_SET: ReadonlySet<MapDirection> = new Set(CLASS_DIRECTIONS)
  * The directions whose result sets are unbounded in the corpus and therefore
  * paginate: hierarchy children, the drug-name substring crosswalk, a product's
  * package NDCs (one RXCUI can carry thousands), an RXCUI's classes (up to 178),
- * and a class's members (up to 3,181). They are the only ones that accept
+ * and a class's members (up to 3,177). They are the only ones that accept
  * `limit` / `cursor`; the point directions reject both.
  */
 const PAGINATED_DIRECTIONS: ReadonlySet<MapDirection> = new Set([
@@ -128,7 +129,7 @@ const OUT_OF_SCOPE_RECOVERY =
 
 /** Recovery for a hierarchy source an explicit `system` missed while another bundled system holds it. */
 const HELD_ELSEWHERE_RECOVERY =
-  'Re-call with `system` set to the system named above to walk the code there, or omit `system` to auto-detect it.';
+  'Re-call with system set to the system named above to walk the code there, or omit system to auto-detect it.';
 
 /** Recovery for an NDC sent to a direction that reads `from` as a code or an RXCUI. */
 const NDC_RECOVERY =
@@ -144,7 +145,7 @@ const NDC_UNMAPPED_RECOVERY =
 
 /** Recovery for a `class_to_rxcuis` source that names no bundled class. */
 const CLASS_ID_RECOVERY =
-  'Pass a class ID as rxcui_to_classes returns it in `value` — e.g. N0000175565 (EPC "Biguanide"), SCHEDULE2, or VA class HS502 — and narrow by type with `classType`. ATC, SNOMED CT, and DailyMed classes are not bundled.';
+  'Pass a class ID as rxcui_to_classes returns it in each hit’s value — e.g. N0000175565 (EPC "Biguanide"), SCHEDULE2, or VA class HS502 — and narrow by type with classType. ATC, SNOMED CT, and DailyMed classes are not bundled.';
 
 /** Recovery for a class ID sent to `rxcui_to_classes`. */
 const CLASS_ID_AS_RXCUI_RECOVERY =
@@ -164,7 +165,7 @@ function classMiss(from: string, svc: CodeIndexService): { message: string; reco
   const type = RXCLASS_CLASS_TYPES.find((t) => t === from.toUpperCase());
   if (type) {
     return {
-      message: `"${from}" is a class type, not a class ID — pass it as \`classType\` alongside a class ID of that type.`,
+      message: `"${from}" is a class type, not a class ID — pass it as classType alongside a class ID of that type.`,
       recovery: CLASS_ID_RECOVERY,
     };
   }
@@ -223,9 +224,10 @@ function drugInput(direction: MapDirection): string {
  * is named as the code of the bundled system that holds it, as medcode_check_code
  * and medcode_get_code name it. On a direction that reads `from` as a code or an
  * RXCUI, so are an NDC — one medcode_get_code decodes, or a well-formed one no
- * bundled drug maps to — and, failing that, a bare integer no bundled system
- * holds. Everything else keeps the generic message and the declared recovery
- * (`null` here).
+ * bundled drug maps to — then, on an rxcui_to_* direction, a code another bundled
+ * system holds, and failing those, a bare integer no bundled system holds.
+ * Everything else keeps the generic message and the declared recovery (`null`
+ * here).
  */
 function sourceMiss(
   from: string,
@@ -239,8 +241,8 @@ function sourceMiss(
     return {
       message: `"${from}" is a code system, not a code.`,
       recovery: HIERARCHY_DIRECTIONS.has(direction)
-        ? `Put the code itself in \`from\` (e.g. ${EXAMPLE_CODE[named]}) and the system in \`system\` ("${named}"). To list a system's top-level codes, call medcode_browse_hierarchy with \`system\` and no \`node\`.`
-        : `\`from\` takes ${drugInput(direction)}; the drug directions resolve in RxNorm without a \`system\`.`,
+        ? `Put the code itself in from (e.g. ${EXAMPLE_CODE[named]}) and the system in system ("${named}"). To list a system's top-level codes, call medcode_browse_hierarchy with system and no node.`
+        : `The from field takes ${drugInput(direction)}; the drug directions resolve in RxNorm without a system.`,
     };
   }
   if (direction === 'ndc_to_rxcui') return ndcMiss(from);
@@ -281,9 +283,27 @@ function sourceMiss(
       recovery: NDC_UNMAPPED_RECOVERY,
     };
   }
-  // The membership check keeps a bundled code of another system — a digits-only
-  // ICD-10-PCS code on an rxcui_to_* direction — from being called an unbundled one.
-  if (isBareInteger(from) && svc.systemsHolding(from).length === 0) {
+  // What remains off the hierarchy directions are the rxcui_to_* ones, which read
+  // only RxNorm and missed, so any bundled system holding the value is another one.
+  const codeHolders = HIERARCHY_DIRECTIONS.has(direction) ? [] : svc.systemsHolding(from);
+  if (codeHolders.length > 0) {
+    const quoted = (systems: SystemId[]) => systems.map((sys) => `"${sys}"`).join(' or ');
+    // The decode names every holder, since a string two systems hold can be
+    // ambiguous without a system (A0100); the walk only those with a prefix
+    // hierarchy — an ICD-10-PCS code has no prefix parent, and a complete one no children.
+    const walkable = codeHolders.filter((sys) => sys !== 'ICD10PCS');
+    const walk =
+      walkable.length > 0
+        ? `, or walk its hierarchy with direction parents or children and system ${quoted(walkable)}`
+        : '';
+    return {
+      message: `"${from}" is a code in ${codeHolders.map((sys) => SYSTEM_LABELS[sys]).join(' and ')}, not an RXCUI — ${direction} reads RxNorm concepts only.`,
+      recovery: `Decode it with medcode_get_code and system ${quoted(codeHolders)}${walk}. To reach a drug's RXCUI, map the drug name with direction name_to_rxcui.`,
+    };
+  }
+  // Every bundled system holding the value has been named by now, so a bare
+  // integer reaching here is held by none — a likely CPT / HCPCS Level I code.
+  if (isBareInteger(from)) {
     return {
       message: `No bundled code matches "${from}". ${svc.outOfScopeNote()}`,
       recovery: OUT_OF_SCOPE_RECOVERY,
@@ -530,18 +550,23 @@ export const mapCodesTool = tool('medcode_map_codes', {
       ),
   },
 
+  enrichmentTrailer: {
+    // structuredContent carries the notice as written; content[] reads it back the same.
+    notice: { render: (notice: string) => `> ${literal(notice)}` },
+  },
+
   errors: [
     {
       reason: 'field_not_applicable',
       code: JsonRpcErrorCode.InvalidParams,
       when: 'A `system`, `classType`, `limit`, or `cursor` was sent on a direction that does not use it.',
       recovery:
-        'Drop the named fields and re-call. `system` steers only parents and children (the drug and class directions accept only "RXNORM", which changes nothing); `classType` applies only to rxcui_to_classes and class_to_rxcuis; `limit` and `cursor` apply only to children, name_to_rxcui, rxcui_to_ndc, rxcui_to_classes, and class_to_rxcuis.',
+        'Drop the named fields and re-call. The system field steers only parents and children (the drug and class directions accept only "RXNORM", which changes nothing); classType applies only to rxcui_to_classes and class_to_rxcuis; limit and cursor apply only to children, name_to_rxcui, rxcui_to_ndc, rxcui_to_classes, and class_to_rxcuis.',
     },
     {
       reason: 'no_mapping',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The source value did not resolve to any bundled code, drug, or class.',
+      when: 'The source value did not resolve to a bundled code, drug, or class the direction reads. The rxcui_to_* directions read RxNorm concepts only, and their miss names any other bundled system that holds the value.',
       recovery:
         'Check the code, or decode it with medcode_get_code first. A resolvable code with no edge in the requested direction returns an empty result with a notice, not this error.',
     },
@@ -556,7 +581,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
       reason: 'ambiguous_system',
       code: JsonRpcErrorCode.InvalidParams,
       when: 'The source code is present in more than one system and no `system` was given.',
-      recovery: 'Re-call with an explicit `system` to disambiguate.',
+      recovery: 'Re-call with an explicit system to disambiguate.',
     },
   ],
 
@@ -588,9 +613,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
     const rejected = inapplicableFields(input);
     if (rejected.length > 0) {
       const named = rejected.map((field) =>
-        field === 'system' || field === 'classType'
-          ? `\`${field}\` ("${input[field]}")`
-          : `\`${field}\``,
+        field === 'system' || field === 'classType' ? `${field} ("${input[field]}")` : field,
       );
       throw ctx.fail(
         'field_not_applicable',
@@ -692,7 +715,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
 
   format: (result) => {
     const lines = [
-      `## ${result.direction}: ${result.from}`,
+      `## ${result.direction}: ${literalAtHeadingEnd(result.from)}`,
       result.resolvedSystem ? `**Resolved system:** ${result.resolvedSystem}` : '',
       // Text-only clients read this instead of structuredContent — without it the
       // walked hierarchy reads as the code's only one.
@@ -710,11 +733,13 @@ export const mapCodesTool = tool('medcode_map_codes', {
       const classFields = [
         h.classType,
         h.relation &&
-          (h.relation.startsWith('ci_') ? `${h.relation} (contraindication)` : h.relation),
-        h.via && `inherited via ingredient ${h.via}`,
+          (h.relation.startsWith('ci_')
+            ? `${literal(h.relation)} (contraindication)`
+            : literal(h.relation)),
+        h.via && `inherited via ingredient ${literal(h.via)}`,
       ].filter(Boolean);
       lines.push(
-        `- **${h.value}**${h.system ? ` (${h.system})` : ''} via ${h.source}${h.conceptType ? ` [${h.conceptType}]` : ''}${classFields.length > 0 ? ` · ${classFields.join(' · ')}` : ''}${h.description ? `: ${h.description}` : ''}`,
+        `- **${literal(h.value)}**${h.system ? ` (${h.system})` : ''} via ${literal(h.source)}${h.conceptType ? ` [${literal(h.conceptType)}]` : ''}${classFields.length > 0 ? ` · ${classFields.join(' · ')}` : ''}${h.description ? `: ${literal(h.description)}` : ''}`,
       );
     }
     return [{ type: 'text', text: lines.join('\n') }];

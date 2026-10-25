@@ -11,6 +11,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 
 import { getCodeIndexService } from '@/services/code-index/code-index-service.js';
 import { SYSTEM_LABELS } from '@/services/code-index/types.js';
+import { literal, tableRow } from './_render.js';
 
 const SOURCE_URL =
   'https://github.com/cyanheads/medical-codes-mcp-server/blob/main/src/mcp-server/tools/definitions/list-systems.tool.ts';
@@ -39,7 +40,7 @@ export const listSystemsTool = tool('medcode_list_systems', {
             releaseId: z
               .string()
               .describe(
-                'Release/version identifier baked into this build, e.g. "ICD-10-CM FY2026".',
+                'Release/version identifier baked into this build, e.g. "ICD-10-CM FY2027".',
               ),
             effectiveStart: z
               .string()
@@ -143,14 +144,16 @@ export const listSystemsTool = tool('medcode_list_systems', {
         s.effectiveStart && s.effectiveEnd
           ? `${s.effectiveStart} → ${s.effectiveEnd}`
           : (s.effectiveStart ?? s.effectiveEnd ?? '—');
-      lines.push(`| ${s.label} (${s.system}) | ${s.releaseId} | ${effective} | ${s.codeCount} |`);
+      lines.push(tableRow([`${s.label} (${s.system})`, s.releaseId, effective, s.codeCount]));
     }
     lines.push('');
     for (const s of result.systems) {
       // RxNorm has no release label; its date is when its snapshot was fetched.
+      const builtAt = literal(s.builtAt);
       const dated =
-        s.system === 'RXNORM' ? `RxNav snapshot fetched ${s.builtAt}` : `built ${s.builtAt}`;
-      if (s.sourceUrl) lines.push(`- **${s.label}** source: ${s.sourceUrl} (${dated})`);
+        s.system === 'RXNORM' ? `RxNav snapshot fetched ${builtAt}` : `built ${builtAt}`;
+      if (s.sourceUrl)
+        lines.push(`- **${literal(s.label)}** source: ${literal(s.sourceUrl)} (${dated})`);
     }
 
     lines.push('', '## RxClass drug-class layer', '');
@@ -162,14 +165,14 @@ export const listSystemsTool = tool('medcode_list_systems', {
       return [{ type: 'text', text: lines.join('\n') }];
     }
     lines.push(
-      `${layer.classCount} classes and ${layer.edgeCount} drug–class edges over the RxNorm concepts above, read by medcode_map_codes rxcui_to_classes and class_to_rxcuis. Source: ${layer.sourceUrl}`,
+      `${layer.classCount} classes and ${layer.edgeCount} drug–class edges over the RxNorm concepts above, read by medcode_map_codes rxcui_to_classes and class_to_rxcuis. Source: ${literal(layer.sourceUrl)}`,
       '',
       '| Source | Version | Classes | Edges | Fetched |',
       '|:---|:---|---:|---:|:---|',
     );
     for (const s of layer.sources) {
       lines.push(
-        `| ${s.source} | ${s.version ?? 'none published'} | ${s.classCount} | ${s.edgeCount} | ${s.fetchedAt} |`,
+        tableRow([s.source, s.version ?? 'none published', s.classCount, s.edgeCount, s.fetchedAt]),
       );
     }
     return [{ type: 'text', text: lines.join('\n') }];

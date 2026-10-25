@@ -11,9 +11,14 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   CodeIndexService,
   escapeLike,
+  noMatch,
   toFtsMatch,
 } from '@/services/code-index/code-index-service.js';
-import { ICD10PCS_PARTIAL_RE, ndcCandidates } from '@/services/code-index/detect.js';
+import {
+  ICD10PCS_PARTIAL_RE,
+  isIcd10cmDisplayForm,
+  ndcCandidates,
+} from '@/services/code-index/detect.js';
 import { ensureIndex } from '../helpers/index-fixture.ts';
 
 let svc: CodeIndexService;
@@ -261,6 +266,74 @@ describe('checkCode', () => {
       expect(r.result.status).toBe('unknown');
       expect(r.result.whyNot).toMatch(/out of scope/i);
       expect(r.result.whyNot).toMatch(/CPT/);
+    }
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/64
+describe('a HCPCS termination date is read against today', () => {
+  /**
+   * K0552's last valid date is 2019-12-31, and the fixture stores it as the build
+   * stores a past termination (`billable = 0`). Moving the clock before that date
+   * makes the row exactly what an index built ahead of a future-dated termination
+   * holds, so one row covers both sides of the date.
+   */
+  function at<T>(iso: string, fn: () => T): T {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(iso));
+    try {
+      return fn();
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+  const SCHEDULED =
+    'Scheduled for termination — its last valid date is 2019-12-31; not valid for claims after that date.';
+  const TERMINATED =
+    'Code terminated — its last valid date was 2019-12-31; no longer valid for current claims.';
+
+  it.each([
+    ['2019-06-01T12:00:00Z', 'valid_billable', SCHEDULED, true],
+    ['2019-12-31T00:00:00Z', 'valid_billable', SCHEDULED, true], // its last valid date
+    ['2019-12-31T23:59:59Z', 'valid_billable', SCHEDULED, true],
+    ['2020-01-01T00:00:00Z', 'terminated', TERMINATED, false], // the day after
+    ['2026-10-24T12:00:00Z', 'terminated', TERMINATED, false],
+  ] as const)('on %s checks K0552 as %s', (now, status, whyNot, billable) => {
+    at(now, () => {
+      for (const system of [undefined, 'HCPCS'] as const) {
+        expect(svc.checkCode('K0552', system)).toEqual({
+          kind: 'resolved',
+          result: { system: 'HCPCS', code: 'K0552', status, whyNot },
+        });
+      }
+      const decoded = svc.getByCode('K0552');
+      expect(decoded.kind === 'found' && CodeIndexService.project(decoded.row).billable).toBe(
+        billable,
+      );
+      const hits = svc.searchFts('infusion pump', { limit: 10, billableOnly: true }).codes;
+      expect(hits.some((hit) => hit.code === 'K0552')).toBe(billable);
+    });
+  });
+
+  it('finds K0552 in an unfiltered search on both sides of the date', () => {
+    for (const now of ['2019-06-01T12:00:00Z', '2020-01-01T00:00:00Z']) {
+      const hits = at(now, () => svc.searchFts('infusion pump', { limit: 10 }).codes);
+      expect(hits.map((hit) => hit.code)).toContain('K0552');
+    }
+  });
+
+  it('leaves a row with no termination date on its stored flags, whatever the date', () => {
+    for (const now of ['2019-06-01T12:00:00Z', '2099-01-01T00:00:00Z']) {
+      at(now, () => {
+        expect(svc.checkCode('J0120')).toEqual({
+          kind: 'resolved',
+          result: { system: 'HCPCS', code: 'J0120', status: 'valid_billable' },
+        });
+        expect(svc.checkCode('E11')).toMatchObject({ result: { status: 'valid_header' } });
+        const header = svc.searchFts('diabetes', { limit: 50, billableOnly: true }).codes;
+        expect(header.some((hit) => hit.code === 'E11')).toBe(false);
+        expect(header.some((hit) => hit.code === 'E11.9')).toBe(true);
+      });
     }
   });
 });
@@ -1116,7 +1189,7 @@ describe('checkCode under an explicit system', () => {
       const whyNot = missReason(code, system);
       expect(whyNot).toContain(`"${code}"`);
       expect(whyNot).toContain(`it is a code in ${label}`);
-      expect(whyNot).toContain(`\`system\` "${holder}"`);
+      expect(whyNot).toContain(`Re-call with system "${holder}"`);
       expect(whyNot).not.toMatch(/CPT|out of scope/);
     },
   );
@@ -1174,6 +1247,155 @@ describe('checkCode under an explicit system', () => {
     expect(missReason('ZZ9Q')).toBe(
       '"ZZ9Q" is not present in any bundled code system (ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm), and matches no bundled code shape.',
     );
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/59
+describe('noMatch', () => {
+  it.each([
+    ['ICD10CM', 'No ICD-10-CM code matches "X"'],
+    ['RXNORM', 'No RxNorm concept matches "X"'],
+    [['HCPCS'], 'No HCPCS Level II code matches "X"'],
+    [['ICD10PCS', 'RXNORM'], 'No ICD-10-PCS code or RxNorm concept matches "X"'],
+    [['ICD10CM', 'HCPCS'], 'No ICD-10-CM or HCPCS Level II code matches "X"'],
+    [['ICD10CM', 'ICD10PCS'], 'No ICD-10-CM or ICD-10-PCS code matches "X"'],
+  ] as const)('leads a miss in %j as %j', (systems, lead) => {
+    expect(noMatch(systems, 'X')).toBe(lead);
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/59
+describe('checkCode with no system names every shape the missed value fits', () => {
+  it.each([
+    // A 7-digit integer is RXCUI- and PCS-shaped; 7 digits is the commonest RXCUI length.
+    ['1049631', `No ICD-10-PCS code or RxNorm concept matches "1049631". ${CPT_SENTENCE}`],
+    ['R9999', 'No ICD-10-CM or HCPCS Level II code matches "R9999" in the bundled release.'],
+    ['A019999', 'No ICD-10-CM or ICD-10-PCS code matches "A019999" in the bundled release.'],
+  ])('words the multi-shape miss %s against every shape', (code, whyNot) => {
+    expect(missReason(code)).toBe(whyNot);
+  });
+
+  it.each([
+    // R9999 is also HCPCS-shaped, but the ICD-10-CM display form names ICD-10-CM alone.
+    ['R99.99', 'No ICD-10-CM code matches "R99.99" in the bundled release.'],
+    ['U9999', 'No HCPCS Level II code matches "U9999" in the bundled release.'],
+    ['99999999', `No RxNorm concept matches "99999999". ${CPT_SENTENCE}`],
+    // Dots are stripped before shape detection, so this is ICD-10-PCS-shaped alone.
+    ['ZZZ99.99', 'No ICD-10-PCS code matches "ZZZ99.99" in the bundled release.'],
+  ])('keeps the single-shape miss %s worded as it was', (code, whyNot) => {
+    expect(missReason(code)).toBe(whyNot);
+  });
+
+  it('keeps echoing the first shape as the miss system', () => {
+    const r = svc.checkCode('1049631');
+    expect(r.kind === 'resolved' && r.result).toMatchObject({
+      system: 'ICD10PCS',
+      code: '1049631',
+      status: 'unknown',
+    });
+  });
+
+  it('names only the searched shapes in a build without RxNorm', () => {
+    expect(withoutRxNorm(() => missReason('1049631'))).toBe(
+      `No ICD-10-PCS code matches "1049631" in the bundled release. ${CPT_SENTENCE_NO_RXNORM}`,
+    );
+    expect(withoutRxNorm(() => missReason('99999999'))).toBe(
+      `"99999999" looks like an RxNorm RXCUI or a CPT / HCPCS Level I code. ${CPT_SENTENCE_NO_RXNORM}`,
+    );
+  });
+
+  it('leaves the explicit-system miss of a multi-shape value on the named system', () => {
+    expect(missReason('1049631', 'ICD10PCS')).toBe(
+      `No ICD-10-PCS code matches "1049631" in the bundled release. ${CPT_SENTENCE}`,
+    );
+    expect(missReason('1049631', 'RXNORM')).toBe(
+      `No RxNorm concept matches "1049631". ${CPT_SENTENCE}`,
+    );
+    expect(missReason('R9999', 'HCPCS')).toBe(
+      'No HCPCS Level II code matches "R9999" in the bundled release.',
+    );
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/61
+describe('isIcd10cmDisplayForm', () => {
+  it.each(['A01.00', ' a01.00 ', 'E11.9', 'QA0.1234', 'ZZZ.9'])(
+    'reads %j as display form',
+    (raw) => {
+      expect(isIcd10cmDisplayForm(raw)).toBe(true);
+    },
+  );
+  it.each(['A0100', 'A01.', 'A0.100', 'A010.0', 'A01..00', 'A01.0.0', '.A0100', 'B00', ''])(
+    'does not read %j as display form',
+    (raw) => {
+      expect(isIcd10cmDisplayForm(raw)).toBe(false);
+    },
+  );
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/61
+describe('the ICD-10-CM display form of a code two systems hold', () => {
+  it('resolves to ICD-10-CM on every auto-detecting path, disclosing the other holder', () => {
+    for (const raw of ['A01.00', ' a01.00 ']) {
+      const got = svc.getByCode(raw);
+      expect(got.kind).toBe('found');
+      if (got.kind === 'found') {
+        expect(got.row).toMatchObject({ system: 'ICD10CM', code: 'A0100' });
+        expect(got.alsoIn).toEqual(['HCPCS']);
+      }
+
+      const checked = svc.checkCode(raw);
+      expect(checked.kind === 'resolved' && checked.result).toEqual({
+        system: 'ICD10CM',
+        code: 'A01.00',
+        status: 'valid_billable',
+        alsoIn: ['HCPCS'],
+      });
+
+      const mapped = svc.mapCode(raw, 'parents');
+      expect(mapped).toMatchObject({
+        kind: 'ok',
+        resolvedSystem: 'ICD10CM',
+        alsoIn: ['HCPCS'],
+        hits: [{ system: 'ICD10CM', value: 'A01.0' }],
+      });
+    }
+  });
+
+  it.each(['A0100', 'A0.100', 'A010.0', 'A01.0.0'])(
+    'keeps %j ambiguous, since only the display form names ICD-10-CM',
+    (raw) => {
+      expect(svc.getByCode(raw)).toEqual({ kind: 'ambiguous', systems: ['ICD10CM', 'HCPCS'] });
+      expect(svc.checkCode(raw)).toEqual({ kind: 'ambiguous', systems: ['ICD10CM', 'HCPCS'] });
+      expect(svc.mapCode(raw, 'parents')).toEqual({
+        kind: 'ambiguous',
+        systems: ['ICD10CM', 'HCPCS'],
+      });
+    },
+  );
+
+  it('leaves an explicit system authoritative over the dot', () => {
+    const forced = svc.getByCode('A01.00', 'HCPCS');
+    expect(forced.kind === 'found' && forced.row).toMatchObject({ system: 'HCPCS', code: 'A0100' });
+    expect(forced.kind === 'found' && forced.alsoIn).toEqual(['ICD10CM']);
+    expect(svc.checkCode('A01.00', 'HCPCS')).toMatchObject({
+      kind: 'resolved',
+      result: { system: 'HCPCS', code: 'A0100', alsoIn: ['ICD10CM'] },
+    });
+  });
+
+  it('leaves a dotted value ICD-10-CM does not hold resolving and missing as before', () => {
+    // J0120 is HCPCS alone: the dot is a preference among holders, never an exclusion.
+    const hcpcs = svc.getByCode('J01.20');
+    expect(hcpcs.kind === 'found' && hcpcs.row).toMatchObject({ system: 'HCPCS', code: 'J0120' });
+    expect(hcpcs.kind === 'found' && hcpcs.alsoIn).toEqual([]);
+    // B00 is the shape-decided CM/PCS collision; its undotted 3 characters carry no dot.
+    expect(svc.checkCode('B00')).toMatchObject({
+      result: { system: 'ICD10CM', alsoIn: ['ICD10PCS'] },
+    });
+    // An absent value keeps its miss: the display form names ICD-10-CM, as it did.
+    expect(missReason('R99.99')).toBe('No ICD-10-CM code matches "R99.99" in the bundled release.');
+    expect(svc.getByCode('R99.99').kind).toBe('not_found');
   });
 });
 

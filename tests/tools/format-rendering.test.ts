@@ -7,14 +7,17 @@
  * @module tests/tools/format-rendering.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeAll, describe, expect, it } from 'vitest';
 
+import { literal, literalAtHeadingEnd, tableRow } from '@/mcp-server/tools/definitions/_render.js';
 import { browseHierarchyTool } from '@/mcp-server/tools/definitions/browse-hierarchy.tool.js';
 import { checkCodeTool } from '@/mcp-server/tools/definitions/check-code.tool.js';
 import { getCodeTool } from '@/mcp-server/tools/definitions/get-code.tool.js';
+import { listSystemsTool } from '@/mcp-server/tools/definitions/list-systems.tool.js';
 import { mapCodesTool } from '@/mcp-server/tools/definitions/map-codes.tool.js';
 import { searchCodesTool } from '@/mcp-server/tools/definitions/search-codes.tool.js';
+import { readCommonMark } from '../helpers/commonmark.ts';
 import { ensureIndex } from '../helpers/index-fixture.ts';
 
 /** Flatten format() blocks into the text a content-only client would receive. */
@@ -22,8 +25,361 @@ function textOf(blocks: { text?: string; type: string }[]): string {
   return blocks.flatMap((block) => (block.type === 'text' ? [block.text ?? ''] : [])).join('\n');
 }
 
+/**
+ * A value carrying every construct CommonMark (with GFM tables) could read as
+ * syntax: emphasis, an intraword-safe underscore pair, a code span, a link, a
+ * table pipe, inline HTML, a backslash before punctuation and before a letter,
+ * and a trailing ` #` an ATX heading would drop as its closing sequence. `lead`
+ * opens the value with a list marker or a heading marker, for values that start
+ * a line of their own. `tag` keeps each field's value distinct.
+ */
+function hazard(tag: string, lead: '-' | '#' = '-'): string {
+  return `${lead} *${tag}* _u_ \`t\` [x](y) a|b <b>h</b> c:\\* \\q #`;
+}
+
+/** Assert a CommonMark parse of `text` reads every value back exactly as written. */
+function expectReadsBack(text: string, values: readonly (string | null | undefined)[]): void {
+  const read = readCommonMark(text);
+  for (const value of values) {
+    if (value) expect(read).toContain(value);
+  }
+}
+
 beforeAll(async () => {
   await ensureIndex();
+});
+
+/**
+ * The rendering seam every tool routes untrusted text through, tabled once in each
+ * Markdown position it serves; the per-tool cases below prove only the wiring.
+ */
+describe('the _render literal seam', () => {
+  const VALUES = [
+    hazard('lead-dash'),
+    hazard('lead-hash', '#'),
+    'plain text stays plain',
+    'on-q* pump',
+    'aspirin 325 MG Oral Tablet [Bayer Aspirin]',
+    'Pack [Kit < 40 KG]',
+    ' edge spaces ',
+    'ends in a backslash \\',
+  ];
+
+  it.each(VALUES)('reads %j back inside a bold label, a list item, and a paragraph', (value) => {
+    expectReadsBack(`- **${literal(value)}**: ${literal(value)}`, [
+      `⟨strong⟩${value}⟨/strong⟩: ${value}`,
+    ]);
+    expect(readCommonMark(literal(value))).toBe(value);
+  });
+
+  it('leaves plain text byte-identical', () => {
+    expect(literal('Type 2 diabetes mellitus, snake_case <=50 AT&T')).toBe(
+      'Type 2 diabetes mellitus, snake_case <=50 AT&T',
+    );
+  });
+
+  it.each([
+    ...VALUES,
+    'foo #',
+    '#',
+    '##',
+    '# lead and close #',
+    'escaped hash \\#',
+    'two backslashes \\\\#',
+    'C#',
+  ])('keeps %j whole at the end of a heading', (value) => {
+    expect(readCommonMark(`## parents: ${literalAtHeadingEnd(value)}`)).toBe(
+      `⟨heading_open⟩\n\nparents: ${value}\n\n⟨heading_close⟩`,
+    );
+  });
+
+  it('renders table cells that keep their pipes and render numbers as themselves', () => {
+    const value = hazard('cell', '#');
+    const read = readCommonMark(`| A | B |\n|:--|--:|\n${tableRow([value, 42])}`);
+    expect(read).toContain(`⟨td_open⟩\n\n${value}\n\n⟨td_close⟩`);
+    expect(read).toContain('⟨td_open⟩\n\n42\n\n⟨td_close⟩');
+    expect(tableRow(['ICD-10-CM (ICD10CM)', 'FY2027', 74_719])).toBe(
+      '| ICD-10-CM (ICD10CM) | FY2027 | 74719 |',
+    );
+  });
+
+  it('reads a URL back as the same text', () => {
+    const url = 'https://www.cms.gov/files/zip/a_b_c.zip?x=1&amp=2';
+    expect(readCommonMark(literal(url))).toBe(url);
+  });
+
+  /**
+   * literalAtHeadingEnd walks the trailing backslash run before a final `#`; with
+   * the escape it wraps, its cost must stay linear in the value's length. Each
+   * shape doubles from its start size over a 64× span, checking an absolute CPU
+   * bound at every size before the next and the full-span ratio at the end. The
+   * digit run carries the span to 320k; the others stay at or below 80k.
+   */
+  it.each([
+    ['a long digit run', 5_000, (n: number) => `${'7'.repeat(n)} #`],
+    ['a backslash run before a closing hash', 1_250, (n: number) => `${'\\'.repeat(n)}#`],
+    ['a run of hashes', 1_250, (n: number) => '#'.repeat(n)],
+    ['one long line ending in a break', 1_250, (n: number) => `${'§1 x'.repeat(n / 4)}\ny #`],
+    ['breaks throughout', 1_250, (n: number) => `${'  \r\n'.repeat(n / 4)}#`],
+  ] as const)('timing: stays linear on %s', (_shape, start, make) => {
+    const TRIALS = 3;
+    const REPS = 5;
+    const cpuMs = (value: string): number => {
+      let best = Number.POSITIVE_INFINITY;
+      for (let trial = 0; trial < TRIALS; trial++) {
+        const before = process.threadCpuUsage();
+        for (let rep = 0; rep < REPS; rep++) literalAtHeadingEnd(value);
+        const spent = process.threadCpuUsage(before);
+        best = Math.min(best, (spent.user + spent.system) / 1000);
+      }
+      return best;
+    };
+    cpuMs(make(start)); // warm up
+    const first = cpuMs(make(start));
+    let last = first;
+    for (let n = start * 2; n <= start * 64; n *= 2) {
+      last = cpuMs(make(n));
+      // 200 ms of thread CPU per call at most, at every size.
+      expect(last).toBeLessThan(200 * REPS);
+    }
+    expect(last / Math.max(first, 0.05)).toBeLessThan(256);
+  });
+});
+
+describe('content[] reads back what structuredContent carries', () => {
+  it('get_code renders every decoded field and every miss as written', () => {
+    const out = getCodeTool.output.parse({
+      found: [
+        {
+          system: 'ICD10CM',
+          code: hazard('code'),
+          description: hazard('description', '#'),
+          shortDescription: hazard('short'),
+          billable: false,
+          header: true,
+          chapter: hazard('chapter'),
+          parent: hazard('parent'),
+          children: [
+            {
+              system: 'ICD10CM',
+              code: hazard('child-code'),
+              description: hazard('child-description'),
+              shortDescription: hazard('child-short'),
+              billable: true,
+              header: false,
+              chapter: hazard('child-chapter'),
+            },
+          ],
+          childrenTruncated: false,
+        },
+      ],
+      notFound: [{ code: hazard('missing'), reason: hazard('reason', '#') }],
+    });
+    const found = out.found[0];
+    const child = found?.children?.[0];
+    expectReadsBack(textOf(getCodeTool.format!(out)), [
+      found?.code,
+      found?.description,
+      found?.shortDescription,
+      found?.chapter,
+      found?.parent,
+      child?.code,
+      child?.description,
+      child?.shortDescription,
+      child?.chapter,
+      out.notFound[0]?.code,
+      out.notFound[0]?.reason,
+    ]);
+  });
+
+  it('get_code echoes caller codes and the reasons that quote them as written', async () => {
+    const result = await runToolContract(getCodeTool, {
+      codes: ['E11.9', '*Q*', '[x](y)', '<b>z</b>', '`t`', 'a|b'],
+    } as never);
+    const { notFound } = result.structuredContent as {
+      notFound: { code: string; reason: string }[];
+    };
+    // structuredContent echoes each code, and the reason quoting it, as sent.
+    const sent = ['*Q*', '[x](y)', '<b>z</b>', '`t`', 'a|b'];
+    expect(notFound.map((miss) => miss.code)).toEqual(sent);
+    for (const [i, miss] of notFound.entries()) expect(miss.reason).toContain(`"${sent[i]}"`);
+    expectReadsBack(
+      textOf(result.content as { text?: string; type: string }[]),
+      notFound.flatMap((miss) => [miss.code, miss.reason]),
+    );
+  });
+
+  it('search_codes renders each row, and the empty-result notice and filters echo the caller', async () => {
+    const out = searchCodesTool.output.parse({
+      codes: [
+        {
+          system: 'HCPCS',
+          code: hazard('code'),
+          description: hazard('description'),
+          shortDescription: hazard('short'),
+          billable: true,
+          header: false,
+          chapter: hazard('chapter'),
+        },
+      ],
+    });
+    const row = out.codes[0];
+    expectReadsBack(textOf(searchCodesTool.format!(out)), [
+      row?.code,
+      row?.description,
+      row?.shortDescription,
+      row?.chapter,
+    ]);
+
+    const query = 'zzqx*nomatch* [x](y) `t` <b>h</b>';
+    const result = await runToolContract(searchCodesTool, { query, chapter: 'c*|_d_' } as never);
+    const page = result.structuredContent as {
+      appliedFilters: { chapter: string };
+      notice?: string;
+    };
+    expect(page.appliedFilters.chapter).toBe('C*|_D_');
+    // structuredContent quotes the caller's query as sent; content[] reads the whole notice back.
+    expect(page.notice).toContain(`No codes matched "${query}"`);
+    expectReadsBack(textOf(result.content as { text?: string; type: string }[]), [
+      page.notice,
+      'chapter=C*|_D_',
+    ]);
+  });
+
+  it('check_code renders the code and its why-not as written', () => {
+    const out = checkCodeTool.output.parse({
+      system: 'HCPCS',
+      code: hazard('code'),
+      status: 'terminated',
+      billable: false,
+      whyNot: hazard('why-not', '#'),
+    });
+    expectReadsBack(textOf(checkCodeTool.format!(out)), [out.code, out.whyNot]);
+  });
+
+  it('map_codes renders the source and every hit field as written', () => {
+    const out = mapCodesTool.output.parse({
+      from: hazard('from'),
+      direction: 'rxcui_to_classes',
+      resolvedSystem: 'RXNORM',
+      hits: [
+        {
+          source: hazard('source'),
+          system: null,
+          value: hazard('value'),
+          description: hazard('description'),
+          conceptType: hazard('concept-type'),
+          classType: 'EPC',
+          relation: hazard('relation'),
+          via: hazard('via'),
+        },
+      ],
+    });
+    const hit = out.hits[0];
+    expectReadsBack(textOf(mapCodesTool.format!(out)), [
+      out.from,
+      hit?.source,
+      hit?.value,
+      hit?.description,
+      hit?.conceptType,
+      hit?.relation,
+      hit?.via,
+    ]);
+  });
+
+  it('browse_hierarchy renders child codes and axis table cells as written', () => {
+    const out = browseHierarchyTool.output.parse({
+      kind: 'axes',
+      codes: [
+        {
+          system: 'HCPCS',
+          code: hazard('code'),
+          description: hazard('description'),
+          shortDescription: hazard('short'),
+          billable: false,
+          header: true,
+          chapter: hazard('chapter'),
+        },
+      ],
+      axes: [{ position: 1, value: hazard('value'), meaning: hazard('meaning', '#') }],
+    });
+    const row = out.codes[0];
+    expectReadsBack(textOf(browseHierarchyTool.format!(out)), [
+      row?.code,
+      row?.description,
+      row?.shortDescription,
+      row?.chapter,
+      out.axes[0]?.value,
+      out.axes[0]?.meaning,
+    ]);
+  });
+
+  // The notice wiring, one case per tool that quotes input or data in it (search_codes above).
+  it.each([
+    [
+      'browse_hierarchy',
+      browseHierarchyTool,
+      { system: 'ICD10CM', node: 'A00.0' },
+      'No children under "A00.0" in ICD10CM — it may be a leaf code. Omit `node` to list the top level, or browse a parent category.',
+    ],
+    [
+      'map_codes',
+      mapCodesTool,
+      { from: 'N0000008836', direction: 'class_to_rxcuis', classType: 'EPC' },
+      '"N0000008836" is the PE class "Decreased Prostaglandin Production", not a class of type EPC. Re-call with `classType` "PE", or omit `classType`.',
+    ],
+  ] as const)(
+    '%s carries its notice as written on both surfaces',
+    async (_tool, def, args, notice) => {
+      const result = await runToolContract(def as never, args as never);
+      expect((result.structuredContent as { notice?: string }).notice).toBe(notice);
+      expectReadsBack(textOf(result.content as { text?: string; type: string }[]), [notice]);
+    },
+  );
+
+  it('list_systems renders release metadata, table cells, and source URLs as written', () => {
+    const out = listSystemsTool.output.parse({
+      systems: [
+        {
+          system: 'HCPCS',
+          label: 'HCPCS Level II',
+          releaseId: hazard('release'),
+          effectiveStart: hazard('start'),
+          effectiveEnd: hazard('end'),
+          codeCount: 3,
+          sourceUrl: 'https://www.cms.gov/files/zip/a_b_c.zip?x=1&amp=2',
+          builtAt: hazard('built'),
+        },
+      ],
+      classLayer: {
+        classCount: 2,
+        edgeCount: 5,
+        sourceUrl: 'https://rxnav.nlm.nih.gov/REST/rxclass/',
+        sources: [
+          {
+            source: hazard('source'),
+            version: hazard('version'),
+            classCount: 2,
+            edgeCount: 5,
+            fetchedAt: hazard('fetched'),
+          },
+        ],
+      },
+    });
+    const system = out.systems[0];
+    const source = out.classLayer?.sources[0];
+    expectReadsBack(textOf(listSystemsTool.format!(out)), [
+      system?.releaseId,
+      system?.effectiveStart,
+      system?.effectiveEnd,
+      system?.sourceUrl,
+      system?.builtAt,
+      out.classLayer?.sourceUrl,
+      source?.source,
+      source?.version,
+      source?.fetchedAt,
+    ]);
+  });
 });
 
 describe('medcode_get_code format', () => {

@@ -20,8 +20,8 @@ import {
   unmappedNdcMessage,
 } from '@/services/code-index/code-index-service.js';
 import { isBareInteger } from '@/services/code-index/detect.js';
-import { SYSTEM_IDS, SYSTEM_LABELS } from '@/services/code-index/types.js';
-import { renderCodeBlock, renderCodeLine } from './_render.js';
+import { SYSTEM_IDS, SYSTEM_LABELS, type SystemId } from '@/services/code-index/types.js';
+import { literal, renderCodeBlock, renderCodeLine } from './_render.js';
 import { nonBlankString } from './_schema.js';
 
 const SOURCE_URL =
@@ -29,7 +29,7 @@ const SOURCE_URL =
 
 /** Appended to the miss for an NDC a forced `system` kept from the NDC decode. */
 const FORCED_NDC_NOTE =
-  'It is a National Drug Code (NDC): omit `system` to decode it to its RxNorm product.';
+  'It is a National Drug Code (NDC): omit system to decode it to its RxNorm product.';
 
 const DecodedCodeSchema = z
   .object({
@@ -57,7 +57,7 @@ const DecodedCodeSchema = z
       .boolean()
       .nullable()
       .describe(
-        'True when the code is a billable leaf. False for headers/categories and non-billable codes. Null when the system has no billing concept (RxNorm).',
+        'True when the code is a billable leaf. False for headers/categories, non-billable codes, and HCPCS codes whose last valid date has passed. Null when the system has no billing concept (RxNorm).',
       ),
     header: z
       .boolean()
@@ -130,7 +130,7 @@ type NotFoundCode = z.infer<typeof NotFoundCodeSchema>;
 export const getCodeTool = tool('medcode_get_code', {
   title: 'Get Medical Code',
   description:
-    'Decode one or more US medical codes to their official descriptions across ICD-10-CM (diagnoses), ICD-10-PCS (inpatient procedures), HCPCS Level II (supplies/drugs/services), and RxNorm (drugs, by RXCUI). Also decodes a National Drug Code (NDC) directly to its RxNorm product offline, tagged `source: "NDC"` — hyphenated in an FDA segment configuration (4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2) or as bare 10/11 digits; any other segment widths are malformed and stay unresolved. Auto-detects the system from each code\'s shape; pass an explicit `system` only when a value is genuinely ambiguous. Accepts 1–50 codes and returns partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason, so one bad code never fails the batch. Set `includeHierarchy` to attach each code\'s parent and immediate children (with a `childrenTruncated` flag when a code has more children than the cap returns — walk the full set via medcode_browse_hierarchy or medcode_map_codes). The resolved `system` is echoed on every result for chaining into a billability check or a medcode_map_codes parents/children walk; a bare integer that resolves nowhere is named as a possible CPT / HCPCS Level I code, which is out of scope, except a bare 10/11-digit one, which is named as an NDC no bundled drug maps to; a code string that also exists in another bundled system carries `alsoInSystems` naming it, so a single answer to a colliding code is never mistaken for the only one.',
+    'Decode one or more US medical codes to their official descriptions across ICD-10-CM (diagnoses), ICD-10-PCS (inpatient procedures), HCPCS Level II (supplies/drugs/services), and RxNorm (drugs, by RXCUI). Also decodes a National Drug Code (NDC) directly to its RxNorm product offline, tagged `source: "NDC"` — hyphenated in an FDA segment configuration (4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2) or as bare 10/11 digits; any other segment widths are malformed and stay unresolved. Auto-detects the system from each code\'s shape, and a code written in ICD-10-CM dotted form (`A01.00`) resolves to ICD-10-CM; pass an explicit `system` only when a value is genuinely ambiguous. Accepts 1–50 codes and returns partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason, so one bad code never fails the batch. Only a batch where nothing resolves fails: with ambiguous_system and `candidateSystems` when every code exists in more than one bundled system, otherwise with no_codes_found. Set `includeHierarchy` to attach each code\'s parent and immediate children (with a `childrenTruncated` flag when a code has more children than the cap returns — walk the full set via medcode_browse_hierarchy or medcode_map_codes). The resolved `system` is echoed on every result for chaining into a billability check or a medcode_map_codes parents/children walk; a bare integer that resolves nowhere is named as a possible CPT / HCPCS Level I code, which is out of scope, except a bare 10/11-digit one, which is named as an NDC no bundled drug maps to; a code string that also exists in another bundled system carries `alsoInSystems` naming it, so a single answer to a colliding code is never mistaken for the only one.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -169,9 +169,15 @@ export const getCodeTool = tool('medcode_get_code', {
     {
       reason: 'no_codes_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'None of the requested codes resolved — in any bundled system, or in the explicit `system` when one is given (the message then names any other bundled system that holds a code).',
+      when: 'None of the requested codes resolved — in any bundled system, or in the explicit `system` when one is given. The message names each code another bundled system holds and each code present in more than one system, with those systems.',
       recovery:
         'Verify code formatting, or call medcode_search_codes with a description to find the right code.',
+    },
+    {
+      reason: 'ambiguous_system',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'Every requested code is present in more than one bundled system and no `system` was given; `candidateSystems` lists the union of those systems.',
+      recovery: 'Re-call with an explicit system to disambiguate.',
     },
   ],
 
@@ -187,6 +193,8 @@ export const getCodeTool = tool('medcode_get_code', {
     const unmappedNdcs: string[] = [];
     // Codes a forced `system` missed that another bundled system holds, with the holders.
     const heldCodes: string[] = [];
+    // Codes present in more than one bundled system, with those systems.
+    const ambiguous: { code: string; systems: SystemId[] }[] = [];
 
     for (const raw of input.codes) {
       // First-class offline NDC decode: an NDC (hyphenated, or bare 10/11-digit)
@@ -254,9 +262,10 @@ export const getCodeTool = tool('medcode_get_code', {
         outOfScope.push(raw.trim());
         notFound.push({ code: raw, reason: `${reason} ${svc.outOfScopeNote()}` });
       } else if (result.kind === 'ambiguous') {
+        ambiguous.push({ code: raw.trim(), systems: result.systems });
         notFound.push({
           code: raw,
-          reason: `"${raw}" matches multiple systems — re-call with an explicit \`system\` to disambiguate.`,
+          reason: `"${raw}" matches multiple systems — re-call with an explicit system to disambiguate.`,
           candidateSystems: result.systems,
         });
       } else {
@@ -277,16 +286,37 @@ export const getCodeTool = tool('medcode_get_code', {
     });
 
     if (found.length === 0) {
+      const ambiguousList = ambiguous
+        .map(({ code, systems }) => `"${code}" (${systems.join(', ')})`)
+        .join(', ');
+      // Every code failed on ambiguity alone, so one re-call with a `system` from
+      // the union — which applies to every code — resolves the batch, as the sibling
+      // tools' ambiguous_system recovers.
+      if (ambiguous.length === input.codes.length) {
+        throw ctx.fail(
+          'ambiguous_system',
+          `Every requested code exists in more than one bundled system: ${ambiguousList}.`,
+          {
+            candidateSystems: SYSTEM_IDS.filter((sys) =>
+              ambiguous.some(({ systems }) => systems.includes(sys)),
+            ),
+          },
+        );
+      }
       // The per-code reasons do not travel with this error, so the held-elsewhere,
-      // out-of-scope, and NDC notes do — naming their inputs, since a batch can fail
-      // for mixed causes. Under a named `system`, only that system was searched.
+      // ambiguity, out-of-scope, and NDC notes do — naming their inputs, since a
+      // batch can fail for mixed causes. Under a named `system`, only that system
+      // was searched.
       const quoted = (codes: string[]) => codes.map((code) => `"${code}"`).join(', ');
       const scope = input.system
-        ? `${SYSTEM_LABELS[input.system]}, the \`system\` this call named`
+        ? `${SYSTEM_LABELS[input.system]}, the system this call named`
         : 'any bundled system';
       const notes = [
         heldCodes.length > 0
-          ? ` Codes another bundled system holds: ${heldCodes.join(', ')}. Re-call with that \`system\` to decode each one.`
+          ? ` Codes another bundled system holds: ${heldCodes.join(', ')}. Re-call with that system to decode each one.`
+          : '',
+        ambiguous.length > 0
+          ? ` Codes in more than one bundled system: ${ambiguousList}. Re-call with one of those as system to decode each one.`
           : '',
         outOfScope.length > 0
           ? ` Bare integers with no match: ${quoted(outOfScope)}. ${svc.outOfScopeNote()}`
@@ -295,7 +325,7 @@ export const getCodeTool = tool('medcode_get_code', {
           ? ` NDCs in a valid format that no bundled drug maps to: ${quoted(unmappedNdcs)}.`
           : '',
         forcedNdcs.length > 0
-          ? ` National Drug Codes (NDC) looked up under an explicit \`system\`: ${quoted(forcedNdcs)}. Omit \`system\` to decode an NDC to its RxNorm product.`
+          ? ` National Drug Codes (NDC) looked up under an explicit system: ${quoted(forcedNdcs)}. Omit system to decode an NDC to its RxNorm product.`
           : '',
       ].join('');
       throw ctx.fail(
@@ -323,7 +353,8 @@ export const getCodeTool = tool('medcode_get_code', {
       // gating them on content would render them exactly like the absent hierarchy
       // of a plain lookup. Presence is the only signal that separates "hierarchy
       // requested, child set empty and complete" from "hierarchy not requested".
-      if (c.parent !== undefined) lines.push(`**Parent:** ${c.parent ?? '(none — root)'}`);
+      if (c.parent !== undefined)
+        lines.push(`**Parent:** ${c.parent === null ? '(none — root)' : literal(c.parent)}`);
       if (c.children !== undefined) {
         lines.push(`**Children (${c.children.length}):**`);
         for (const k of c.children) lines.push(renderCodeLine(k));
@@ -341,7 +372,7 @@ export const getCodeTool = tool('medcode_get_code', {
       lines.push(`### Not found (${result.notFound.length})`);
       for (const n of result.notFound) {
         const cands = n.candidateSystems?.length ? ` [${n.candidateSystems.join(', ')}]` : '';
-        lines.push(`- **${n.code}**: ${n.reason}${cands}`);
+        lines.push(`- **${literal(n.code)}**: ${literal(n.reason)}${cands}`);
       }
     }
     return [{ type: 'text', text: lines.join('\n').trim() }];

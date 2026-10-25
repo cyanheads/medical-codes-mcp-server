@@ -14,6 +14,7 @@ import { getCodeTool } from '@/mcp-server/tools/definitions/get-code.tool.js';
 import { listSystemsTool } from '@/mcp-server/tools/definitions/list-systems.tool.js';
 import { mapCodesTool } from '@/mcp-server/tools/definitions/map-codes.tool.js';
 import { searchCodesTool } from '@/mcp-server/tools/definitions/search-codes.tool.js';
+import { displayCode } from '@/services/code-index/schema.js';
 import { ensureBundledIndex } from '../helpers/bundled-index.ts';
 
 interface CaughtError {
@@ -58,7 +59,7 @@ describe('system auto-detection against real overlaps', () => {
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/29
   it('decodes the header rows the index materializes without an explicit system', async () => {
     // Every one of these is a real row browse and search hand back: the HCPCS
-    // letter bucket, and two of the 914 three-character ICD-10-PCS table rows.
+    // letter bucket, and two of the 918 three-character ICD-10-PCS table rows.
     const out = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['J', '001', '00B'] }),
       createMockContext({ errors: getCodeTool.errors }),
@@ -75,8 +76,8 @@ describe('system auto-detection against real overlaps', () => {
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/29
   it('decodes release codes whose leading characters no complete shape admits', async () => {
     // The ICD-10-CM shape excludes a leading `U` and requires a digit in position
-    // 2, so the emergency-use COVID-19 chapters and the FY2026 `QA0…` genetic
-    // codes match no complete shape at all — `QA00101` is even seven characters,
+    // 2, so the emergency-use COVID-19 chapters and the `QA0…` genetic codes (added
+    // in FY2026) match no complete shape at all — `QA00101` is even seven characters,
     // so it reads as ICD-10-PCS-shaped and resolves in ICD-10-CM only by membership.
     const out = await getCodeTool.handler(
       getCodeTool.input.parse({ codes: ['U07.1', 'U09.9', 'QA00101'] }),
@@ -136,13 +137,16 @@ describe('system auto-detection against real overlaps', () => {
     });
 
     it('finds the collision set the release actually carries', () => {
-      expect(shared).toHaveLength(60);
+      expect(shared).toHaveLength(61);
       expect(shared.slice(0, 3)).toEqual(['B00', 'B01', 'B02']);
+      // FY2027 adds ICD-10-PCS table B85 (Imaging, Eye, Other Imaging) beside the
+      // ICD-10-CM category B85 (Pediculosis and phthiriasis).
+      expect(shared).toContain('B85');
     });
 
     // The load-bearing constraint: the fix is a disclosure, so no lookup that
     // works today may change. Widening these to full membership instead would
-    // convert all 60 into `ambiguous_system` and break every caller who meant the
+    // convert every one into `ambiguous_system` and break every caller who meant the
     // diagnosis — which is why the resolution is pinned here, not just the notice.
     it('still resolves every one as ICD-10-CM, with none turned ambiguous', async () => {
       for (let start = 0; start < shared.length; start += 50) {
@@ -214,6 +218,81 @@ describe('system auto-detection against real overlaps', () => {
       code: 'A0100',
       system: 'HCPCS',
       description: 'Non-emergency transportation; taxi',
+    });
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/61
+  describe('code strings ICD-10-CM and HCPCS both hold, written in ICD-10-CM display form', () => {
+    // Derived from the shipped corpus: every HCPCS code that is also an ICD-10-CM
+    // code. Undotted each is ambiguous; the dot, which only ICD-10-CM codes carry,
+    // names ICD-10-CM and leaves HCPCS as the disclosed second holder.
+    let shared: string[] = [];
+
+    beforeAll(async () => {
+      const svc = await ensureBundledIndex();
+      const top = svc.browse('HCPCS', undefined, { offset: 0, limit: 200 });
+      const buckets = top.kind === 'codes' ? top.codes.map((entry) => entry.code) : [];
+      const hcpcs: string[] = [];
+      for (const bucket of buckets) {
+        for (let offset = 0; ; offset += 200) {
+          const page = svc.browse('HCPCS', bucket, { offset, limit: 200 });
+          if (page.kind !== 'codes') break;
+          hcpcs.push(...page.codes.map((entry) => entry.code));
+          if (!page.hasMore) break;
+        }
+      }
+      shared = hcpcs.filter((code) => svc.getByCode(code, 'ICD10CM').kind === 'found');
+    });
+
+    it('finds the collision set the release actually carries', () => {
+      expect(shared).toHaveLength(685);
+      expect(shared).toEqual(expect.arrayContaining(['A0100', 'A0225', 'J0120']));
+    });
+
+    it('decodes every one in display form as ICD-10-CM, naming HCPCS', async () => {
+      const dotted = shared.map((code) => displayCode('ICD10CM', code));
+      for (let start = 0; start < dotted.length; start += 50) {
+        const batch = dotted.slice(start, start + 50);
+        const out = await getCodeTool.handler(
+          getCodeTool.input.parse({ codes: batch }),
+          createMockContext({ errors: getCodeTool.errors }),
+        );
+        expect(out.notFound).toEqual([]);
+        expect(out.found.map((entry) => entry.code)).toEqual(batch);
+        expect(out.found.map((entry) => entry.system)).toEqual(batch.map(() => 'ICD10CM'));
+        expect(out.found.map((entry) => entry.alsoInSystems)).toEqual(batch.map(() => ['HCPCS']));
+      }
+    });
+
+    it('validates every one in display form as ICD-10-CM, and the undotted form stays ambiguous', async () => {
+      for (const code of shared) {
+        const display = displayCode('ICD10CM', code);
+        const out = await checkCodeTool.handler(
+          checkCodeTool.input.parse({ code: display }),
+          createMockContext({ errors: checkCodeTool.errors }),
+        );
+        expect(out).toMatchObject({ system: 'ICD10CM', code: display, alsoInSystems: ['HCPCS'] });
+
+        const err = await caught(() =>
+          checkCodeTool.handler(
+            checkCodeTool.input.parse({ code }),
+            createMockContext({ errors: checkCodeTool.errors }),
+          ),
+        );
+        expect(err.data?.reason).toBe('ambiguous_system');
+      }
+    });
+
+    // https://github.com/cyanheads/medical-codes-mcp-server/issues/58
+    it('fails a full get_code batch of undotted ones with ambiguous_system and the union', async () => {
+      const result = await runToolContract(getCodeTool, { codes: shared.slice(0, 50) } as never);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: -32602,
+          data: { reason: 'ambiguous_system', candidateSystems: ['ICD10CM', 'HCPCS'] },
+        },
+      });
     });
   });
 });
@@ -599,20 +678,20 @@ describe('release provenance and current-code status', () => {
     ).toEqual([
       {
         system: 'ICD10CM',
-        releaseId: 'ICD-10-CM FY2026',
-        effectiveStart: '2025-10-01',
-        effectiveEnd: '2026-09-30',
+        releaseId: 'ICD-10-CM FY2027',
+        effectiveStart: '2026-10-01',
+        effectiveEnd: '2027-09-30',
       },
       {
         system: 'ICD10PCS',
-        releaseId: 'ICD-10-PCS FY2026',
-        effectiveStart: '2025-10-01',
-        effectiveEnd: '2026-09-30',
+        releaseId: 'ICD-10-PCS FY2027',
+        effectiveStart: '2026-10-01',
+        effectiveEnd: '2027-09-30',
       },
       {
         system: 'HCPCS',
-        releaseId: 'HCPCS 2026',
-        effectiveStart: '2026-01-01',
+        releaseId: 'HCPCS 2026 October',
+        effectiveStart: '2026-10-01',
         effectiveEnd: '2026-12-31',
       },
       {
@@ -622,6 +701,25 @@ describe('release provenance and current-code status', () => {
         effectiveEnd: null,
       },
     ]);
+  });
+
+  it('carries every row of the ICD-10 and HCPCS release files', async () => {
+    const out = await listSystemsTool.handler(listSystemsTool.input.parse({}), createMockContext());
+    const counts = Object.fromEntries(out.systems.map((s) => [s.system, s.codeCount]));
+    // ICD-10-CM: every line of icd10cm-order-2027.txt. ICD-10-PCS: every line of
+    // icd10pcs_order_2027.txt (79,256 codes + 918 table rows; the errata codes
+    // XW0U3CC and XW0U4CC are not in the published file). HCPCS: the 8,770 codes of
+    // HCPC2026_OCT_ANWEB_09232026.txt plus 17 letter buckets.
+    expect(counts).toMatchObject({ ICD10CM: 98_403, ICD10PCS: 80_174, HCPCS: 8_787 });
+  });
+
+  // RxNorm + RxClass snapshot pins: these move with every RxNav and RxClass refetch.
+  it('dates and counts the RxNorm layer by its RxNav snapshot', async () => {
+    const out = await listSystemsTool.handler(listSystemsTool.input.parse({}), createMockContext());
+    expect(out.systems.find((s) => s.system === 'RXNORM')).toMatchObject({
+      codeCount: 56_085,
+      builtAt: '2026-10-25T01:11:21.811Z',
+    });
   });
 
   it('returns a terminated code as a successful non-billable verdict, not unknown', async () => {
@@ -636,6 +734,53 @@ describe('release provenance and current-code status', () => {
       billable: false,
     });
     expect(out.whyNot).toMatch(/2025-12-31/);
+  });
+
+  // Codes the FY2027 ICD-10 and October 2026 HCPCS releases added, removed, or
+  // reclassified. An ICD-10 code deleted from the order file is simply absent, so
+  // it answers unknown_code; only HCPCS keeps terminated rows with their date.
+  it.each([
+    ['C78.31', 'ICD10CM', 'valid_billable'], // added FY2027
+    ['D69.1', 'ICD10CM', 'valid_header'], // billable in FY2026, a header in FY2027
+    ['028F3Z0', 'ICD10PCS', 'valid_billable'], // added FY2027
+    ['A2040', 'HCPCS', 'valid_billable'], // added 2026-04-01
+  ] as const)('check_code answers %s as %s %s', async (code, system, status) => {
+    const out = await checkCodeTool.handler(
+      checkCodeTool.input.parse({ code }),
+      createMockContext({ errors: checkCodeTool.errors }),
+    );
+    expect(out).toMatchObject({ system, code, status });
+  });
+
+  it('answers a code the HCPCS quarter terminated as terminated, with its date', async () => {
+    const out = await checkCodeTool.handler(
+      checkCodeTool.input.parse({ code: 'C9145' }),
+      createMockContext({ errors: checkCodeTool.errors }),
+    );
+    expect(out).toMatchObject({
+      system: 'HCPCS',
+      code: 'C9145',
+      status: 'terminated',
+      billable: false,
+      whyNot:
+        'Code terminated — its last valid date was 2026-03-31; no longer valid for current claims.',
+    });
+  });
+
+  it.each([
+    ['S23.420A', 'ICD10CM'], // deleted FY2027
+    ['X2KB317', 'ICD10PCS'], // deleted FY2027
+    // Added by the CMS FY2027 errata but absent from the published order file.
+    ['XW0U3CC', 'ICD10PCS'],
+    ['XW0U4CC', 'ICD10PCS'],
+  ] as const)('answers %s, absent from the %s release, as unknown_code', async (code, system) => {
+    const err = await caught(() =>
+      checkCodeTool.handler(
+        checkCodeTool.input.parse({ code, system }),
+        createMockContext({ errors: checkCodeTool.errors }),
+      ),
+    );
+    expect(err.data?.reason).toBe('unknown_code');
   });
 });
 
@@ -695,9 +840,10 @@ describe('billing-system output, pinned on both surfaces', () => {
         code: 'C5271',
         status: 'terminated',
         billable: false,
-        whyNot: 'Code terminated effective 2025-12-31; no longer valid for current claims.',
+        whyNot:
+          'Code terminated — its last valid date was 2025-12-31; no longer valid for current claims.',
       },
-      '## C5271 — HCPCS Level II\n**Status:** ⛔ Terminated\n**Billable:** No\n\nCode terminated effective 2025-12-31; no longer valid for current claims.',
+      '## C5271 — HCPCS Level II\n**Status:** ⛔ Terminated\n**Billable:** No\n\nCode terminated — its last valid date was 2025-12-31; no longer valid for current claims.',
     ],
   ] as const)('check_code %s (system %s) is unchanged', async (code, system, structured, text) => {
     const result = await runToolContract(checkCodeTool, { code, ...(system ? { system } : {}) });
@@ -1080,7 +1226,8 @@ describe('RxNorm name matching against the shipped corpus', () => {
       aspirin.push(...page.hits.map((hit) => hit.value));
       cursor = getEnrichment(ctx)?.nextCursor as string | undefined;
     } while (cursor);
-    expect(aspirin).toHaveLength(256);
+    // 255 in the October 2026 RxNav snapshot, which retired 209823 [Equagesic].
+    expect(aspirin).toHaveLength(255);
     expect(aspirin.slice(0, 5)).toEqual(['611', '1191', '103863', '103954', '104474']);
     expect(aspirin.at(-1)).toBe('2734143');
   });
@@ -1165,5 +1312,43 @@ describe('map_codes misses against the shipped corpus', () => {
     );
     expect(err.data?.reason).toBe('no_mapping');
     expect(err.message).toBe('"ICD-10-CM" is a code system, not a code.');
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/62
+  it.each([
+    [
+      'E11.9',
+      'ICD-10-CM',
+      'Decode it with medcode_get_code and system "ICD10CM", or walk its hierarchy with direction parents or children and system "ICD10CM".',
+    ],
+    [
+      'A0100',
+      'ICD-10-CM and HCPCS Level II',
+      'Decode it with medcode_get_code and system "ICD10CM" or "HCPCS", or walk its hierarchy with direction parents or children and system "ICD10CM" or "HCPCS".',
+    ],
+    // A digits-only ICD-10-PCS code: a bare integer, yet a bundled code, never CPT —
+    // and one with no prefix parent or children, so the hint offers no walk.
+    ['0016070', 'ICD-10-PCS', 'Decode it with medcode_get_code and system "ICD10PCS".'],
+  ])('names the system holding %s on every rxcui_to_* direction', async (from, labels, lead) => {
+    for (const direction of [
+      'rxcui_to_ingredients',
+      'rxcui_to_brands',
+      'rxcui_to_ndc',
+      'rxcui_to_classes',
+    ] as const) {
+      const err = await caught(() =>
+        mapCodesTool.handler(
+          mapCodesTool.input.parse({ from, direction }),
+          createMockContext({ errors: mapCodesTool.errors }),
+        ),
+      );
+      expect(err.data?.reason).toBe('no_mapping');
+      expect(err.message).toBe(
+        `"${from}" is a code in ${labels}, not an RXCUI — ${direction} reads RxNorm concepts only.`,
+      );
+      expect((err.data as { recovery?: { hint?: string } }).recovery?.hint).toBe(
+        `${lead} To reach a drug's RXCUI, map the drug name with direction name_to_rxcui.`,
+      );
+    }
   });
 });

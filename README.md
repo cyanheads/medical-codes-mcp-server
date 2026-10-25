@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.4.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/medical-codes-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/medical-codes-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/medical-codes-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/medical-codes-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/medical-codes-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/medical-codes-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -36,7 +36,7 @@
 
 ## Overview
 
-US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm — from a bundled offline SQLite index built from public-domain CDC/NCHS, CMS, and NLM federal releases, plus the RxClass drug classes of the RxNorm drugs. Decode, search, validate billability, and crosswalk codes, drugs (including NDC lookups), and drug classes from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm with RxClass drug classes — searchable offline from official federal releases. Decode, search, check billability, and crosswalk codes, drugs, NDCs, and drug classes.
 
 ### Tools
 
@@ -65,7 +65,7 @@ Only freely-redistributable, public-domain US federal code sets are bundled, bak
 
 **RxNorm** bundles the current normalized drug vocabulary — ingredients, brand names, clinical & branded drugs, and packs, with their NDC and ingredient/brand crosswalks — sourced at build time from the keyless [RxNav REST API](https://rxnav.nlm.nih.gov/), which serves the public-domain normalized layer only. The full UMLS-licensed RxNorm release is intentionally excluded, so the package stays freely redistributable.
 
-**RxClass** is a class layer over those drugs, not a code system: 20,707 classes and 86,837 drug–class edges, fetched at build time from the keyless [RxClass API](https://rxnav.nlm.nih.gov/REST/rxclass/). Six sources are bundled, all US government works: `MEDRT` (VA MED-RT — mechanism, physiologic effect, pharmacokinetics, chemical structure, and disease relations), `FDASPL` (FDA established pharmacologic classes and related classes from structured product labels), `FMTSME` (therapeutic categories), `VA` (VA National Formulary classes), `RXNORM` (DEA controlled-substance schedules), and `CDC` (CVX vaccine codes). Four are excluded: `ATC` and `ATCPROD`, whose WHO terms bar copying and distribution for commercial purposes; `SNOMEDCT`, which is under the SNOMED CT Affiliate license; and `DAILYMED`, which repeats FDASPL's edges almost exactly (8,694 of its 8,710) and publishes no version.
+**RxClass** is a class layer over those drugs, not a code system: 20,723 classes and 87,269 drug–class edges, fetched at build time from the keyless [RxClass API](https://rxnav.nlm.nih.gov/REST/rxclass/). Six sources are bundled, all US government works: `MEDRT` (VA MED-RT — mechanism, physiologic effect, pharmacokinetics, chemical structure, and disease relations), `FDASPL` (FDA established pharmacologic classes and related classes from structured product labels), `FMTSME` (therapeutic categories), `VA` (VA National Formulary classes), `RXNORM` (DEA controlled-substance schedules), and `CDC` (CVX vaccine codes). Four are excluded: `ATC` and `ATCPROD`, whose WHO terms bar copying and distribution for commercial purposes; `SNOMEDCT`, which is under the SNOMED CT Affiliate license; and `DAILYMED`, which repeats FDASPL's edges almost exactly (8,696 of its 8,710) and publishes no version.
 
 > This product uses publicly available data courtesy of the U.S. National Library of Medicine (NLM), National Institutes of Health, Department of Health and Human Services; NLM is not responsible for the product and does not endorse or recommend this or any other product.
 
@@ -80,17 +80,17 @@ CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally
 - Accepts 1–50 codes; mixed systems are fine — each code's system is detected independently from its shape
 - Decodes a National Drug Code (NDC) directly to its RxNorm product — hyphenated FDA segment configurations (4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2) or bare 10/11 digits — offline via the bundled NDC↔RxNorm map, tagged `source: "NDC"`
 - Partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason — a bare integer that resolves nowhere is named as a possible CPT / HCPCS Level I code, which is out of scope, except a bare 10/11-digit one, which is named as an NDC no bundled drug maps to
-- An explicit `system` overrides auto-detection when a value is genuinely ambiguous (an ambiguous code lists its `candidateSystems`) and skips the NDC decode; `includeHierarchy` attaches each code's parent and immediate children
+- A code written in ICD-10-CM dotted form (`A01.00`) resolves to ICD-10-CM; an explicit `system` overrides auto-detection when a value is genuinely ambiguous (an ambiguous code lists its `candidateSystems`) and skips the NDC decode; `includeHierarchy` attaches each code's parent and immediate children
 - `alsoInSystems` names other bundled systems holding the same code string — it is a different code in each
 - RxNorm rows carry `billable: null` (RxNorm has no billing concept) and `shortDescription: null` (RxNorm publishes a single name); `chapter` holds the RxNorm term type (`IN`, `SCD`, `SBD`, …)
-- Errors: `no_codes_found` when none of the requested codes resolve in any bundled system — or, under an explicit `system`, in that system, with any other bundled system that holds a code named
+- Errors: `ambiguous_system` when every requested code is present in more than one bundled system and no `system` is given, with the union of those systems in `candidateSystems`; `no_codes_found` when none of the requested codes resolve otherwise — in any bundled system, or under an explicit `system` in that system — naming any other bundled system that holds a code and each code present in more than one system
 
 ---
 
 ### `medcode_search_codes` <sub>tool</sub>
 
 - Every search term must appear — matched first as a token prefix, then as a substring, so inflected and compound forms are also found; an RxNorm concept matches on its drug name alone, never its term type
-- Filter by `system`, `billableOnly` (exclude headers/categories, and every RxNorm concept — RxNorm has no billing concept), and `chapter` (for RxNorm, the term type)
+- Filter by `system`, `billableOnly` (exclude headers/categories, terminated HCPCS codes, and every RxNorm concept — RxNorm has no billing concept), and `chapter` (for RxNorm, the term type)
 - Ranked by full-text relevance; results echo the resolved `system` per row
 - Paginates via `cursor`/`limit` (default `MEDCODE_MAX_RESULTS`, ceiling 200); discloses `truncated`/`nextCursor`, and returns a notice with the parsed query when nothing matches
 
@@ -100,8 +100,9 @@ CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally
 
 - Discriminated `status`: `valid_billable`, `valid_not_billable`, `valid_header`, `valid`, or `terminated` — `valid` is a current RxNorm concept, returned with `billable: null` because RxNorm has no billing concept
 - `whyNot` explains non-billable/terminated cases — a non-billable or terminated code is a successful result, not an error
-- `alsoInSystems` names other bundled systems holding the same code string, since the verdict applies only to the resolved system
-- Errors: `unknown_code` (absent from the named or detected system — under an explicit `system`, a code another bundled system holds is named as that system's code; an NDC lands here too, including a well-formed bare 10/11-digit one no bundled drug maps to, with a recovery pointing at `medcode_get_code` and `medcode_map_codes` `ndc_to_rxcui`) and `ambiguous_system` (present in multiple systems, no `system` given)
+- A HCPCS code is `terminated` once its termination date (the last date CMS allows it on a claim) has passed, read against the UTC date of the call; until then it checks as billable, with that date in `whyNot`
+- A code written in ICD-10-CM dotted form (`A01.00`) resolves to ICD-10-CM; `alsoInSystems` names other bundled systems holding the same code string, since the verdict applies only to the resolved system
+- Errors: `unknown_code` (absent from the named system, or with no `system` from every bundled system, naming every system the code's shape fits (for a dotted ICD-10-CM form, ICD-10-CM alone) — under an explicit `system`, a code another bundled system holds is named as that system's code; an NDC lands here too, including a well-formed bare 10/11-digit one no bundled drug maps to, with a recovery pointing at `medcode_get_code` and `medcode_map_codes` `ndc_to_rxcui`) and `ambiguous_system` (present in multiple systems, no `system` given)
 
 ---
 
@@ -115,7 +116,7 @@ CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally
 - `classType` (`EPC`, `MOA`, `PE`, `PK`, `TC`, `CHEM`, `DISEASE`, `VA`, `SCHEDULE`, `CVX`) narrows the two class directions and is rejected on every other
 - `children`, `name_to_rxcui`, `rxcui_to_ndc`, `rxcui_to_classes`, and `class_to_rxcuis` paginate via `cursor`/`limit` — one RXCUI can carry thousands of package NDCs and one class thousands of members; `limit` and `cursor` are rejected on every other direction, and `system` steers only `parents`/`children` (the drug and class directions accept only `RXNORM`)
 - Every hit carries `source` provenance so a chained call uses the right identifier; a resolvable source with no edge in the requested direction is a successful empty result with a notice, not an error — a brand name has no classes, for instance
-- Errors: `no_mapping` (source doesn't resolve — a code-system name passed as `from`, an NDC where a code or RXCUI belongs (a well-formed one no bundled drug maps to in the words `ndc_to_rxcui` uses), a class ID where an RXCUI belongs, or a bare integer that may be an out-of-scope CPT / HCPCS Level I code, is named as such, and a code-system name is recovered to the one input the direction takes; a `parents`/`children` code an explicit `system` missed is named as the code of the bundled system that holds it; an `ndc_to_rxcui` miss says whether the spelling is malformed or a well-formed NDC no bundled drug maps to; a `class_to_rxcuis` miss is worded for a class ID, naming an RXCUI or class type sent in its place), `field_not_applicable` (a `system`, `classType`, `limit`, or `cursor` the direction does not use), `direction_unavailable` (RxNorm, or for the class directions the RxClass layer, not bundled in this build), `ambiguous_system`
+- Errors: `no_mapping` (source doesn't resolve — a code-system name passed as `from`, an NDC where a code or RXCUI belongs (a well-formed one no bundled drug maps to in the words `ndc_to_rxcui` uses), a class ID where an RXCUI belongs, or a bare integer that may be an out-of-scope CPT / HCPCS Level I code, is named as such, and a code-system name is recovered to the one input the direction takes; a `parents`/`children` code an explicit `system` missed is named as the code of the bundled system that holds it, and an `rxcui_to_*` source another bundled system holds is named as that system's code, since those directions read RxNorm concepts only; an `ndc_to_rxcui` miss says whether the spelling is malformed or a well-formed NDC no bundled drug maps to; a `class_to_rxcuis` miss is worded for a class ID, naming an RXCUI or class type sent in its place), `field_not_applicable` (a `system`, `classType`, `limit`, or `cursor` the direction does not use), `direction_unavailable` (RxNorm, or for the class directions the RxClass layer, not bundled in this build), `ambiguous_system`
 
 ---
 
@@ -142,8 +143,8 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 ICD-10 / HCPCS / RxNorm-specific:
 
 - Bundled SQLite + FTS5 index — offline, keyless, deterministic; no runtime network I/O, no rate limit
-- Code-shape auto-detection routes a code to its system automatically; an explicit `system` disambiguates collisions
-- Real billable/validity signal from the source releases — the order-file billable flag drives `medcode_check_code`, not a heuristic; RxNorm, which has no billing concept, reports `billable: null` rather than a verdict
+- Code-shape auto-detection routes a code to its system automatically, and a code in ICD-10-CM dotted form resolves to ICD-10-CM; an explicit `system` disambiguates collisions
+- Real billable/validity signal from the source releases — the order-file billable flag and, for HCPCS, the termination date read against the date of the call drive `medcode_check_code`, not a heuristic; RxNorm, which has no billing concept, reports `billable: null` rather than a verdict
 
 Agent-friendly output:
 
@@ -157,18 +158,40 @@ This server ships with the code database bundled — there is no API key to obta
 
 ### Public Hosted Instance
 
-A public instance is available at `https://medical-codes.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP, with this client config:
+A public instance is available at `https://medical-codes.caseyjhand.com/mcp` — no installation required. It serves Streamable HTTP; each client takes its own config shape.
+
+For Claude Code:
+
+```sh
+claude mcp add --transport http medical-codes-mcp-server https://medical-codes.caseyjhand.com/mcp
+```
+
+For Cline (`cline_mcp_settings.json`):
 
 ```json
 {
   "mcpServers": {
     "medical-codes-mcp-server": {
-      "type": "streamable-http",
+      "type": "streamableHttp",
       "url": "https://medical-codes.caseyjhand.com/mcp"
     }
   }
 }
 ```
+
+For Cursor (`mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "medical-codes-mcp-server": {
+      "url": "https://medical-codes.caseyjhand.com/mcp"
+    }
+  }
+}
+```
+
+Claude Desktop adds remote servers under Settings → Connectors.
 
 ### Self-Hosted / Local
 
@@ -314,12 +337,12 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Building the bundled index
 
-The bundled `data/medical-codes.db` ships in the npm package and Docker image but, at >100 MB, is **not committed to git**. To get a prebuilt copy without rebuilding, take it from the npm package (`data/medical-codes.db`) or from the `medical-codes-mcp-server.mcpb` bundle attached to each [GitHub Release](https://github.com/cyanheads/medical-codes-mcp-server/releases) — a zip archive holding the index at `data/medical-codes.db`. You only rebuild when refreshing to a new federal release. The build script never downloads: extract the canonical `.gov` source files (ICD-10-CM/PCS order files, HCPCS `ANWEB.txt` — URLs in the script header) into a directory, cache RxNorm and RxClass into it with the two fetchers, then point the script at it:
+The bundled `data/medical-codes.db` ships in the npm package and Docker image but, at >100 MB, is **not committed to git**. To get a prebuilt copy without rebuilding, take it from the npm package (`data/medical-codes.db`) or from the `medical-codes-mcp-server.mcpb` bundle attached to each [GitHub Release](https://github.com/cyanheads/medical-codes-mcp-server/releases) — a zip archive holding the index at `data/medical-codes.db`. You only rebuild when refreshing to a new federal release. The build script never downloads: extract the canonical `.gov` source files (ICD-10-CM/PCS order files, and the HCPCS quarterly `ANWEB` file under its CMS name, which sets the HCPCS release label — URLs in the script header) flat into a directory, cache RxNorm and RxClass into it with the two fetchers (into empty directories: both resume an existing cache rather than refetch it), then point the script at it:
 
 ```sh
 bun run scripts/ingest/fetch-rxnav.ts --out <dir>/rxnav        # RxNorm, from the keyless RxNav API
 bun run scripts/ingest/fetch-rxclass.ts --rxnav <dir>/rxnav --out <dir>/rxclass   # RxClass, after RxNorm
-bun run scripts/build-index.ts --from-dir <dir> --fy 2026
+bun run scripts/build-index.ts --from-dir <dir> --fy 2027       # --fy labels the ICD-10-CM/PCS releases
 ```
 
 It parses the source files and caches and emits the single `.db` file. RxNorm is dated by the time its RxNav fetch completed and the RxClass sources by theirs, both recorded in the caches, so a rebuild from the same caches reports the same dates. The build runs at build time only — the server never downloads anything.

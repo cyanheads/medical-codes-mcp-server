@@ -17,6 +17,7 @@ import { listSystemsTool } from '@/mcp-server/tools/definitions/list-systems.too
 import { mapCodesTool } from '@/mcp-server/tools/definitions/map-codes.tool.js';
 import { searchCodesTool } from '@/mcp-server/tools/definitions/search-codes.tool.js';
 import type { CodeIndexService } from '@/services/code-index/code-index-service.js';
+import { readCommonMark } from '../helpers/commonmark.ts';
 import { ensureIndex } from '../helpers/index-fixture.ts';
 
 /**
@@ -288,6 +289,66 @@ describe('medcode_check_code', () => {
     expect(err.data?.reason).toBe('unknown_code');
     expect(err.message).toMatch(/out of scope/i);
     expect(err.message).toMatch(/CPT/);
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/61
+describe('auto-detection of a colliding code in ICD-10-CM display form', () => {
+  const ALSO_IN_HCPCS = '⟨strong⟩Also in:⟨/strong⟩ HCPCS';
+
+  it('validates A01.00 as the ICD-10-CM code and names HCPCS on both surfaces', async () => {
+    const result = await runToolContract(checkCodeTool, { code: 'A01.00' } as never);
+    expect(result.isError).toBeFalsy();
+    expect(checkCodeTool.output.parse(result.structuredContent)).toEqual({
+      system: 'ICD10CM',
+      code: 'A01.00',
+      status: 'valid_billable',
+      billable: true,
+      whyNot: null,
+      alsoInSystems: ['HCPCS'],
+    });
+    const text = renderedText(result);
+    expect(text).toContain('A01.00 — ICD-10-CM');
+    expect(text).toContain(ALSO_IN_HCPCS);
+  });
+
+  it('decodes A01.00 alone into found, with alsoInSystems', async () => {
+    const result = await runToolContract(getCodeTool, { codes: ['A01.00'] } as never);
+    expect(result.isError).toBeFalsy();
+    const out = getCodeTool.output.parse(result.structuredContent);
+    expect(out.found).toMatchObject([
+      { system: 'ICD10CM', code: 'A01.00', alsoInSystems: ['HCPCS'] },
+    ]);
+    expect(out.notFound).toEqual([]);
+    expect(renderedText(result)).toContain(ALSO_IN_HCPCS);
+  });
+
+  it('walks the ICD-10-CM parent of A01.00, naming HCPCS', async () => {
+    const result = await runToolContract(mapCodesTool, {
+      from: 'A01.00',
+      direction: 'parents',
+    } as never);
+    expect(result.isError).toBeFalsy();
+    expect(mapCodesTool.output.parse(result.structuredContent)).toMatchObject({
+      resolvedSystem: 'ICD10CM',
+      alsoInSystems: ['HCPCS'],
+      hits: [{ system: 'ICD10CM', value: 'A01.0' }],
+    });
+    expect(renderedText(result)).toContain(ALSO_IN_HCPCS);
+  });
+
+  // get_code's side of the undotted form is tabled with the rest of #58 below.
+  it('keeps the undotted A0100 ambiguous on check_code and map_codes', async () => {
+    for (const [tool, args] of [
+      [checkCodeTool, { code: 'A0100' }],
+      [mapCodesTool, { from: 'A0100', direction: 'parents' }],
+    ] as const) {
+      const result = await runToolContract(tool as never, args as never);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'ambiguous_system', candidateSystems: ['ICD10CM', 'HCPCS'] } },
+      });
+    }
   });
 });
 
@@ -885,6 +946,15 @@ function contentText(result: Awaited<ReturnType<typeof runToolContract>>): strin
     .join('\n');
 }
 
+/**
+ * A result's text as a CommonMark client renders it. The framework
+ * Markdown-escapes an error's message, hint, and reason, so the parse reads them
+ * back exactly as `structuredContent.error` carries them.
+ */
+function renderedText(result: Awaited<ReturnType<typeof runToolContract>>): string {
+  return readCommonMark(contentText(result));
+}
+
 /** Error envelope from a runToolContract failure. */
 function envelopeOf(result: Awaited<ReturnType<typeof runToolContract>>) {
   return (result.structuredContent as { error: ThrownError }).error;
@@ -943,7 +1013,9 @@ describe('medcode_map_codes — a field the direction does not use is rejected',
     expect(err.data?.fields).toEqual(fields);
     expect(err.data?.direction).toBe(args.direction);
     expect(err.message).toContain(`"${args.direction}"`);
-    for (const field of fields) expect(err.message).toContain(`\`${field}\``);
+    // The message lists the rejected fields by name, in order, after the direction.
+    const listed = err.message.slice(err.message.indexOf('": ') + 3, -1).split(', ');
+    expect(listed.map((entry) => entry.split(' ')[0])).toEqual(fields);
     expect(err.data?.recovery?.hint).toBe(declaredRecovery(mapCodesTool, 'field_not_applicable'));
   }
 
@@ -974,7 +1046,7 @@ describe('medcode_map_codes — a field the direction does not use is rejected',
       if (!CLASS.has(direction)) {
         await expectRejected({ from, direction, classType: 'EPC' }, ['classType']);
         expect((await mapError({ from, direction, classType: 'CVX' })).message).toContain(
-          '`classType` ("CVX")',
+          'classType ("CVX")',
         );
         return;
       }
@@ -1109,7 +1181,7 @@ describe('medcode_map_codes — a bare integer that resolves nowhere', () => {
       expect(hint).toContain('medcode_search_codes');
       expect(hint).toContain('ICD-10-PCS');
 
-      const text = contentText(result);
+      const text = renderedText(result);
       expect(text).toContain(CPT_SENTENCE);
       expect(text).toContain(hint);
       expect(text).toContain('(reason no_mapping)');
@@ -1177,7 +1249,7 @@ describe('medcode_map_codes — an NDC where a code or an RXCUI belongs', () => 
     expect(hint).toContain('medcode_get_code');
     expect(hint).not.toMatch(/CPT/);
 
-    const text = contentText(result);
+    const text = renderedText(result);
     expect(text).not.toMatch(/CPT/);
     expect(text).toContain(hint);
     expect(text).toContain('(reason no_mapping)');
@@ -1205,7 +1277,7 @@ describe('medcode_map_codes — an NDC where a code or an RXCUI belongs', () => 
       expect(hint).toContain('name_to_rxcui');
       expect(hint).not.toContain('medcode_get_code');
 
-      const text = contentText(result);
+      const text = renderedText(result);
       expect(text).toContain(message);
       expect(text).toContain(hint);
       expect(text).not.toMatch(/CPT/);
@@ -1242,7 +1314,7 @@ describe('medcode_get_code — a bare integer that resolves nowhere', () => {
     expect(error.message).toContain('"99213"');
     expect(error.message).toContain(CPT_SENTENCE);
     expect(error.data?.recovery?.hint).toBe(declaredRecovery(getCodeTool, 'no_codes_found'));
-    expect(contentText(result)).toContain(CPT_SENTENCE);
+    expect(renderedText(result)).toContain(CPT_SENTENCE);
   });
 
   it('names only the bare integers of a mixed batch, and nothing for a batch without one', async () => {
@@ -1295,7 +1367,7 @@ describe('medcode_get_code — a bare integer that resolves nowhere', () => {
     );
     const reason = mixed.notFound[0]?.reason ?? '';
     expect(reason).toContain('National Drug Code (NDC)');
-    expect(reason).toContain('omit `system`');
+    expect(reason).toContain('omit system to decode it');
     expect(reason).not.toMatch(/CPT/);
 
     const only = await caught(() =>
@@ -1307,7 +1379,7 @@ describe('medcode_get_code — a bare integer that resolves nowhere', () => {
     expect(only.data?.reason).toBe('no_codes_found');
     // The NDC is named as one; the CPT-shaped value alone keeps the out-of-scope note.
     expect(only.message).toContain(
-      'National Drug Codes (NDC) looked up under an explicit `system`: "11111222233"',
+      'National Drug Codes (NDC) looked up under an explicit system: "11111222233"',
     );
     expect(only.message).toContain('Bare integers with no match: "43239".');
     expect(only.message).not.toContain('Bare integers with no match: "11111222233"');
@@ -1378,9 +1450,9 @@ describe('medcode_get_code — a bare integer that resolves nowhere', () => {
       expect(error.data?.reason).toBe('no_codes_found');
       expect(error.message).toContain(note);
       expect(error.message).toContain(`Bare integers with no match: "43239". ${CPT_SENTENCE}`);
-      expect(error.message).not.toContain('explicit `system`: "99999');
+      expect(error.message).not.toContain('explicit system: "99999');
       expect(error.data?.recovery?.hint).toBe(declaredRecovery(getCodeTool, 'no_codes_found'));
-      const text = contentText(result);
+      const text = renderedText(result);
       expect(text).toContain(note);
       expect(text).toContain(CPT_SENTENCE);
     }
@@ -1400,7 +1472,7 @@ describe('medcode_get_code — a bare integer that resolves nowhere', () => {
       expect(error.message).toBe(message);
       const hint = error.data?.recovery?.hint ?? '';
       expect(hint).toContain('ndc_to_rxcui');
-      const text = contentText(result);
+      const text = renderedText(result);
       expect(text).toContain(message);
       expect(text).toContain(hint);
       expect(text).not.toMatch(/CPT/);
@@ -1451,7 +1523,7 @@ describe('medcode_map_codes — a code system name in `from`', () => {
       const hint = err.data?.recovery?.hint ?? '';
       expect(hint).not.toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
       if (direction === 'parents' || direction === 'children') {
-        expect(hint).toContain(`\`system\` ("${system}")`);
+        expect(hint).toContain(`the system in system ("${system}")`);
         expect(hint).toContain('medcode_browse_hierarchy');
       } else {
         expect(hint, direction).toMatch(DRUG_INPUT[direction] ?? /RXCUI/);
@@ -1462,12 +1534,12 @@ describe('medcode_map_codes — a code system name in `from`', () => {
 
   /** The input each drug direction takes, as its system-token recovery must name it (#56). */
   const DRUG_INPUT: Record<string, RegExp> = {
-    name_to_rxcui: /^`from` takes a drug name on name_to_rxcui/,
-    ndc_to_rxcui: /^`from` takes an NDC on ndc_to_rxcui/,
-    rxcui_to_ndc: /^`from` takes an RXCUI on rxcui_to_ndc/,
-    rxcui_to_ingredients: /^`from` takes an RXCUI on rxcui_to_ingredients/,
-    rxcui_to_brands: /^`from` takes an RXCUI on rxcui_to_brands/,
-    rxcui_to_classes: /^`from` takes an RXCUI on rxcui_to_classes/,
+    name_to_rxcui: /^The from field takes a drug name on name_to_rxcui/,
+    ndc_to_rxcui: /^The from field takes an NDC on ndc_to_rxcui/,
+    rxcui_to_ndc: /^The from field takes an RXCUI on rxcui_to_ndc/,
+    rxcui_to_ingredients: /^The from field takes an RXCUI on rxcui_to_ingredients/,
+    rxcui_to_brands: /^The from field takes an RXCUI on rxcui_to_brands/,
+    rxcui_to_classes: /^The from field takes an RXCUI on rxcui_to_classes/,
   };
 
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/56
@@ -1478,7 +1550,7 @@ describe('medcode_map_codes — a code system name in `from`', () => {
       const hint = envelopeOf(result).data?.recovery?.hint ?? '';
       expect(hint).toMatch(DRUG_INPUT[direction] as RegExp);
       const offered = ['a drug name', 'an NDC', 'an RXCUI'].filter((input) =>
-        hint.startsWith(`\`from\` takes ${input}`),
+        hint.startsWith(`The from field takes ${input}`),
       );
       expect(offered).toHaveLength(1);
       expect(hint).not.toMatch(/, an NDC, or an RXCUI|a drug name, an NDC/);
@@ -1487,7 +1559,7 @@ describe('medcode_map_codes — a code system name in `from`', () => {
         expect(hint).toContain('name_to_rxcui');
         expect(hint).toContain('ndc_to_rxcui');
       }
-      expect(contentText(result)).toContain(hint);
+      expect(renderedText(result)).toContain(hint);
     },
   );
 
@@ -1499,7 +1571,7 @@ describe('medcode_map_codes — a code system name in `from`', () => {
     const error = envelopeOf(result);
     expect(error.data?.reason).toBe('no_mapping');
     expect(error.message).toBe('"ICD10CM" is a code system, not a code.');
-    const text = contentText(result);
+    const text = renderedText(result);
     expect(text).toContain('"ICD10CM" is a code system, not a code.');
     expect(text).toContain(error.data?.recovery?.hint ?? '<missing hint>');
     expect(text).toContain('medcode_browse_hierarchy');
@@ -1511,8 +1583,8 @@ describe('medcode_map_codes — a code system name in `from`', () => {
       direction: 'rxcui_to_ingredients',
     } as never);
     const hint = envelopeOf(result).data?.recovery?.hint ?? '';
-    expect(hint).toMatch(/^`from` takes an RXCUI on rxcui_to_ingredients/);
-    expect(contentText(result)).toContain(hint);
+    expect(hint).toMatch(/^The from field takes an RXCUI on rxcui_to_ingredients/);
+    expect(renderedText(result)).toContain(hint);
   });
 
   it.each(['ICD10', 'CPT', 'NDC', 'ICD10CMX'])(
@@ -1596,15 +1668,15 @@ describe('medcode_get_code — no_codes_found under an explicit system', () => {
   it.each([
     [
       { codes: ['161'], system: 'ICD10CM' },
-      'None of the 1 requested code(s) resolved in ICD-10-CM, the `system` this call named. Codes another bundled system holds: "161" (RxNorm). Re-call with that `system` to decode each one.',
+      'None of the 1 requested code(s) resolved in ICD-10-CM, the system this call named. Codes another bundled system holds: "161" (RxNorm). Re-call with that system to decode each one.',
     ],
     [
       { codes: ['E11.9'], system: 'HCPCS' },
-      'None of the 1 requested code(s) resolved in HCPCS Level II, the `system` this call named. Codes another bundled system holds: "E11.9" (ICD-10-CM). Re-call with that `system` to decode each one.',
+      'None of the 1 requested code(s) resolved in HCPCS Level II, the system this call named. Codes another bundled system holds: "E11.9" (ICD-10-CM). Re-call with that system to decode each one.',
     ],
     [
       { codes: ['A0100', 'ZZZZZZ9'], system: 'RXNORM' },
-      'None of the 2 requested code(s) resolved in RxNorm, the `system` this call named. Codes another bundled system holds: "A0100" (ICD-10-CM and HCPCS Level II). Re-call with that `system` to decode each one.',
+      'None of the 2 requested code(s) resolved in RxNorm, the system this call named. Codes another bundled system holds: "A0100" (ICD-10-CM and HCPCS Level II). Re-call with that system to decode each one.',
     ],
   ])('names the named system and the holder for %j on both surfaces', async (args, message) => {
     const result = await runToolContract(getCodeTool, args as never);
@@ -1613,7 +1685,7 @@ describe('medcode_get_code — no_codes_found under an explicit system', () => {
     expect(error.data?.reason).toBe('no_codes_found');
     expect(error.message).toBe(message);
     expect(error.data?.recovery?.hint).toBe(declaredRecovery(getCodeTool, 'no_codes_found'));
-    expect(contentText(result)).toContain(message);
+    expect(renderedText(result)).toContain(message);
   });
 
   it('names the holder on the per-code reason of a partial success', async () => {
@@ -1623,7 +1695,7 @@ describe('medcode_get_code — no_codes_found under an explicit system', () => {
     } as never);
     const out = result.structuredContent as { notFound: { code: string; reason: string }[] };
     const reason =
-      'No ICD-10-CM code matches "161" — it is a code in RxNorm. Re-call with `system` "RXNORM" to decode it there.';
+      'No ICD-10-CM code matches "161" — it is a code in RxNorm. Re-call with system "RXNORM" to decode it there.';
     expect(out.notFound).toEqual([{ code: '161', reason }]);
     expect(contentText(result)).toContain(reason);
   });
@@ -1639,20 +1711,185 @@ describe('medcode_get_code — no_codes_found under an explicit system', () => {
   });
 });
 
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/58
+describe('medcode_get_code — a batch where nothing resolves and a code is ambiguous', () => {
+  const declared = (reason: string) => getCodeTool.errors?.find((entry) => entry.reason === reason);
+
+  it.each([
+    [
+      ['A0100', 'a0100'],
+      'Every requested code exists in more than one bundled system: "A0100" (ICD10CM, HCPCS), "a0100" (ICD10CM, HCPCS).',
+    ],
+  ])(
+    'fails %j with ambiguous_system as check_code does, on both surfaces',
+    async (codes, message) => {
+      const result = await runToolContract(getCodeTool, { codes } as never);
+      expect(result.isError).toBe(true);
+      const error = envelopeOf(result) as ThrownError & {
+        data?: { candidateSystems?: string[] };
+      };
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.code).toBe(declared('ambiguous_system')?.code);
+      expect(error.data?.reason).toBe('ambiguous_system');
+      expect(error.data?.candidateSystems).toEqual(['ICD10CM', 'HCPCS']);
+      expect(error.data?.recovery?.hint).toBe(declared('ambiguous_system')?.recovery);
+      expect(error.message).toBe(message);
+
+      // The same code, reason, candidates, and recovery check_code fails A0100 with.
+      const check = envelopeOf(await runToolContract(checkCodeTool, { code: 'A0100' })) as {
+        code?: number;
+        data?: Record<string, unknown>;
+      };
+      expect(error.code).toBe(check.code);
+      expect(error.data).toMatchObject({
+        reason: check.data?.reason,
+        candidateSystems: check.data?.candidateSystems,
+        recovery: check.data?.recovery,
+      });
+
+      const text = renderedText(result);
+      expect(text).toContain(message);
+      expect(text).toContain(declared('ambiguous_system')?.recovery);
+      expect(text).toContain('(reason ambiguous_system)');
+    },
+  );
+
+  it.each([
+    [
+      ['A0100', 'ZZZZZZ9'],
+      'None of the 2 requested code(s) resolved in any bundled system. Codes in more than one bundled system: "A0100" (ICD10CM, HCPCS). Re-call with one of those as system to decode each one.',
+    ],
+    [
+      ['43239', 'A0100'],
+      `None of the 2 requested code(s) resolved in any bundled system. Codes in more than one bundled system: "A0100" (ICD10CM, HCPCS). Re-call with one of those as system to decode each one. Bare integers with no match: "43239". ${CPT_SENTENCE}`,
+    ],
+  ])(
+    'keeps no_codes_found for the mixed %j, naming the ambiguous code beside the other notes',
+    async (codes, message) => {
+      const result = await runToolContract(getCodeTool, { codes } as never);
+      expect(result.isError).toBe(true);
+      const error = envelopeOf(result) as ThrownError & {
+        data?: { candidateSystems?: string[] };
+      };
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.data?.reason).toBe('no_codes_found');
+      expect(error.data?.candidateSystems).toBeUndefined();
+      expect(error.data?.recovery?.hint).toBe(declaredRecovery(getCodeTool, 'no_codes_found'));
+      expect(error.message).toBe(message);
+      expect(renderedText(result)).toContain(message);
+    },
+  );
+
+  it('keeps a partial success, with the ambiguous code in notFound', async () => {
+    const result = await runToolContract(getCodeTool, { codes: ['A0100', 'E11.9'] } as never);
+    expect(result.isError).toBeFalsy();
+    const out = getCodeTool.output.parse(result.structuredContent);
+    expect(out.found.map((entry) => entry.code)).toEqual(['E11.9']);
+    expect(out.notFound).toEqual([
+      {
+        code: 'A0100',
+        reason:
+          '"A0100" matches multiple systems — re-call with an explicit system to disambiguate.',
+        candidateSystems: ['ICD10CM', 'HCPCS'],
+      },
+    ]);
+  });
+
+  it('decodes the ambiguous code once a `system` from the union is named, the recovery the error gives', async () => {
+    const result = await runToolContract(getCodeTool, {
+      codes: ['A0100'],
+      system: 'HCPCS',
+    } as never);
+    expect(getCodeTool.output.parse(result.structuredContent).found).toMatchObject([
+      { system: 'HCPCS', code: 'A0100', alsoInSystems: ['ICD10CM'] },
+    ]);
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/64
+describe('a HCPCS code before and after its last valid date', () => {
+  /** Run `fn` with the clock at `iso`; K0552's last valid date is 2019-12-31. */
+  async function at<T>(iso: string, fn: () => Promise<T>): Promise<T> {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(iso));
+    try {
+      return await fn();
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it('checks a code scheduled for termination as billable, naming the date on both surfaces', async () => {
+    const result = await at('2019-06-01T12:00:00Z', () =>
+      runToolContract(checkCodeTool, { code: 'K0552' } as never),
+    );
+    expect(result.isError).toBeFalsy();
+    const whyNot =
+      'Scheduled for termination — its last valid date is 2019-12-31; not valid for claims after that date.';
+    expect(checkCodeTool.output.parse(result.structuredContent)).toEqual({
+      system: 'HCPCS',
+      code: 'K0552',
+      status: 'valid_billable',
+      billable: true,
+      whyNot,
+    });
+    const text = contentText(result);
+    expect(text).toContain('**Status:** ✅ Valid and billable');
+    expect(text).toContain(whyNot);
+  });
+
+  it('checks the same code as terminated once the date has passed', async () => {
+    const result = await at('2020-01-01T00:00:00Z', () =>
+      runToolContract(checkCodeTool, { code: 'K0552' } as never),
+    );
+    expect(checkCodeTool.output.parse(result.structuredContent)).toMatchObject({
+      status: 'terminated',
+      billable: false,
+    });
+    expect(contentText(result)).toContain('**Status:** ⛔ Terminated');
+  });
+
+  it.each([
+    ['2019-06-01T12:00:00Z', true, 'billable: yes'],
+    ['2020-01-01T00:00:00Z', false, 'billable: no'],
+  ])('decodes K0552 on %s with billable %s on both surfaces', async (now, billable, line) => {
+    const result = await at(now, () => runToolContract(getCodeTool, { codes: ['K0552'] } as never));
+    expect(getCodeTool.output.parse(result.structuredContent).found).toMatchObject([
+      { system: 'HCPCS', code: 'K0552', billable },
+    ]);
+    expect(contentText(result)).toContain(line);
+  });
+
+  it.each([
+    ['2019-06-01T12:00:00Z', ['K0552']],
+    ['2020-01-01T00:00:00Z', []],
+  ])('lists K0552 among billable search hits on %s only while it is valid', async (now, codes) => {
+    const result = await at(now, () =>
+      runToolContract(searchCodesTool, {
+        query: 'infusion pump',
+        system: 'HCPCS',
+        billableOnly: true,
+      } as never),
+    );
+    const out = searchCodesTool.output.parse(result.structuredContent);
+    expect(out.codes.map((hit) => hit.code)).toEqual(codes);
+  });
+});
+
 // https://github.com/cyanheads/medical-codes-mcp-server/issues/52
 describe('medcode_map_codes — a hierarchy miss under an explicit system', () => {
   it.each([
     [
       { from: 'E11.9', direction: 'parents', system: 'HCPCS' },
-      'No HCPCS Level II code matches "E11.9" — it is a code in ICD-10-CM. Re-call with `system` "ICD10CM" to walk it there.',
+      'No HCPCS Level II code matches "E11.9" — it is a code in ICD-10-CM. Re-call with system "ICD10CM" to walk it there.',
     ],
     [
       { from: '161', direction: 'children', system: 'ICD10CM' },
-      'No ICD-10-CM code matches "161" — it is a code in RxNorm. Re-call with `system` "RXNORM" to walk it there.',
+      'No ICD-10-CM code matches "161" — it is a code in RxNorm. Re-call with system "RXNORM" to walk it there.',
     ],
     [
       { from: 'A0100', direction: 'children', system: 'RXNORM' },
-      'No RxNorm concept matches "A0100" — it is a code in ICD-10-CM and HCPCS Level II. Re-call with `system` "ICD10CM" or "HCPCS" to walk it there.',
+      'No RxNorm concept matches "A0100" — it is a code in ICD-10-CM and HCPCS Level II. Re-call with system "ICD10CM" or "HCPCS" to walk it there.',
     ],
   ])('names the system that holds %j on both surfaces', async (args, message) => {
     const result = await runToolContract(mapCodesTool, args as never);
@@ -1663,10 +1900,11 @@ describe('medcode_map_codes — a hierarchy miss under an explicit system', () =
     expect(error.message).toBe(message);
     const hint = error.data?.recovery?.hint ?? '';
     expect(hint).not.toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
-    expect(hint).toContain('`system`');
-    expect(hint).not.toContain('medcode_get_code');
+    expect(hint).toBe(
+      'Re-call with system set to the system named above to walk the code there, or omit system to auto-detect it.',
+    );
 
-    const text = contentText(result);
+    const text = renderedText(result);
     expect(text).toContain(message);
     expect(text).toContain(hint);
     expect(text).toContain('(reason no_mapping)');
@@ -1681,6 +1919,83 @@ describe('medcode_map_codes — a hierarchy miss under an explicit system', () =
   it('keeps the out-of-scope miss for a bare integer no bundled system holds', async () => {
     const err = await mapError({ from: '43239', direction: 'parents', system: 'ICD10CM' });
     expect(err.message).toBe(`No bundled code matches "43239". ${CPT_SENTENCE}`);
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/62
+describe('medcode_map_codes — an rxcui_to_* source another bundled system holds', () => {
+  const RXCUI_DIRECTIONS = [
+    'rxcui_to_ingredients',
+    'rxcui_to_brands',
+    'rxcui_to_ndc',
+    'rxcui_to_classes',
+  ] as const;
+
+  const DRUG_TAIL = "To reach a drug's RXCUI, map the drug name with direction name_to_rxcui.";
+  /** The decode step names every holder; the walk names only holders with a prefix hierarchy. */
+  const HOLDER_CASES = [
+    [
+      'E11.9',
+      'ICD-10-CM',
+      `Decode it with medcode_get_code and system "ICD10CM", or walk its hierarchy with direction parents or children and system "ICD10CM". ${DRUG_TAIL}`,
+    ],
+    [
+      'A0100',
+      'ICD-10-CM and HCPCS Level II',
+      `Decode it with medcode_get_code and system "ICD10CM" or "HCPCS", or walk its hierarchy with direction parents or children and system "ICD10CM" or "HCPCS". ${DRUG_TAIL}`,
+    ],
+    // ICD-10-PCS codes have no prefix parent, and a complete one no children: no walk for that holder.
+    [
+      'B00',
+      'ICD-10-CM and ICD-10-PCS',
+      `Decode it with medcode_get_code and system "ICD10CM" or "ICD10PCS", or walk its hierarchy with direction parents or children and system "ICD10CM". ${DRUG_TAIL}`,
+    ],
+    [
+      '0DTJ4ZZ',
+      'ICD-10-PCS',
+      `Decode it with medcode_get_code and system "ICD10PCS". ${DRUG_TAIL}`,
+    ],
+  ] as const;
+
+  it.each(
+    RXCUI_DIRECTIONS.flatMap((direction) =>
+      HOLDER_CASES.map(([from, labels, hint]) => [direction, from, labels, hint] as const),
+    ),
+  )(
+    'names the holder of a %s source %s on both surfaces',
+    async (direction, from, labels, expectedHint) => {
+      const result = await runToolContract(mapCodesTool, { from, direction } as never);
+      expect(result.isError).toBe(true);
+      const error = envelopeOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.data?.reason).toBe('no_mapping');
+      const message = `"${from}" is a code in ${labels}, not an RXCUI — ${direction} reads RxNorm concepts only.`;
+      expect(error.message).toBe(message);
+      expect(error.message).not.toContain('No bundled code matches');
+      expect(error.message).not.toMatch(/CPT/);
+
+      const hint = error.data?.recovery?.hint ?? '';
+      expect(hint).toBe(expectedHint);
+
+      const text = renderedText(result);
+      expect(text).toContain(message);
+      expect(text).toContain(hint);
+      expect(text).toContain('(reason no_mapping)');
+    },
+  );
+
+  it.each(RXCUI_DIRECTIONS)('keeps the misses no bundled system holds on %s', async (direction) => {
+    const cpt = await mapEnvelope({ from: '43239', direction });
+    expect(cpt.message).toBe(`No bundled code matches "43239". ${CPT_SENTENCE}`);
+    const absent = await mapEnvelope({ from: 'ZZZZZZ9', direction });
+    expect(absent.message).toBe('No bundled code matches "ZZZZZZ9".');
+    expect(absent.data?.recovery?.hint).toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
+  });
+
+  it('keeps an RXCUI with no edge in the direction an empty result with a notice', async () => {
+    const { out, enrich } = await mapCall({ from: '161', direction: 'rxcui_to_ingredients' });
+    expect(out).toMatchObject({ resolvedSystem: 'RXNORM', hits: [] });
+    expect(enrich?.notice).toBeTruthy();
   });
 });
 
@@ -1722,7 +2037,7 @@ describe('medcode_map_codes — an ndc_to_rxcui miss says which case it is', () 
     expect(hint).toContain('name_to_rxcui');
     expect(hint).not.toContain('medcode_get_code');
 
-    const text = contentText(result);
+    const text = renderedText(result);
     expect(text).toContain(message);
     expect(text).toContain(hint);
     expect(text).not.toContain('medcode_get_code');
@@ -1877,7 +2192,7 @@ describe('medcode_map_codes — rxcui_to_classes', () => {
     expect(error.code).toBe(JsonRpcErrorCode.NotFound);
     expect(error.data?.reason).toBe('no_mapping');
     expect(error.message).toBe(message);
-    const text = contentText(result);
+    const text = renderedText(result);
     expect(text).toContain(message);
     expect(text).toContain(error.data?.recovery?.hint ?? '<missing hint>');
     expect(text).toContain('(reason no_mapping)');
@@ -1904,7 +2219,7 @@ describe('medcode_map_codes — rxcui_to_classes', () => {
 
 // https://github.com/cyanheads/medical-codes-mcp-server/issues/34
 describe('medcode_map_codes — class_to_rxcuis', () => {
-  const CLASS_ID_HINT = /rxcui_to_classes returns it in `value`/;
+  const CLASS_ID_HINT = /rxcui_to_classes returns it in each hit’s value/;
 
   it('returns direct members with their RxNorm name and concept type', async () => {
     const { out, enrich } = await mapCall({ from: 'N0000008836', direction: 'class_to_rxcuis' });
@@ -1999,7 +2314,7 @@ describe('medcode_map_codes — class_to_rxcuis', () => {
     ['ICD10CM', '"ICD10CM" is a code system, not a class ID.', CLASS_ID_HINT],
     [
       'epc',
-      '"epc" is a class type, not a class ID — pass it as `classType` alongside a class ID of that type.',
+      '"epc" is a class type, not a class ID — pass it as classType alongside a class ID of that type.',
       CLASS_ID_HINT,
     ],
   ])(
@@ -2015,7 +2330,7 @@ describe('medcode_map_codes — class_to_rxcuis', () => {
       expect(error.message).toBe(message);
       expect(error.data?.recovery?.hint).toMatch(hint);
       expect(error.data?.recovery?.hint).not.toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
-      const text = contentText(result);
+      const text = renderedText(result);
       expect(text).toContain(message);
       expect(text).toContain(error.data?.recovery?.hint ?? '<missing hint>');
       expect(text).not.toMatch(/CPT/);

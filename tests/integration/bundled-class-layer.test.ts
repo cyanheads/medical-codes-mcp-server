@@ -80,7 +80,7 @@ describe('shipped class layer', () => {
     // The SCHEDULE notice says "never on ingredients"; the VA notice says "rarely".
     expect(onIngredients('SCHEDULE')).toEqual({ n: 0 });
     expect(onIngredients('VA')).toEqual({ n: 46 });
-    expect(total('VA')).toEqual({ n: 19_704 });
+    expect(total('VA')).toEqual({ n: 19_855 });
     expect(edges('2129')).toContainEqual({
       class_type: 'VA',
       class_id: 'GA204',
@@ -131,7 +131,7 @@ describe('shipped class layer', () => {
           "SELECT COUNT(*) AS n FROM rxclass_edge WHERE class_type = 'SCHEDULE' AND class_id = 'SCHEDULE2'",
         )
         .get(),
-    ).toEqual({ n: 628 });
+    ).toEqual({ n: 620 });
   });
 
   it('records a version and counts for every bundled source', () => {

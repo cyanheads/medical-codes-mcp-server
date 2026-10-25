@@ -15,7 +15,13 @@ import { internalError } from '@cyanheads/mcp-ts-core/errors';
 import { logger, requestContextService, runtimeCaps } from '@cyanheads/mcp-ts-core/utils';
 
 import { getServerConfig } from '@/config/server-config.js';
-import { detectSystems, ICD10PCS_PARTIAL_RE, isBareInteger, ndcCandidates } from './detect.js';
+import {
+  detectSystems,
+  ICD10PCS_PARTIAL_RE,
+  isBareInteger,
+  isIcd10cmDisplayForm,
+  ndcCandidates,
+} from './detect.js';
 import { displayCode, icd10cmParent, RXCLASS_TABLES, storageCode } from './schema.js';
 import {
   type BuildMetaRow,
@@ -214,9 +220,9 @@ export interface SearchHit extends DecodedCode {}
  * `systems` is the resolution itself — empty (not found), one (unambiguous), or
  * several (ambiguous). `alsoIn` names the bundled systems that hold the same code
  * string but were NOT chosen, and is empty unless `systems` holds exactly one
- * entry that the shape narrowing (or an explicit `system`) selected over other
- * members. It is a disclosure, never an input to the choice: the resolution is
- * identical with and without it, so no lookup that succeeds today changes.
+ * entry that the shape narrowing, the ICD-10-CM display form, or an explicit
+ * `system` selected over other members. It is a disclosure, never an input to the
+ * choice: the resolution is identical with and without it.
  */
 interface Resolution {
   alsoIn: SystemId[];
@@ -350,7 +356,7 @@ export class CodeIndexService {
       code: displayCode(row.system, row.code),
       shortDescription,
       description: row.longDesc ?? shortDescription,
-      billable: traits.billing ? row.billable === 1 : null,
+      billable: traits.billing ? isBillableNow(row, todayYyyymmdd()) : null,
       header: row.header === 1,
       chapter: row.chapter,
     };
@@ -388,14 +394,23 @@ export class CodeIndexService {
    * overlapping-shape case produces.
    *
    * The shape pass still DECIDES when it matches only one of several member
-   * systems, and `alsoIn` exists to disclose exactly that. 60 code strings in the
+   * systems, and `alsoIn` exists to disclose exactly that. 61 code strings in the
    * shipped index land there: the 3-character ICD-10-PCS table rows that are also
    * ICD-10-CM categories (`B00` is Plain Radiography of the central nervous system
    * AND herpesviral infections), where only the ICD-10-CM pattern admits a
-   * 3-character letter+2-digit value. Widening those would turn 60 working single
+   * 3-character letter+2-digit value. Widening those would turn 61 working single
    * answers into `ambiguous`, so the resolution stays as it is and the excluded
    * member rides alongside it — all three callers carry `alsoIn` out to their tool
    * surface, so a successful answer names the other system holding the string.
+   *
+   * The dot is the other signal that decides. A value written in ICD-10-CM display
+   * form ({@link isIcd10cmDisplayForm}: `A01.00`) that would otherwise resolve as
+   * ambiguous with ICD-10-CM among the candidates resolves to ICD-10-CM, the only
+   * system whose codes carry a dot, and the other holders ride along in `alsoIn`.
+   * It applies only to an ambiguous outcome, so it never re-routes a value that
+   * resolves to one system or turns a not-found into an answer: the strings the
+   * shipped index holds in both ICD-10-CM and HCPCS are the values it moves, in
+   * dotted form only — `A0100` undotted is still ambiguous.
    *
    * An explicit `system` is authoritative for the choice, but membership is still
    * evaluated across every system so `alsoIn` means the same thing on both paths.
@@ -409,6 +424,9 @@ export class CodeIndexService {
     } else {
       const shaped = detectSystems(rawCode).filter((sys) => members.includes(sys));
       systems = shaped.length > 0 ? shaped : members;
+      if (systems.length > 1 && systems.includes('ICD10CM') && isIcd10cmDisplayForm(rawCode)) {
+        systems = ['ICD10CM'];
+      }
     }
 
     // Nothing resolved ⇒ nothing to disclose: `alsoIn` qualifies an answer, and
@@ -678,7 +696,10 @@ export class CodeIndexService {
       cParams.push(filters.system);
     }
     if (filters.billableOnly) {
-      cFilter.push('c.billable = 1');
+      // The SQL form of isBillableNow(): a row carrying a termination date is
+      // billable through that date, whatever the build-date flag says.
+      cFilter.push('((c.terminated IS NULL AND c.billable = 1) OR c.terminated >= ?)');
+      cParams.push(todayYyyymmdd());
     }
     if (filters.chapter) {
       cFilter.push('c.chapter = ?');
@@ -743,9 +764,10 @@ export class CodeIndexService {
    * validity are split: a non-billable or terminated code is a *successful*
    * status with a why-not, NOT a failure, and a current code in a system with no
    * billing concept (RxNorm) is `valid` with no why-not. Only a code absent from
-   * the named or detected system is `unknown` — flagged `ndc` when the value is a
-   * National Drug Code rather than a code, and naming the other bundled system
-   * that holds it when an explicit `system` missed one.
+   * the named system, or with no `system` from every bundled system, is `unknown`
+   * — flagged `ndc` when the value is a National Drug Code rather than a code,
+   * naming the other bundled system that holds it when an explicit `system` missed
+   * one, and otherwise naming every system the value's shape fits.
    */
   checkCode(
     rawCode: string,
@@ -756,8 +778,9 @@ export class CodeIndexService {
     if (present.length > 1) return { kind: 'ambiguous', systems: present };
 
     if (present.length === 0) {
+      const shapes = detectSystems(rawCode);
       // Echo a best-guess system for the caller's orientation, if shape suggests one.
-      const detected = system ?? detectSystems(rawCode)[0];
+      const detected = system ?? shapes[0];
       const trimmed = rawCode.trim();
       // An NDC is a package identifier, not a code in any bundled system, so it
       // lands here — but the shape and RxNorm messages below would misname it, a
@@ -765,18 +788,11 @@ export class CodeIndexService {
       // medcode_get_code and medcode_map_codes use, so all three name a value as a
       // decoded or a well-formed-but-unmapped NDC alike.
       const ndcWhyNot = this.ndcWhyNot(trimmed);
-      // Otherwise the named system's miss or, auto-detected (resolveSystems already
-      // widened to every system, so nothing holds the value), an RXCUI-shaped miss
-      // is a likely CPT / HCPCS Level I code.
       const whyNot =
         ndcWhyNot ??
         (system
           ? this.explicitSystemMiss(trimmed, system)
-          : detected === 'RXNORM'
-            ? this.bareIntegerMiss(trimmed)
-            : detected
-              ? `${noMatch(detected, trimmed)} in the bundled release.`
-              : `"${trimmed}" is not present in any bundled code system (ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm), and matches no bundled code shape.`);
+          : this.autoDetectedMiss(trimmed, shapes));
       return {
         kind: 'resolved',
         result: {
@@ -804,13 +820,18 @@ export class CodeIndexService {
       ...(alsoIn.length > 0 ? { alsoIn } : {}),
     };
 
-    if (row.terminated) {
+    // A termination date is the last date the code may be used (the CMS HCPCS
+    // record layout's definition), compared with today at call time: the index can
+    // be older than a termination it carries, so its build-date `billable` flag is
+    // never what decides a row with a date (see isBillableNow).
+    const today = todayYyyymmdd();
+    if (row.terminated && row.terminated < today) {
       return {
         kind: 'resolved',
         result: {
           ...base,
           status: 'terminated',
-          whyNot: `Code terminated effective ${formatDate(row.terminated)}; no longer valid for current claims.`,
+          whyNot: `Code terminated — its last valid date was ${formatDate(row.terminated)}; no longer valid for current claims.`,
         },
       };
     }
@@ -830,8 +851,20 @@ export class CodeIndexService {
     if (!SYSTEM_TRAITS[row.system].billing) {
       return { kind: 'resolved', result: { ...base, status: 'valid' } };
     }
-    if (row.billable === 1) {
-      return { kind: 'resolved', result: { ...base, status: 'valid_billable' } };
+    if (isBillableNow(row, today)) {
+      // A termination date not yet passed leaves the code billable, with the date disclosed.
+      return {
+        kind: 'resolved',
+        result: {
+          ...base,
+          status: 'valid_billable',
+          ...(row.terminated
+            ? {
+                whyNot: `Scheduled for termination — its last valid date is ${formatDate(row.terminated)}; not valid for claims after that date.`,
+              }
+            : {}),
+        },
+      };
     }
     return {
       kind: 'resolved',
@@ -845,14 +878,36 @@ export class CodeIndexService {
   }
 
   /**
-   * The miss for a bare integer no bundled system holds, with the out-of-scope
-   * sentence. If this build carries no RxNorm (hasRxNorm() false — e.g. a custom
-   * MEDCODE_DB_PATH), "No RxNorm concept matches X" would imply a populated table
-   * was searched, so RxNorm is named as absent instead.
+   * The miss with no `system`. `resolveSystems` has already searched every bundled
+   * system, so nothing holds the value; the miss names every system whose shape it
+   * fits, since naming one would report a single guess as the system searched — a
+   * 7-digit integer is both an RXCUI and an ICD-10-PCS shape. A value in ICD-10-CM
+   * display form is named against ICD-10-CM alone, as `resolveSystems` prefers it
+   * among holders: `E11.99` is no HCPCS code, though `E1199` is HCPCS-shaped. An
+   * RXCUI-shaped value is a likely CPT / HCPCS Level I code and gets the
+   * out-of-scope sentence.
    */
-  private bareIntegerMiss(trimmed: string): string {
-    return this.hasRxNorm()
-      ? `${noMatch('RXNORM', trimmed)}. ${this.outOfScopeNote()}`
+  private autoDetectedMiss(trimmed: string, shapes: SystemId[]): string {
+    if (shapes.includes('RXNORM')) return this.bareIntegerMiss(trimmed, shapes);
+    if (shapes.includes('ICD10CM') && isIcd10cmDisplayForm(trimmed)) {
+      return `${noMatch('ICD10CM', trimmed)} in the bundled release.`;
+    }
+    if (shapes.length > 0) return `${noMatch(shapes, trimmed)} in the bundled release.`;
+    return `"${trimmed}" is not present in any bundled code system (ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm), and matches no bundled code shape.`;
+  }
+
+  /**
+   * The miss for a bare integer no bundled system holds, naming the `shapes` it
+   * was searched as, with the out-of-scope sentence. If this build carries no
+   * RxNorm (hasRxNorm() false — e.g. a custom MEDCODE_DB_PATH), "No RxNorm concept
+   * matches X" would imply a populated table was searched, so RxNorm is left out of
+   * the searched systems and named as absent instead.
+   */
+  private bareIntegerMiss(trimmed: string, shapes: SystemId[]): string {
+    if (this.hasRxNorm()) return `${noMatch(shapes, trimmed)}. ${this.outOfScopeNote()}`;
+    const searched = shapes.filter((sys) => sys !== 'RXNORM');
+    return searched.length > 0
+      ? `${noMatch(searched, trimmed)} in the bundled release. ${this.outOfScopeNote()}`
       : `"${trimmed}" looks like an RxNorm RXCUI or a CPT / HCPCS Level I code. ${this.outOfScopeNote()}`;
   }
 
@@ -871,7 +926,7 @@ export class CodeIndexService {
     const generic = `${noMatch(system, trimmed)} in the bundled release.`;
     if (!isBareInteger(trimmed)) return generic;
     return system === 'RXNORM'
-      ? this.bareIntegerMiss(trimmed)
+      ? this.bareIntegerMiss(trimmed, ['RXNORM'])
       : `${generic} ${this.outOfScopeNote()}`;
   }
 
@@ -1544,12 +1599,20 @@ export function escapeLike(value: string): string {
 }
 
 /**
- * The lead of a not-found message under a named or detected system, naming the
- * missed system by its label so every miss reads alike: RxNorm misses a concept,
- * the others a code. Shared by `checkCode` and medcode_get_code.
+ * The lead of a not-found message under a named system, or the systems a value's
+ * shape fits, naming each missed system by its label so every miss reads alike:
+ * RxNorm misses a concept, the others a code (`No ICD-10-PCS code or RxNorm
+ * concept matches …`). Shared by `checkCode`, medcode_get_code, and
+ * medcode_map_codes.
  */
-export function noMatch(system: SystemId, trimmed: string): string {
-  return `No ${SYSTEM_LABELS[system]} ${system === 'RXNORM' ? 'concept' : 'code'} matches "${trimmed}"`;
+export function noMatch(systems: SystemId | readonly SystemId[], trimmed: string): string {
+  const list = typeof systems === 'string' ? [systems] : systems;
+  const codeLabels = list.filter((sys) => sys !== 'RXNORM').map((sys) => SYSTEM_LABELS[sys]);
+  const nouns = [
+    ...(codeLabels.length > 0 ? [`${codeLabels.join(' or ')} code`] : []),
+    ...(list.includes('RXNORM') ? [`${SYSTEM_LABELS.RXNORM} concept`] : []),
+  ];
+  return `No ${nouns.join(' or ')} matches "${trimmed}"`;
 }
 
 /**
@@ -1558,7 +1621,7 @@ export function noMatch(system: SystemId, trimmed: string): string {
  * ("to check it there", "to decode it there").
  */
 export function heldElsewhere(holders: SystemId[]): string {
-  return `it is a code in ${holders.map((sys) => SYSTEM_LABELS[sys]).join(' and ')}. Re-call with \`system\` ${holders.map((sys) => `"${sys}"`).join(' or ')}`;
+  return `it is a code in ${holders.map((sys) => SYSTEM_LABELS[sys]).join(' and ')}. Re-call with system ${holders.map((sys) => `"${sys}"`).join(' or ')}`;
 }
 
 /**
@@ -1585,6 +1648,22 @@ function normalizedNote(normalized: string | null): string {
  */
 export function unmappedNdcMessage(value: string, normalized: string | null): string {
   return `"${value}" is a valid NDC format but no bundled drug maps to it${normalizedNote(normalized)}.`;
+}
+
+/** Today's UTC date as YYYYMMDD — the clock the build's HCPCS cutoff reads too. */
+function todayYyyymmdd(): string {
+  return new Date().toISOString().slice(0, 10).replaceAll('-', '');
+}
+
+/**
+ * Whether a row is billable on `today` (YYYYMMDD). A row carrying a termination
+ * date (HCPCS — the only system whose release has one) is billable through that
+ * date, its last valid one, and not after: the stored `billable` flag is the build's
+ * reading of the same rule on the build date, so it goes stale for a termination
+ * that falls between the build and the call. Every other row keeps its flag.
+ */
+function isBillableNow(row: CodeRow, today: string): boolean {
+  return row.terminated ? row.terminated >= today : row.billable === 1;
 }
 
 /** Format a YYYYMMDD storage date as YYYY-MM-DD; pass through anything else. */

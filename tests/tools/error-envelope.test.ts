@@ -27,13 +27,20 @@ import { browseHierarchyTool } from '@/mcp-server/tools/definitions/browse-hiera
 import { checkCodeTool } from '@/mcp-server/tools/definitions/check-code.tool.js';
 import { getCodeTool } from '@/mcp-server/tools/definitions/get-code.tool.js';
 import { mapCodesTool } from '@/mcp-server/tools/definitions/map-codes.tool.js';
+import { readCommonMark } from '../helpers/commonmark.ts';
 import { ensureIndex } from '../helpers/index-fixture.ts';
 
-/** Flatten format() blocks into the text a content-only client would receive. */
+/**
+ * The text blocks of an error result as a content-only client renders them. The
+ * framework Markdown-escapes the message, hint, and reason, so the parse reads
+ * them back exactly as `structuredContent.error` carries them.
+ */
 function textOf(blocks: unknown): string {
-  return (blocks as { text?: string; type: string }[])
-    .flatMap((block) => (block.type === 'text' ? [block.text ?? ''] : []))
-    .join('\n');
+  return readCommonMark(
+    (blocks as { text?: string; type: string }[])
+      .flatMap((block) => (block.type === 'text' ? [block.text ?? ''] : []))
+      .join('\n'),
+  );
 }
 
 interface ErrorEnvelope {
@@ -78,6 +85,8 @@ describe('handler-thrown failures', () => {
     { tool: checkCodeTool, args: { code: ABSENT }, reason: 'unknown_code' },
     { tool: checkCodeTool, args: { code: COLLIDING }, reason: 'ambiguous_system' },
     { tool: getCodeTool, args: { codes: [ABSENT] }, reason: 'no_codes_found' },
+    // https://github.com/cyanheads/medical-codes-mcp-server/issues/58
+    { tool: getCodeTool, args: { codes: [COLLIDING] }, reason: 'ambiguous_system' },
     { tool: mapCodesTool, args: { from: ABSENT, direction: 'parents' }, reason: 'no_mapping' },
     {
       tool: mapCodesTool,
@@ -128,6 +137,37 @@ describe('handler-thrown failures', () => {
     });
   }
 
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/63
+  it('names fields as plain text in every declared recovery and handler message', async () => {
+    // The framework escapes error text into content[], so a backtick a handler
+    // writes reaches both surfaces as a literal backtick, never a code span.
+    for (const tool of [checkCodeTool, getCodeTool, mapCodesTool, browseHierarchyTool]) {
+      for (const entry of tool.errors ?? []) expect(entry.recovery, tool.name).not.toContain('`');
+    }
+    for (const [tool, args] of [
+      [getCodeTool, { codes: ['161'], system: 'ICD10CM' }],
+      [getCodeTool, { codes: ['A0100', 'ZZZZZZ9'] }],
+      [getCodeTool, { codes: ['11111222233'], system: 'RXNORM' }],
+      [mapCodesTool, { from: 'ICD10CM', direction: 'parents' }],
+      [mapCodesTool, { from: 'ICD10CM', direction: 'rxcui_to_ndc' }],
+      [mapCodesTool, { from: 'epc', direction: 'class_to_rxcuis' }],
+      [mapCodesTool, { from: 'E11.9', direction: 'parents', system: 'HCPCS' }],
+      [mapCodesTool, { from: COLLIDING, direction: 'rxcui_to_classes' }],
+      [mapCodesTool, { from: 'E11.9', direction: 'parents', classType: 'EPC', limit: 1 }],
+    ] as const) {
+      const { error } = (await callWithRawArgs(tool, args)).structuredContent as ErrorEnvelope;
+      expect(error.message, JSON.stringify(args)).not.toContain('`');
+      expect(error.data?.recovery?.hint ?? '', JSON.stringify(args)).not.toContain('`');
+    }
+    const partial = await callWithRawArgs(getCodeTool, {
+      codes: ['E11.9', COLLIDING, '11111222233', '161'],
+      system: 'ICD10CM',
+    });
+    const { notFound } = partial.structuredContent as { notFound: { reason: string }[] };
+    expect(notFound.length).toBeGreaterThan(0);
+    for (const miss of notFound) expect(miss.reason).not.toContain('`');
+  });
+
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/38
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/39
   it.each([
@@ -146,6 +186,8 @@ describe('handler-thrown failures', () => {
     ],
     [{ from: 'ICD10CM', direction: 'name_to_rxcui' }, 'takes a drug name on name_to_rxcui'],
     [{ from: 'ICD10CM', direction: 'ndc_to_rxcui' }, 'takes an NDC on ndc_to_rxcui'],
+    // https://github.com/cyanheads/medical-codes-mcp-server/issues/62
+    [{ from: COLLIDING, direction: 'rxcui_to_classes' }, 'system "ICD10CM" or "HCPCS"'],
   ])('replaces the declared no_mapping recovery for %j on both surfaces', async (args, names) => {
     const declared = mapCodesTool.errors?.find((entry) => entry.reason === 'no_mapping');
     const result = await callWithRawArgs(mapCodesTool, args);
@@ -174,9 +216,7 @@ describe('handler-thrown failures', () => {
       const result = await callWithRawArgs(getCodeTool, args);
       const envelope = result.structuredContent as ErrorEnvelope;
       expect(envelope.error.data?.reason).toBe('no_codes_found');
-      expect(envelope.error.message).toContain(
-        `resolved in ${named}, the \`system\` this call named`,
-      );
+      expect(envelope.error.message).toContain(`resolved in ${named}, the system this call named`);
       expect(envelope.error.message).toContain(holder);
       expect(envelope.error.message).not.toContain('any bundled system');
       expect(envelope.error.data?.recovery?.hint).toBe(declared?.recovery);
@@ -241,6 +281,34 @@ describe('handler-thrown failures', () => {
       expect.arrayContaining(['ICD10CM', 'HCPCS']),
     );
     expect(envelope.error.message).toContain(COLLIDING);
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/59
+  describe('medcode_check_code missing a value no system was named for', () => {
+    const declared = checkCodeTool.errors?.find((entry) => entry.reason === 'unknown_code');
+    const CPT = /If this is a CPT or HCPCS Level I code, those are out of scope/;
+
+    it.each([
+      ['1049631', ['ICD-10-PCS', 'RxNorm'], true],
+      ['R9999', ['ICD-10-CM', 'HCPCS Level II'], false],
+      ['E11.99', ['ICD-10-CM'], false],
+    ] as const)('names every shape %s fits on both surfaces', async (code, labels, cpt) => {
+      const result = await callWithRawArgs(checkCodeTool, { code });
+      expect(result.isError).toBe(true);
+      const envelope = result.structuredContent as ErrorEnvelope;
+      expect(envelope.error.code).toBe(declared?.code);
+      expect(envelope.error.data?.reason).toBe('unknown_code');
+      expect(envelope.error.data?.recovery?.hint).toBe(declared?.recovery);
+
+      const lead = envelope.error.message.split(' matches ')[0] ?? '';
+      for (const label of ['ICD-10-CM', 'ICD-10-PCS', 'HCPCS Level II', 'RxNorm'])
+        expect(lead.includes(label), `${label} in ${lead}`).toBe(labels.includes(label as never));
+      expect(CPT.test(envelope.error.message)).toBe(cpt);
+
+      const text = textOf(result.content);
+      expect(text).toContain(envelope.error.message);
+      expect(text).toContain('(reason unknown_code)');
+    });
   });
 
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/43

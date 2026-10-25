@@ -2,10 +2,10 @@
 
 **Server:** medical-codes-mcp-server
 **Version:** 0.4.1
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.14`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.16`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.0.0
-**Zod:** ^4.6.5
+**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
+**Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -57,7 +57,7 @@ export const checkCodeTool = tool('medcode_check_code', {
   // Typed per-tool error contract — ctx.fail is type-checked against these reasons.
   errors: [
     { reason: 'unknown_code', code: JsonRpcErrorCode.NotFound,
-      when: 'The code does not exist in the named or detected system.',
+      when: 'The code does not exist in the named system, or with no `system` in any bundled system.',
       recovery: 'Check the code, or search by description with medcode_search_codes.' },
   ],
 
@@ -80,7 +80,7 @@ export const checkCodeTool = tool('medcode_check_code', {
 });
 ```
 
-Output design conventions this server follows: echo the resolved `system` on every result (provenance for chaining); split validity from existence (a non-billable/terminated code is a successful result with a `whyNot`); publish `null` for a field the system's release does not carry (RxNorm `billable` and `shortDescription`, driven by `SYSTEM_TRAITS` in `types.ts`) rather than the placeholder the row stores; partial-success batch shapes (`medcode_get_code` returns `found` / `notFound`); and `ctx.enrich` for truncation disclosure on `medcode_search_codes` / `medcode_browse_hierarchy`.
+Output design conventions this server follows: echo the resolved `system` on every result (provenance for chaining); split validity from existence (a non-billable/terminated code is a successful result with a `whyNot`); publish `null` for a field the system's release does not carry (RxNorm `billable` and `shortDescription`, driven by `SYSTEM_TRAITS` in `types.ts`) rather than the placeholder the row stores; partial-success batch shapes (`medcode_get_code` returns `found` / `notFound`); `ctx.enrich` for truncation disclosure on `medcode_search_codes` / `medcode_browse_hierarchy`; and every value a tool did not author (codes, descriptions, RxNorm/RxClass names, release metadata, echoed input) renders through `_render.ts`'s `literal()` / `literalAtHeadingEnd()` / `tableRow()` — in `format()`, and in each notice's `enrichmentTrailer.render`, which escapes the whole line for `content[]` while `structuredContent.notice` carries it as written — so a CommonMark parse of `content[]` reads it back as `structuredContent` carries it. Error messages and recovery hints are plain text — the framework escapes them — so they name fields without backticks.
 
 ### Server config
 
@@ -221,7 +221,7 @@ src/
       map-codes.tool.ts                 # medcode_map_codes
       browse-hierarchy.tool.ts          # medcode_browse_hierarchy
       list-systems.tool.ts              # medcode_list_systems
-      _render.ts                        # Shared format() helpers (renderCodeLine / renderCodeBlock)
+      _render.ts                        # Shared format() helpers: the literal()/tableRow() seam for untrusted text, renderCodeLine / renderCodeBlock
 scripts/
   build-index.ts                        # Build-time ingest — bakes federal source files into data/medical-codes.db
   build-fixture-db.ts                   # Generates the small synthetic fixture DB the tests run against
@@ -323,7 +323,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
-| `bun run scripts/build-index.ts` | **Build-time only.** Download the federal source files and bake the bundled `data/medical-codes.db`. Run on the federal update cadence to refresh; the server never downloads at runtime. |
+| `bun run scripts/build-index.ts` | **Build-time only.** Bake the bundled `data/medical-codes.db` from extracted federal source files (the script never downloads; fetch RxNorm and RxClass first with the two `scripts/ingest/fetch-*.ts` fetchers). Run on the federal update cadence to refresh; the server never downloads at runtime. |
 
 **CI is one file.** `.github/workflows/codeql.yml` (scaffolded) is the only GitHub Actions workflow: CodeQL is GitHub-owned end to end, and the file runs only while the repo's CodeQL *default setup* is turned off. Verification — `devcheck`, tests, the release gates — runs locally; don't add a workflow that re-runs it.
 

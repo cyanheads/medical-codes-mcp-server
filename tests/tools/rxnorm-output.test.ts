@@ -16,6 +16,7 @@ import { browseHierarchyTool } from '@/mcp-server/tools/definitions/browse-hiera
 import { checkCodeTool } from '@/mcp-server/tools/definitions/check-code.tool.js';
 import { getCodeTool } from '@/mcp-server/tools/definitions/get-code.tool.js';
 import { searchCodesTool } from '@/mcp-server/tools/definitions/search-codes.tool.js';
+import { readCommonMark } from '../helpers/commonmark.ts';
 import { ensureIndex } from '../helpers/index-fixture.ts';
 
 type ToolResult = Awaited<ReturnType<typeof runToolContract>>;
@@ -275,7 +276,7 @@ describe('medcode_search_codes on RxNorm', () => {
     expect(page.codes).toEqual([]);
     expect(page.notice).toMatch(/RxNorm has no billing concept/);
     expect(page.notice).not.toMatch(/Broaden the terms/);
-    expect(textOf(result)).toContain(page.notice as string);
+    expect(readCommonMark(textOf(result))).toContain(page.notice as string);
   });
 
   it('keeps the broaden-your-terms notice for an ordinary empty search', async () => {

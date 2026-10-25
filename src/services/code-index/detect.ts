@@ -59,6 +59,21 @@ export function isBareInteger(rawCode: string): boolean {
   return RXCUI_RE.test(rawCode.trim());
 }
 
+/** ICD-10-CM display form: one dot, right after the third character, with more after it. */
+const ICD10CM_DISPLAY_RE = /^[^.]{3}\.[^.]+$/;
+
+/**
+ * Whether a raw value is written in ICD-10-CM display form (`A01.00`), as
+ * `displayCode` renders a stored code. Only ICD-10-CM codes carry a dot, so
+ * `resolveSystems` reads this as a preference for ICD-10-CM among the systems
+ * that hold the value. It is read off the raw value because `storageCode` strips
+ * the dot before any shape or membership test, which makes `A01.00` and `A0100`
+ * one string from there on.
+ */
+export function isIcd10cmDisplayForm(rawCode: string): boolean {
+  return ICD10CM_DISPLAY_RE.test(rawCode.trim());
+}
+
 /**
  * Return every system whose shape the raw code matches, in canonical order.
  * Empty array ⇒ the code matches no COMPLETE code shape — which is not the same
