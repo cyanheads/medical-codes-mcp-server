@@ -172,7 +172,7 @@ export const searchCodesTool = tool('medcode_search_codes', {
       const { system } = input;
       ctx.enrich.notice(
         input.billableOnly && system && !SYSTEM_TRAITS[system].billing
-          ? `${SYSTEM_LABELS[system]} has no billing concept, so \`billableOnly\` excludes every ${SYSTEM_LABELS[system]} concept. Drop \`billableOnly\` to search ${system}.`
+          ? `${SYSTEM_LABELS[system]} has no billing concept, so billableOnly excludes every ${SYSTEM_LABELS[system]} concept. Drop billableOnly to search ${system}.`
           : `No codes matched "${input.query.trim()}"${system ? ` in ${system}` : ''}. ` +
               'Broaden the terms, drop the filters, or try clinical synonyms.',
       );

@@ -320,13 +320,13 @@ describe('content[] reads back what structuredContent carries', () => {
       'browse_hierarchy',
       browseHierarchyTool,
       { system: 'ICD10CM', node: 'A00.0' },
-      'No children under "A00.0" in ICD10CM — it may be a leaf code. Omit `node` to list the top level, or browse a parent category.',
+      'No children under "A00.0" in ICD10CM — it may be a leaf code. Omit node to list the top level, or browse a parent category.',
     ],
     [
       'map_codes',
       mapCodesTool,
       { from: 'N0000008836', direction: 'class_to_rxcuis', classType: 'EPC' },
-      '"N0000008836" is the PE class "Decreased Prostaglandin Production", not a class of type EPC. Re-call with `classType` "PE", or omit `classType`.',
+      '"N0000008836" is the PE class "Decreased Prostaglandin Production", not a class of type EPC. Re-call with classType "PE", or omit classType.',
     ],
   ] as const)(
     '%s carries its notice as written on both surfaces',
@@ -337,7 +337,30 @@ describe('content[] reads back what structuredContent carries', () => {
     },
   );
 
-  it('list_systems renders release metadata, table cells, and source URLs as written', () => {
+  // A notice is escaped whole for content[], so a backtick in it would read back literally.
+  it.each([
+    [searchCodesTool, { query: 'fluoxetine', system: 'RXNORM', billableOnly: true }],
+    [browseHierarchyTool, { system: 'ICD10PCS', node: '0DTJ4ZZ' }],
+    [browseHierarchyTool, { system: 'ICD10PCS', node: '0DT' }],
+    [browseHierarchyTool, { system: 'ICD10CM', node: 'A00.0' }],
+    [mapCodesTool, { from: '161', direction: 'rxcui_to_classes', classType: 'EPC' }],
+    [mapCodesTool, { from: 'N0000008836', direction: 'class_to_rxcuis', classType: 'EPC' }],
+    [
+      mapCodesTool,
+      {
+        from: 'N0000008836',
+        direction: 'class_to_rxcuis',
+        cursor: Buffer.from(JSON.stringify({ offset: 50, limit: 1 })).toString('base64url'),
+      },
+    ],
+  ] as const)('names fields in plain text in the notice for %#', async (def, args) => {
+    const result = await runToolContract(def as never, args as never);
+    const notice = (result.structuredContent as { notice?: string }).notice;
+    expect(notice).toMatch(/\b(billableOnly|node|classType|cursor)\b/);
+    expect(notice).not.toContain('`');
+  });
+
+  it('list_systems renders release metadata and table cells as written, and source URLs as links', () => {
     const out = listSystemsTool.output.parse({
       systems: [
         {
@@ -372,9 +395,9 @@ describe('content[] reads back what structuredContent carries', () => {
       system?.releaseId,
       system?.effectiveStart,
       system?.effectiveEnd,
-      system?.sourceUrl,
+      '⟨a⟩https://www.cms.gov/files/zip/a_b_c.zip?x=1&amp=2⟨/a⟩',
       system?.builtAt,
-      out.classLayer?.sourceUrl,
+      '⟨a⟩https://rxnav.nlm.nih.gov/REST/rxclass/⟨/a⟩',
       source?.source,
       source?.version,
       source?.fetchedAt,

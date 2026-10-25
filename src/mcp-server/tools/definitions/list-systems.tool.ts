@@ -8,6 +8,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { markdownLink } from '@cyanheads/mcp-ts-core/utils';
 
 import { getCodeIndexService } from '@/services/code-index/code-index-service.js';
 import { SYSTEM_LABELS } from '@/services/code-index/types.js';
@@ -153,7 +154,9 @@ export const listSystemsTool = tool('medcode_list_systems', {
       const dated =
         s.system === 'RXNORM' ? `RxNav snapshot fetched ${builtAt}` : `built ${builtAt}`;
       if (s.sourceUrl)
-        lines.push(`- **${literal(s.label)}** source: ${literal(s.sourceUrl)} (${dated})`);
+        lines.push(
+          `- **${literal(s.label)}** source: ${markdownLink(s.sourceUrl, s.sourceUrl)} (${dated})`,
+        );
     }
 
     lines.push('', '## RxClass drug-class layer', '');
@@ -165,7 +168,7 @@ export const listSystemsTool = tool('medcode_list_systems', {
       return [{ type: 'text', text: lines.join('\n') }];
     }
     lines.push(
-      `${layer.classCount} classes and ${layer.edgeCount} drug–class edges over the RxNorm concepts above, read by medcode_map_codes rxcui_to_classes and class_to_rxcuis. Source: ${literal(layer.sourceUrl)}`,
+      `${layer.classCount} classes and ${layer.edgeCount} drug–class edges over the RxNorm concepts above, read by medcode_map_codes rxcui_to_classes and class_to_rxcuis. Source: ${markdownLink(layer.sourceUrl, layer.sourceUrl)}`,
       '',
       '| Source | Version | Classes | Edges | Fetched |',
       '|:---|:---|---:|---:|:---|',

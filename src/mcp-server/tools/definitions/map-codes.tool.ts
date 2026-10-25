@@ -393,15 +393,15 @@ function classNotice(
     const ingredient = INGREDIENT_CONCEPTS[page.sourceConceptType ?? ''];
     const productLevel = classType ? PRODUCT_CLASS_TYPES[classType] : undefined;
     if (ingredient && productLevel) {
-      return `"${from}" resolved in RXNORM as ${ingredient}, and RxClass records ${productLevel.recorded} — its ${productLevel.absence}. Find its products with direction name_to_rxcui and map one of those with \`classType\` "${classType}".`;
+      return `"${from}" resolved in RXNORM as ${ingredient}, and RxClass records ${productLevel.recorded} — its ${productLevel.absence}. Find its products with direction name_to_rxcui and map one of those with classType "${classType}".`;
     }
     return classType
-      ? `"${from}" resolved in RXNORM but has no ${classType} class in the bundled RxClass sources, on itself or its ingredients. Omit \`classType\` to list its classes of every type.`
+      ? `"${from}" resolved in RXNORM but has no ${classType} class in the bundled RxClass sources, on itself or its ingredients. Omit classType to list its classes of every type.`
       : `"${from}" resolved in RXNORM but has no rxcui_to_classes — no bundled RxClass source classifies it or its ingredients.`;
   }
   const nodes = page.sourceClasses ?? [];
   if (classType && !nodes.some((n) => n.classType === classType)) {
-    return `"${from}" is ${nameClasses(nodes)}, not a class of type ${classType}. Re-call with \`classType\` "${nodes[0]?.classType}", or omit \`classType\`.`;
+    return `"${from}" is ${nameClasses(nodes)}, not a class of type ${classType}. Re-call with classType "${nodes[0]?.classType}", or omit classType.`;
   }
   const named = classType ? nodes.filter((n) => n.classType === classType) : nodes;
   // Only MeSH IDs are shared, by the CHEM and DISEASE types — two classes at most.
@@ -670,7 +670,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
         : `resolved in ${result.resolvedSystem}`;
       ctx.enrich.notice(
         pastEnd
-          ? `"${from}" ${resolved}, but this page starts past the last ${input.direction} result. Re-call without a \`cursor\` to start from the first page.`
+          ? `"${from}" ${resolved}, but this page starts past the last ${input.direction} result. Re-call without a cursor to start from the first page.`
           : CLASS_DIRECTION_SET.has(input.direction)
             ? classNotice(from, input.direction, input.classType, result)
             : noEdgeNotice(from, input.direction, result.resolvedSystem),

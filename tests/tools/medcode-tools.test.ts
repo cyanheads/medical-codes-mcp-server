@@ -69,7 +69,7 @@ describe('medcode_list_systems', () => {
       ].join('\n'),
     );
     for (const s of out.systems) {
-      expect(text).toContain(`**${s.label}** source: ${s.sourceUrl}`);
+      expect(text).toContain(`**${s.label}** source: [${s.sourceUrl}](<${s.sourceUrl}>)`);
       expect(text).toContain(s.builtAt);
     }
   });
@@ -93,7 +93,9 @@ describe('medcode_list_systems', () => {
     expect(text).toContain(`(RxNav snapshot fetched ${rxnorm?.builtAt})`);
     expect(text).not.toMatch(/\*\*RxNorm\*\* source: \S+ \(built /);
     for (const s of out.systems.filter((sys) => sys.system !== 'RXNORM')) {
-      expect(text).toContain(`**${s.label}** source: ${s.sourceUrl} (built ${s.builtAt})`);
+      expect(text).toContain(
+        `**${s.label}** source: [${s.sourceUrl}](<${s.sourceUrl}>) (built ${s.builtAt})`,
+      );
     }
   });
 
@@ -2121,7 +2123,7 @@ describe('medcode_map_codes — rxcui_to_classes', () => {
     });
     expect(out.hits).toEqual([]);
     expect(enrich?.notice).toContain('has no EPC class');
-    expect(enrich?.notice).toContain('Omit `classType`');
+    expect(enrich?.notice).toContain('Omit classType to list');
   });
 
   it.each([
@@ -2151,7 +2153,7 @@ describe('medcode_map_codes — rxcui_to_classes', () => {
       classType: 'SCHEDULE',
     });
     expect(enrich?.notice).toBe(
-      '"198440" resolved in RXNORM but has no SCHEDULE class in the bundled RxClass sources, on itself or its ingredients. Omit `classType` to list its classes of every type.',
+      '"198440" resolved in RXNORM but has no SCHEDULE class in the bundled RxClass sources, on itself or its ingredients. Omit classType to list its classes of every type.',
     );
   });
 
@@ -2293,7 +2295,7 @@ describe('medcode_map_codes — class_to_rxcuis', () => {
     });
     expect(out.hits).toEqual([]);
     expect(enrich?.notice).toBe(
-      '"N0000008836" is the PE class "Decreased Prostaglandin Production", not a class of type EPC. Re-call with `classType` "PE", or omit `classType`.',
+      '"N0000008836" is the PE class "Decreased Prostaglandin Production", not a class of type EPC. Re-call with classType "PE", or omit classType.',
     );
   });
 
@@ -2301,7 +2303,7 @@ describe('medcode_map_codes — class_to_rxcuis', () => {
     const cursor = Buffer.from(JSON.stringify({ offset: 50, limit: 1 })).toString('base64url');
     const { enrich } = await mapCall({ from: 'N0000008836', direction: 'class_to_rxcuis', cursor });
     expect(enrich?.notice).toBe(
-      '"N0000008836" resolved to the PE class "Decreased Prostaglandin Production", but this page starts past the last class_to_rxcuis result. Re-call without a `cursor` to start from the first page.',
+      '"N0000008836" resolved to the PE class "Decreased Prostaglandin Production", but this page starts past the last class_to_rxcuis result. Re-call without a cursor to start from the first page.',
     );
   });
 

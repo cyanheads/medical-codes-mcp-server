@@ -158,11 +158,11 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
               ? `"${input.node}" is a complete 7-character ICD-10-PCS code — it exists, but its ` +
                 `7 axes (section, body system, root operation, body part, approach, device, ` +
                 `qualifier) are fully specified, so there is nothing deeper to browse. Decode it ` +
-                `with medcode_get_code for its full axis breakdown, or omit \`node\` to list the ` +
+                `with medcode_get_code for its full axis breakdown, or omit node to list the ` +
                 `17 sections.`
               : `ICD-10-PCS axis values for positions 2–7 are context-dependent (their meaning ` +
                 `varies by the section, body system, and operation that precede them), so they ` +
-                `are not enumerable from a flat partial code. Omit \`node\` to list the 17 ` +
+                `are not enumerable from a flat partial code. Omit node to list the 17 ` +
                 `sections, or decode a complete 7-character code with medcode_get_code for its ` +
                 `full axis breakdown.`,
         );
@@ -181,7 +181,7 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
             ? 'RxNorm is a flat drug vocabulary with no prefix hierarchy to browse — find a drug with medcode_search_codes (by name) or medcode_get_code (by RXCUI/NDC), then crosswalk with medcode_map_codes.'
             : input.node
               ? `No children under "${input.node}" in ${input.system} — it may be a leaf code. ` +
-                'Omit `node` to list the top level, or browse a parent category.'
+                'Omit node to list the top level, or browse a parent category.'
               : `${input.system} has no top-level entries to browse in this release.`,
       );
     }

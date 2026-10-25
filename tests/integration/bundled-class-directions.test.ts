@@ -416,7 +416,7 @@ describe('medcode_list_systems on the shipped index', () => {
     const result = await call(listSystemsTool, {});
     const text = textOf(result);
     expect(text).toContain(
-      '- **RxNorm** source: https://rxnav.nlm.nih.gov/ (RxNav snapshot fetched 2026-10-25T01:11:21.811Z)',
+      '- **RxNorm** source: [https://rxnav.nlm.nih.gov/](<https://rxnav.nlm.nih.gov/>) (RxNav snapshot fetched 2026-10-25T01:11:21.811Z)',
     );
   });
 });
