@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.4.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/medical-codes-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/medical-codes-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/medical-codes-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/medical-codes-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/medical-codes-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/medical-codes-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -116,7 +116,11 @@ CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally
 - `classType` (`EPC`, `MOA`, `PE`, `PK`, `TC`, `CHEM`, `DISEASE`, `VA`, `SCHEDULE`, `CVX`) narrows the two class directions and is rejected on every other
 - `children`, `name_to_rxcui`, `rxcui_to_ndc`, `rxcui_to_classes`, and `class_to_rxcuis` paginate via `cursor`/`limit` — one RXCUI can carry thousands of package NDCs and one class thousands of members; `limit` and `cursor` are rejected on every other direction, and `system` steers only `parents`/`children` (the drug and class directions accept only `RXNORM`)
 - Every hit carries `source` provenance so a chained call uses the right identifier; a resolvable source with no edge in the requested direction is a successful empty result with a notice, not an error — a brand name has no classes, for instance
-- Errors: `no_mapping` (source doesn't resolve — a code-system name passed as `from`, an NDC where a code or RXCUI belongs (a well-formed one no bundled drug maps to in the words `ndc_to_rxcui` uses), a class ID where an RXCUI belongs, or a bare integer that may be an out-of-scope CPT / HCPCS Level I code, is named as such, and a code-system name is recovered to the one input the direction takes; a `parents`/`children` code an explicit `system` missed is named as the code of the bundled system that holds it, and an `rxcui_to_*` source another bundled system holds is named as that system's code, since those directions read RxNorm concepts only; an `ndc_to_rxcui` miss says whether the spelling is malformed or a well-formed NDC no bundled drug maps to; a `class_to_rxcuis` miss is worded for a class ID, naming an RXCUI or class type sent in its place), `field_not_applicable` (a `system`, `classType`, `limit`, or `cursor` the direction does not use), `direction_unavailable` (RxNorm, or for the class directions the RxClass layer, not bundled in this build), `ambiguous_system`
+- Errors:
+  - `no_mapping`: the source doesn't resolve. The message names what was sent instead when it can tell: a code-system name (recovered to the input the direction takes), an NDC or class ID where an RXCUI belongs, a bare integer that may be an out-of-scope CPT / HCPCS Level I code, or a code that another bundled system holds. An `ndc_to_rxcui` miss says whether the NDC is malformed or simply maps to no bundled drug
+  - `field_not_applicable`: a `system`, `classType`, `limit`, or `cursor` the direction does not use
+  - `direction_unavailable`: RxNorm, or for the class directions the RxClass layer, is not bundled in this build
+  - `ambiguous_system`
 
 ---
 
@@ -154,141 +158,34 @@ Agent-friendly output:
 
 ## Getting started
 
-This server ships with the code database bundled — there is no API key to obtain and nothing to download at runtime.
+The code database ships with the server — there is no API key to obtain and nothing to download at runtime.
 
-### Public Hosted Instance
-
-A public instance is available at `https://medical-codes.caseyjhand.com/mcp` — no installation required. It serves Streamable HTTP; each client takes its own config shape.
-
-For Claude Code:
+Connect to the hosted instance, no install:
 
 ```sh
 claude mcp add --transport http medical-codes-mcp-server https://medical-codes.caseyjhand.com/mcp
 ```
 
-For Cline (`cline_mcp_settings.json`):
+Or run it locally:
 
-```json
-{
-  "mcpServers": {
-    "medical-codes-mcp-server": {
-      "type": "streamableHttp",
-      "url": "https://medical-codes.caseyjhand.com/mcp"
-    }
-  }
-}
+```sh
+claude mcp add medical-codes-mcp-server -- npx -y @cyanheads/medical-codes-mcp-server
 ```
 
-For Cursor (`mcp.json`):
+For other clients, add this to the MCP config file:
 
 ```json
 {
   "mcpServers": {
     "medical-codes-mcp-server": {
-      "url": "https://medical-codes.caseyjhand.com/mcp"
-    }
-  }
-}
-```
-
-Claude Desktop adds remote servers under Settings → Connectors.
-
-### Self-Hosted / Local
-
-Add the following to your MCP client configuration file.
-
-```json
-{
-  "mcpServers": {
-    "medical-codes-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/medical-codes-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
-    }
-  }
-}
-```
-
-Or with npx (no Bun required):
-
-```json
-{
-  "mcpServers": {
-    "medical-codes-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/medical-codes-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
+      "args": ["-y", "@cyanheads/medical-codes-mcp-server"]
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "medical-codes-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "-e", "MCP_TRANSPORT_TYPE=stdio",
-        "ghcr.io/cyanheads/medical-codes-mcp-server:latest"
-      ]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-Refer to "your MCP client configuration file" generically — different clients use different config paths, and the server isn't client-specific.
-
-### Prerequisites
-
-- [Bun v1.4](https://bun.sh/) or higher (or Node.js v24+ — the server falls back to the `better-sqlite3` optional dependency when not run under Bun).
-- No API key, account, or network access required.
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/medical-codes-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd medical-codes-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
-
-4. **Configure environment (optional):**
-
-```sh
-cp .env.example .env
-# all runtime vars are optional — the server runs as-is
-```
+For Docker or a source build, see [Running the server](#running-the-server).
 
 ## Configuration
 
@@ -315,6 +212,16 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
+Requires [Bun v1.4](https://bun.sh/) or higher (or Node.js v24+ — the server falls back to the `better-sqlite3` optional dependency when not run under Bun).
+
+- **Clone and install:**
+
+  ```sh
+  git clone https://github.com/cyanheads/medical-codes-mcp-server.git
+  cd medical-codes-mcp-server && bun install
+  cp .env.example .env   # optional — every runtime var has a default
+  ```
+
 - **Build and run:**
 
   ```sh
@@ -337,24 +244,15 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Building the bundled index
 
-The bundled `data/medical-codes.db` ships in the npm package and Docker image but, at >100 MB, is **not committed to git**. To get a prebuilt copy without rebuilding, take it from the npm package (`data/medical-codes.db`) or from the `medical-codes-mcp-server.mcpb` bundle attached to each [GitHub Release](https://github.com/cyanheads/medical-codes-mcp-server/releases) — a zip archive holding the index at `data/medical-codes.db`. You only rebuild when refreshing to a new federal release. The build script never downloads: extract the canonical `.gov` source files (ICD-10-CM/PCS order files, and the HCPCS quarterly `ANWEB` file under its CMS name, which sets the HCPCS release label — URLs in the script header) flat into a directory, cache RxNorm and RxClass into it with the two fetchers (into empty directories: both resume an existing cache rather than refetch it), then point the script at it:
-
-```sh
-bun run scripts/ingest/fetch-rxnav.ts --out <dir>/rxnav        # RxNorm, from the keyless RxNav API
-bun run scripts/ingest/fetch-rxclass.ts --rxnav <dir>/rxnav --out <dir>/rxclass   # RxClass, after RxNorm
-bun run scripts/build-index.ts --from-dir <dir> --fy 2027       # --fy labels the ICD-10-CM/PCS releases
-```
-
-It parses the source files and caches and emits the single `.db` file. RxNorm is dated by the time its RxNav fetch completed and the RxClass sources by theirs, both recorded in the caches, so a rebuild from the same caches reports the same dates. The build runs at build time only — the server never downloads anything.
+The bundled `data/medical-codes.db` ships in the npm package and Docker image but, at over 100 MB, is not committed to git; a clone gets a prebuilt copy from the npm package or the `.mcpb` attached to each [GitHub Release](https://github.com/cyanheads/medical-codes-mcp-server/releases). Rebuilding is only needed to refresh to a new federal release, and runs offline from source files you download first. The steps are in [docs/building-the-index.md](./docs/building-the-index.md).
 
 ### Docker
 
 ```sh
-docker build -t medical-codes-mcp-server .
-docker run --rm -e MCP_TRANSPORT_TYPE=stdio medical-codes-mcp-server
+docker run --rm -p 3010:3010 ghcr.io/cyanheads/medical-codes-mcp-server:latest
 ```
 
-The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/medical-codes-mcp-server`. It copies the bundled `data/medical-codes.db` into the image so the server is fully self-contained. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
+The image defaults to HTTP transport, stateless session mode, and logs to `/var/log/medical-codes-mcp-server`, and carries the bundled `data/medical-codes.db`, so it is fully self-contained. To run it over stdio from an MCP client, use `"command": "docker"` with `"args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/medical-codes-mcp-server:latest"]`. To build locally, `docker build -t medical-codes-mcp-server .`; OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
 
 ## Project structure
 
