@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-10-28
+
+Publishes the medical-codes-guide agent skill over MCP and in the npm package, Docker image, and .mcpb; adopts mcp-ts-core 0.13.18 with the Agent Plugins root plugin.json and mcp.json; picks up 0.13.17's fix for the HTTP per-request memory leak.
+
 ## [0.4.2](changelog/0.4.x/0.4.2.md) — 2026-10-25
 
 Bundled index rebuilt for ICD-10 FY2027, HCPCS 2026 October, and fresh RxNorm/RxClass snapshots; auto-detect misses name every system a code fits, dotted ICD-10-CM codes resolve unambiguously, HCPCS billability follows the termination date, and content[] text is Markdown-escaped.
