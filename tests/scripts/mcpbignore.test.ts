@@ -44,6 +44,14 @@ describe('.mcpbignore', () => {
     '.npmignore',
     'devcheck.config.json',
     'CITATION.cff',
+    // Release history, agent protocol files, and plugin manifests: install-time metadata only.
+    'changelog/0.4.x/0.4.2.md',
+    'CLAUDE.md',
+    'AGENTS.md',
+    'plugin.json',
+    'mcp.json',
+    '.claude-plugin/plugin.json',
+    '.codex-plugin/mcp.json',
   ])('keeps %s out of the bundle', async (path) => {
     expect((await bundleMatcher()).ignores(path)).toBe(true);
   });
@@ -58,6 +66,8 @@ describe('.mcpbignore', () => {
     'README.md',
     'LICENSE',
     'CHANGELOG.md',
+    // Root skills/ is the tree the server publishes to installing agents.
+    'skills/example/SKILL.md',
     'node_modules/@cyanheads/mcp-ts-core/dist/index.js',
     'node_modules/some-pkg/tests/index.js',
     // Root-anchored: a dependency's own src/, scripts/, and docs/ still ship.

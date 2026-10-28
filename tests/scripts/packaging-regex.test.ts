@@ -15,10 +15,15 @@ import {
   AGENT_DOC_ENTRY as STRIP_AGENT_DOC,
   NATIVE_BINDING_ENTRY as STRIP_NATIVE_BINDING,
 } from '../../scripts/clean-mcpb.ts';
-import {
-  AGENT_DOC_ENTRY as CHECK_AGENT_DOC,
-  NATIVE_BINDING_ENTRY as CHECK_NATIVE_BINDING,
-} from '../../scripts/lint-packaging.ts';
+
+/**
+ * `lint-packaging.ts` is loaded by URL at run time so `tsc` never follows it:
+ * the framework copy carries a repo-only `import('../src/mcp-server/skills.js')`
+ * fallback that does not resolve in a server (mcp-ts-core#797).
+ */
+const LINT_PACKAGING_URL = new URL('../../scripts/lint-packaging.ts', import.meta.url).href;
+const { AGENT_DOC_ENTRY: CHECK_AGENT_DOC, NATIVE_BINDING_ENTRY: CHECK_NATIVE_BINDING } =
+  (await import(LINT_PACKAGING_URL)) as { AGENT_DOC_ENTRY: RegExp; NATIVE_BINDING_ENTRY: RegExp };
 
 describe('bundle-entry patterns stay in sync across the two scripts', () => {
   it('declares the same agent-doc pattern in the strip and the check', () => {
@@ -38,5 +43,36 @@ describe('bundle-entry patterns stay in sync across the two scripts', () => {
       filterNativeBindingEntries(['node_modules/@duckdb/node-bindings-darwin-arm64/x.node']),
     ).toHaveLength(1);
     expect(filterNativeBindingEntries(['node_modules/@duckdb/node-api/index.js'])).toHaveLength(0);
+  });
+});
+
+describe('agent-doc strip is anchored to package roots', () => {
+  // The MCP SDK imports these at startup; stripping them kills the bundle at boot (mcp-ts-core#794).
+  it.each([
+    'node_modules/@modelcontextprotocol/server/dist/ext/skills/index.mjs',
+    'node_modules/@modelcontextprotocol/server/dist/ext/skills/node.mjs',
+    'node_modules/@modelcontextprotocol/core/dist/ext/skills/index.mjs',
+    'node_modules/@modelcontextprotocol/core/dist/ext/skills/index.cjs',
+    'node_modules/pkg/node_modules/@modelcontextprotocol/core/dist/ext/skills/index.mjs',
+    'node_modules/@scope/skills/index.js',
+  ])('keeps runtime module %s', (entry) => {
+    expect(filterAgentDocEntries([entry])).toEqual([]);
+    expect(CHECK_AGENT_DOC.test(entry)).toBe(false);
+  });
+
+  it.each([
+    'node_modules/@cyanheads/mcp-ts-core/framework-skills/add-tool/SKILL.md',
+    'node_modules/@cyanheads/mcp-ts-core/framework-skills/api-utils/references/formatting.md',
+    'node_modules/dotenv/skills/dotenv/SKILL.md',
+    'node_modules/dotenv/skills/dotenvx/README.md',
+    'node_modules/@scope/pkg/skills/x/SKILL.md',
+    'node_modules/pkg/.claude/settings.json',
+    'node_modules/pkg/.agents/skills/x/SKILL.md',
+    'node_modules/pkg/node_modules/inner/skills/x/SKILL.md',
+    'node_modules/pkg/node_modules/@scope/inner/.agents/notes.md',
+    'node_modules/pkg/docs/SKILL.md',
+  ])('strips package-root agent doc %s', (entry) => {
+    expect(filterAgentDocEntries([entry])).toEqual([entry]);
+    expect(CHECK_AGENT_DOC.test(entry)).toBe(true);
   });
 });
