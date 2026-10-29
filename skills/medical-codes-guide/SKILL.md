@@ -4,7 +4,7 @@ description: Judgment for the medcode_* tools (ICD-10-CM, ICD-10-PCS, HCPCS Leve
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -14,7 +14,7 @@ Offline and keyless. Each system carries exactly one release: the current ICD-10
 Not here, so say so instead of searching for a stand-in:
 
 - **CPT / HCPCS Level I** (five-digit numeric codes such as 99213). A `medcode_get_code` or `medcode_check_code` miss names them out of scope; a search simply finds nothing. Never offer a HCPCS Level II or ICD-10-PCS code as "the CPT equivalent".
-- **SNOMED CT, LOINC, ICD-9-CM, ICD-11, the WHO ICD-10 base, MS-DRG, and ATC drug classes.**
+- **SNOMED CT, LOINC, ICD-9-CM, ICD-11, the WHO ICD-10 base, MS-DRG, and ATC drug classes.** A dotted all-digit value such as `250.00` or `724.2` is ICD-9-CM, never an RXCUI: every tool misses it and says ICD-9-CM is not bundled. The exception is a three-character procedure category, which every system but RxNorm reads dot-blind: `00.1` decodes as the ICD-10-PCS table row `001`, a different code, so never report that answer for an ICD-9-CM value.
 - **Prior releases and successor links.** No tool maps an old code to its replacement, a diagnosis to a procedure or HCPCS code, or an NDC to a HCPCS drug code.
 - **Coding rules and payment.** Records carry descriptions, billability, and hierarchy only. They carry no Excludes1/Excludes2 or code-first notes, no sequencing rules, no coverage policy (NCD/LCD), and no pricing.
 - **Drug labels and safety data.** Take the NDC or drug name to the openfda server.
@@ -24,7 +24,7 @@ Not here, so say so instead of searching for a stand-in:
 | Identifier | Example | Where it comes from |
 |:--|:--|:--|
 | ICD-10-CM code | `E11.9`, `T36.0X1A` | `medcode_search_codes`, `medcode_browse_hierarchy`, `medcode_map_codes` children |
-| ICD-10-PCS code | `0DTJ4ZZ` | `medcode_search_codes` only; browsing stops at the 17 sections |
+| ICD-10-PCS code | `0DTJ4ZZ` | `medcode_search_codes`, or `medcode_map_codes` children of its table row (`0DT`); browsing stops at the 17 sections |
 | HCPCS Level II code | `J9271` | `medcode_search_codes`, `medcode_browse_hierarchy` |
 | RXCUI | `6809` (ingredient), `861007` (product) | `medcode_map_codes` name_to_rxcui, `medcode_search_codes` in RXNORM, or an NDC decoded by `medcode_get_code` |
 | NDC | `00093104801` | `medcode_map_codes` rxcui_to_ndc (11 digits, no hyphens), or the package label (`0093-1048-01`) |
@@ -35,7 +35,7 @@ Not here, so say so instead of searching for a stand-in:
 1. **Choose the system from where the code came from, not from its shape.** A diagnosis field is ICD-10-CM, an inpatient procedure field ICD-10-PCS, and a supply, drug, or service line HCPCS. An undotted letter plus four digits can be both an ICD-10-CM code and a HCPCS code: `A0100` and `J0120` come back ambiguous between ICD10CM and HCPCS, while the dotted `A01.00` resolves to ICD-10-CM. When the context tells you the system, pass it.
 2. **A verdict holds for today and the bundled release only.** `medcode_check_code` takes no date of service. Before validating a claim, compare its date of service with the effective windows from `medcode_list_systems`. When it falls outside them, report that this server cannot validate it rather than passing on today's verdict.
 3. **`valid_billable` means reportable, not correct or payable.** It says the code is a complete leaf in this release. Never claim that a code pair, sequence, or claim passes coding edits or coverage on the strength of it.
-4. **A header is where the search starts.** For `valid_header` or `valid_not_billable`, the billable code sits below. Children come one level per call, and ICD-10-CM chains run through placeholder and 7th-character levels (`T36.0X` → `T36.0X1` → `T36.0X1A`), so keep walking until `billable` is true. Never pad a code with X or a 7th character yourself; take the child the tool returns.
+4. **A header is where the search starts.** For `valid_header` or `valid_not_billable`, the billable code sits below. Children come one level per call, and ICD-10-CM chains run through placeholder and 7th-character levels (`T36.0X` → `T36.0X1` → `T36.0X1A`), so keep walking until `billable` is true. A padding level that is not a code is skipped: `S82.66` lists `S82.66XA` directly. Never pad a code with X or a 7th character yourself; take the child the tool returns.
 5. **Treat an empty class result as unknown, not as a negative finding.** Class coverage is uneven across types. Lisinopril has no EPC class here, but it has the MOA class "Angiotensin-converting Enzyme Inhibitors" (`N0000000181`), and its products carry VA class `CV800` "ACE INHIBITORS". Check the other class types before saying a drug lacks a pharmacology.
 6. **DISEASE classes are MeSH descriptors, not diagnosis codes.** `D006973` is MeSH "Hypertension". To get the ICD-10-CM code for a disease a drug may treat, search the disease name with `medcode_search_codes`.
 
@@ -55,7 +55,7 @@ Not here, so say so instead of searching for a stand-in:
 
 ### Validating claim codes
 
-1. Decode the batch with `medcode_get_code`. Pass `system` when every code comes from one field.
+1. Decode the batch with `medcode_get_code`. Pass `system` when every code comes from one field. A reply carrying `deferred` stopped at its byte budget: re-call with those codes and the same `system` and `includeHierarchy` until none come back deferred, and only then treat the batch as decoded.
 2. Check each code with `medcode_check_code` against Gates 2–4.
 3. For a header, walk `medcode_map_codes` children to the billable leaves. A billable-only search on the header's title words also lists candidates, but the matches are not confined to that subtree: "type 2 diabetes mellitus" pulls in the `O24.1-` pregnancy codes. Filter the results by code prefix yourself.
 
@@ -67,7 +67,7 @@ Not here, so say so instead of searching for a stand-in:
 
 ### Drug name → product → NDCs
 
-1. name_to_rxcui mixes ingredients, combinations, and products, and its hits carry no term type. To land on a product, search RXNORM with the chapter set to `SCD` (generic product) or `SBD` (branded product); a row's chapter is its term type. "metformin 500 MG" with chapter `SCD` returns `861007` "metformin hydrochloride 500 MG Oral Tablet", alongside combination products that contain it.
+1. name_to_rxcui mixes ingredients, combinations, and products; each hit's `conceptType` says which. Keep the `SCD` (generic product) and `SBD` (branded product) hits: "metformin" returns `6809` (`IN`) and `285129` (`MIN`) ahead of products such as `860975` (`SCD`). To narrow by strength, search RXNORM with the chapter set to `SCD` or `SBD`; a row's chapter is its term type. "metformin 500 MG" with chapter `SCD` returns `861007` "metformin hydrochloride 500 MG Oral Tablet", alongside combination products that contain it.
 2. NDCs sit on products: an ingredient such as `6809` returns none.
 3. rxcui_to_ndc returns 11-digit NDCs without hyphens. `medcode_get_code` decodes that form, and the label's hyphenated form, back to the product.
 
@@ -80,4 +80,4 @@ Not here, so say so instead of searching for a stand-in:
 
 ### ICD-10-PCS
 
-The axes below the section are not enumerable. A three-character table row such as `0DT` ("Gastrointestinal System, Resection") exists and checks as `valid_not_billable`, but the tools list no codes under it. Find PCS codes through `medcode_search_codes` with PCS vocabulary. `medcode_get_code` decodes a complete code to its title, which names the operation, body part, and approach in prose, not position by position.
+A section value the browse lists (`0`, `B`) is not a code: sent back under ICD10PCS, it misses with a note naming the section. The axes below the section are not enumerable, and sections and body systems are not codes. A three-character table row such as `0DT` ("Gastrointestinal System, Resection") is a header: it checks as `valid_header`, `medcode_map_codes` children lists the complete codes that begin with it (page with `nextCursor`; the largest table holds 1,560), and parents on a complete code returns its table row. Pass `system: "ICD10PCS"` when walking a table row: 61 of them (`B00`, `F07`) are also ICD-10-CM categories, and without it the walk lists the ICD-10-CM category's children. Find a table row or code through `medcode_search_codes` with PCS vocabulary. `medcode_get_code` decodes a complete code to its title, which names the operation, body part, and approach in prose, not position by position.

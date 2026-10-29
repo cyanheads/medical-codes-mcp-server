@@ -42,7 +42,7 @@ US medical codes — ICD-10-CM, ICD-10-PCS, HCPCS Level II, and RxNorm with RxCl
 
 | Tool | Description |
 |:---|:---|
-| `medcode_get_code` | Decode 1–50 codes to their official descriptions. Auto-detects the system per code; partial-success `found` / `notFound`. |
+| `medcode_get_code` | Decode 1–50 codes to their official descriptions. Auto-detects the system per code; partial-success `found` / `notFound`, with codes past a 24,000-byte reply returned in `deferred` for the next call. |
 | `medcode_search_codes` | Full-text search over official descriptions — go from a clinical description to the code. |
 | `medcode_check_code` | Validate a code's existence, currency, and billability, with a `whyNot` for non-billable/terminated cases. |
 | `medcode_map_codes` | Crosswalk a code within its hierarchy (`parents`/`children`), a drug across RxNorm (name ↔ RXCUI, NDC ↔ RXCUI, RXCUI → ingredients/brands), or a drug to its RxClass classes and a class to its member drugs. |
@@ -79,11 +79,12 @@ CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally
 
 - Accepts 1–50 codes; mixed systems are fine — each code's system is detected independently from its shape
 - Decodes a National Drug Code (NDC) directly to its RxNorm product — hyphenated FDA segment configurations (4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2) or bare 10/11 digits — offline via the bundled NDC↔RxNorm map, tagged `source: "NDC"`
-- Partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason — a bare integer that resolves nowhere is named as a possible CPT / HCPCS Level I code, which is out of scope, except a bare 10/11-digit one, which is named as an NDC no bundled drug maps to
+- Partial success: resolved codes in `found`, unresolved in `notFound` with a per-code reason — a bare integer that resolves nowhere is named as a possible CPT / HCPCS Level I code, which is out of scope, except a bare 10/11-digit one, which is named as an NDC no bundled drug maps to; a dotted all-digit value in ICD-9-CM form (`250.00`) is named as ICD-9-CM, which is not bundled; and an ICD-10-PCS section value (`0`) looked up under `system: "ICD10PCS"` is named as a section, not a code
 - A code written in ICD-10-CM dotted form (`A01.00`) resolves to ICD-10-CM; an explicit `system` overrides auto-detection when a value is genuinely ambiguous (an ambiguous code lists its `candidateSystems`) and skips the NDC decode; `includeHierarchy` attaches each code's parent and immediate children
+- Each reply holds `structuredContent` and the `content[]` text to 24,000 bytes apiece. Codes are decoded in request order, and once one has resolved, a code that would carry the reply past the budget comes back unprocessed in `deferred`, as sent, with every code after it. Re-call with `codes` set to `deferred` and the same `system` and `includeHierarchy` until no `deferred` comes back; together the replies hold the same `found` and `notFound`, in the same order, that one unbounded reply would. Three kinds of code are never deferred and can carry a reply past the budget: the first code that resolves, which always comes back whole (under a raised `MEDCODE_MAX_RESULTS`, one code with hundreds of children passes the budget on its own); the codes before it; and the unresolved codes after the last one that resolves, so a re-call always holds a code that resolves and never fails with `no_codes_found` or `ambiguous_system`
 - `alsoInSystems` names other bundled systems holding the same code string — it is a different code in each
 - RxNorm rows carry `billable: null` (RxNorm has no billing concept) and `shortDescription: null` (RxNorm publishes a single name); `chapter` holds the RxNorm term type (`IN`, `SCD`, `SBD`, …)
-- Errors: `ambiguous_system` when every requested code is present in more than one bundled system and no `system` is given, with the union of those systems in `candidateSystems`; `no_codes_found` when none of the requested codes resolve otherwise — in any bundled system, or under an explicit `system` in that system — naming any other bundled system that holds a code and each code present in more than one system
+- Errors: `ambiguous_system` when every requested code is present in more than one bundled system and no `system` is given, with the union of those systems in `candidateSystems`; `no_codes_found` when none of the requested codes resolve otherwise — in any bundled system, or under an explicit `system` in that system — naming any other bundled system that holds a code, each code present in more than one system, and the section values, bare integers, ICD-9-CM forms, and NDCs among the misses
 
 ---
 
@@ -98,18 +99,18 @@ CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally
 
 ### `medcode_check_code` <sub>tool</sub>
 
-- Discriminated `status`: `valid_billable`, `valid_not_billable`, `valid_header`, `valid`, or `terminated` — `valid` is a current RxNorm concept, returned with `billable: null` because RxNorm has no billing concept
+- Discriminated `status`: `valid_billable`, `valid_not_billable`, `valid_header`, `valid`, or `terminated` — `valid_header` covers an ICD-10-CM category, a HCPCS range bucket, and an ICD-10-PCS table row; `valid` is a current RxNorm concept, returned with `billable: null` because RxNorm has no billing concept
 - `whyNot` explains non-billable/terminated cases — a non-billable or terminated code is a successful result, not an error
 - A HCPCS code is `terminated` once its termination date (the last date CMS allows it on a claim) has passed, read against the UTC date of the call; until then it checks as billable, with that date in `whyNot`
 - A code written in ICD-10-CM dotted form (`A01.00`) resolves to ICD-10-CM; `alsoInSystems` names other bundled systems holding the same code string, since the verdict applies only to the resolved system
-- Errors: `unknown_code` (absent from the named system, or with no `system` from every bundled system, naming every system the code's shape fits (for a dotted ICD-10-CM form, ICD-10-CM alone) — under an explicit `system`, a code another bundled system holds is named as that system's code; an NDC lands here too, including a well-formed bare 10/11-digit one no bundled drug maps to, with a recovery pointing at `medcode_get_code` and `medcode_map_codes` `ndc_to_rxcui`) and `ambiguous_system` (present in multiple systems, no `system` given)
+- Errors: `unknown_code` (absent from the named system, or with no `system` from every bundled system, naming every system the code's shape fits (for a dotted ICD-10-CM form, ICD-10-CM alone) — under an explicit `system`, a code another bundled system holds is named as that system's code, and under `ICD10PCS` a section value (`0`) as a section that `medcode_browse_hierarchy` lists; a dotted all-digit value in ICD-9-CM form (`250.00`, `724.2`) is never read as an RXCUI and is named as ICD-9-CM, which is not bundled; an NDC lands here too, including a well-formed bare 10/11-digit one no bundled drug maps to, with a recovery pointing at `medcode_get_code` and `medcode_map_codes` `ndc_to_rxcui`) and `ambiguous_system` (present in multiple systems, no `system` given)
 
 ---
 
 ### `medcode_map_codes` <sub>tool</sub>
 
-- Hierarchy directions `parents`/`children` walk one level per call (depth-1); ICD-10-PCS codes have no prefix parent, and RxNorm concepts no code hierarchy
-- Drug directions (RxNorm): `name_to_rxcui` (matches the drug name, never the term type), `ndc_to_rxcui`/`rxcui_to_ndc` (NDC accepted hyphenated in an FDA segment configuration — 4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2 — or as bare 10/11 digits), `rxcui_to_ingredients`/`rxcui_to_brands` (each hit carries `conceptType`: `IN`/`PIN`/`MIN`/`BN`)
+- Hierarchy directions `parents`/`children` walk one level per call (depth-1). A code's parent is the nearest ancestor the release holds as a code: an ICD-10-CM code padded with the placeholder X steps past a padding level that is not a code (`S82.66XA` → `S82.66`). An ICD-10-PCS three-character table row's children are the complete codes that begin with it, and a complete code's parent is its table row (`0DTJ4ZZ` → `0DT`). RxNorm concepts have no code hierarchy
+- Drug directions (RxNorm): `name_to_rxcui` (matches the drug name, never the term type), `ndc_to_rxcui`/`rxcui_to_ndc` (NDC accepted hyphenated in an FDA segment configuration — 4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2 — or as bare 10/11 digits), `rxcui_to_ingredients`/`rxcui_to_brands`. Each `name_to_rxcui`, `ndc_to_rxcui`, `rxcui_to_ingredients`, and `rxcui_to_brands` hit carries the target's `conceptType`: `IN`/`PIN`/`MIN`/`BN` for ingredients and brands, `SCD`/`SBD`/`GPCK`/`BPCK` for drug products (every `ndc_to_rxcui` hit is one)
 - Drug-class directions (RxClass): `rxcui_to_classes` returns an RXCUI's classes, and `class_to_rxcuis` a class ID's direct member RXCUIs, each with its RxNorm name and `conceptType`. Each hit carries `classType`, `source` (the RxClass source asserting it), and `relation` (`has_epc`, `may_treat`, …) — one hit per class × source × relation. A relation starting `ci_` (`ci_with`, `ci_moa`, `ci_pe`, `ci_chemclass`) is a contraindication, not an indication
 - RxClass attaches most classes to ingredients, so a drug product also returns its ingredients' classes, naming the ingredient in `via` (an `IN` over its `PIN`); inheritance runs upward only. DEA schedules are recorded only on drug products, and VA classes almost only there: map a product for those — an ingredient's empty `SCHEDULE` or `VA` result says so rather than reading as unscheduled or unclassified. Membership is direct: a class whose drugs all attach to its subclasses (`N0000193873` "Diuretic") returns no members, and the class hierarchy is not walked
 - Class IDs match case-insensitively, and a one-digit CVX vaccine code reads as its zero-padded ID (`3` is CVX `03`)
@@ -117,7 +118,7 @@ CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally
 - `children`, `name_to_rxcui`, `rxcui_to_ndc`, `rxcui_to_classes`, and `class_to_rxcuis` paginate via `cursor`/`limit` — one RXCUI can carry thousands of package NDCs and one class thousands of members; `limit` and `cursor` are rejected on every other direction, and `system` steers only `parents`/`children` (the drug and class directions accept only `RXNORM`)
 - Every hit carries `source` provenance so a chained call uses the right identifier; a resolvable source with no edge in the requested direction is a successful empty result with a notice, not an error — a brand name has no classes, for instance
 - Errors:
-  - `no_mapping`: the source doesn't resolve. The message names what was sent instead when it can tell: a code-system name (recovered to the input the direction takes), an NDC or class ID where an RXCUI belongs, a bare integer that may be an out-of-scope CPT / HCPCS Level I code, or a code that another bundled system holds. An `ndc_to_rxcui` miss says whether the NDC is malformed or simply maps to no bundled drug
+  - `no_mapping`: the source doesn't resolve. The message names what was sent instead when it can tell: a code-system name (recovered to the input the direction takes), an NDC or class ID where an RXCUI belongs, a bare integer that may be an out-of-scope CPT / HCPCS Level I code, a dotted all-digit value in ICD-9-CM form (not bundled), an ICD-10-PCS section value under `system: "ICD10PCS"`, or a code that another bundled system holds. An `ndc_to_rxcui` miss says whether the NDC is malformed or simply maps to no bundled drug
   - `field_not_applicable`: a `system`, `classType`, `limit`, or `cursor` the direction does not use
   - `direction_unavailable`: RxNorm, or for the class directions the RxClass layer, is not bundled in this build
   - `ambiguous_system`
@@ -127,7 +128,7 @@ CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally
 ### `medcode_browse_hierarchy` <sub>tool</sub>
 
 - With no `node`: top-level entries (ICD-10-CM categories, HCPCS range buckets, ICD-10-PCS first-axis values); with a `node`: its immediate children
-- ICD-10-CM/HCPCS use a prefix hierarchy; ICD-10-PCS is axis-based and only the top-level Section axis is browsable — positions 2–7 are context-dependent and not enumerable from a flat partial code
+- ICD-10-CM/HCPCS use a prefix hierarchy; ICD-10-PCS is axis-based and only the top-level Section axis is browsable — positions 2–7 are context-dependent and not enumerable from a flat partial code, so `medcode_map_codes` `children` lists the complete codes in a table row
 - Paginates via `cursor`/`limit` (default `MEDCODE_MAX_RESULTS`, ceiling 200)
 - Errors: `unknown_node` when the node doesn't exist (or, for ICD-10-PCS, uses an out-of-alphabet character or begins no bundled code)
 
@@ -147,7 +148,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 ICD-10 / HCPCS / RxNorm-specific:
 
 - Bundled SQLite + FTS5 index — offline, keyless, deterministic; no runtime network I/O, no rate limit
-- Code-shape auto-detection routes a code to its system automatically, and a code in ICD-10-CM dotted form resolves to ICD-10-CM; an explicit `system` disambiguates collisions
+- Code-shape auto-detection routes a code to its system automatically, and a code in ICD-10-CM dotted form resolves to ICD-10-CM, while a dot between two digits keeps a value from being read as an RXCUI; an explicit `system` disambiguates collisions
 - Real billable/validity signal from the source releases — the order-file billable flag and, for HCPCS, the termination date read against the date of the call drive `medcode_check_code`, not a heuristic; RxNorm, which has no billing concept, reports `billable: null` rather than a verdict
 
 Agent-friendly output:
