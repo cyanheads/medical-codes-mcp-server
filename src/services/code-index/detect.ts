@@ -51,12 +51,47 @@ const HCPCS_RE = /^[A-V][0-9]{4}$/;
 const RXCUI_RE = /^[0-9]+$/;
 
 /**
+ * An RXCUI as a caller may write it: digits, with dots allowed only before or
+ * after them (`6809.` copied from the end of a sentence). Linear by construction:
+ * anchored at both ends, and the dot and digit classes are disjoint, so each
+ * character can match only one quantifier.
+ */
+const RXCUI_INPUT_RE = /^\.*[0-9]+\.*$/;
+
+/**
+ * Whether a raw value can name an RXCUI. A dot between two digits rules it out:
+ * no RXCUI is written that way, while ICD-9-CM codes are, and reading `724.2`
+ * dot-blind as `7242` turns ICD-9-CM lumbago into naloxone. A dot at either end
+ * stays harmless, as it is for every other system. RxNorm's gate alone: the shape
+ * test, RxNorm membership, and the RXCUI-reading map directions all read it.
+ */
+export function isRxcuiForm(rawCode: string): boolean {
+  return RXCUI_INPUT_RE.test(rawCode.trim());
+}
+
+/**
  * Whether a raw value is a bare integer as the caller typed it — trimmed, but
  * with no dot stripped, so `432.39` is not one. Every CPT / HCPCS Level I code
  * the server cannot hold takes this shape, and so does every RXCUI.
  */
 export function isBareInteger(rawCode: string): boolean {
   return RXCUI_RE.test(rawCode.trim());
+}
+
+/**
+ * ICD-9-CM as it is written: a diagnosis `NNN.N` / `NNN.NN` or a procedure
+ * `NN.N` / `NN.NN`. Anchored with bounded quantifiers, so linear. The `V` and `E`
+ * forms are left out on purpose: `V70.0` is also an ICD-10-CM display form.
+ */
+const ICD9CM_RE = /^[0-9]{2,3}\.[0-9]{1,2}$/;
+
+/**
+ * Whether a raw value (trimmed) is written as an ICD-9-CM code. No bundled code is
+ * written as a dotted all-digit string, so a miss on one is named as ICD-9-CM,
+ * which is not bundled.
+ */
+export function isIcd9cmForm(rawCode: string): boolean {
+  return ICD9CM_RE.test(rawCode.trim());
 }
 
 /** ICD-10-CM display form: one dot, right after the third character, with more after it. */
@@ -67,8 +102,8 @@ const ICD10CM_DISPLAY_RE = /^[^.]{3}\.[^.]+$/;
  * `displayCode` renders a stored code. Only ICD-10-CM codes carry a dot, so
  * `resolveSystems` reads this as a preference for ICD-10-CM among the systems
  * that hold the value. It is read off the raw value because `storageCode` strips
- * the dot before any shape or membership test, which makes `A01.00` and `A0100`
- * one string from there on.
+ * the dot before every shape and membership test but RxNorm's, which makes
+ * `A01.00` and `A0100` one string from there on.
  */
 export function isIcd10cmDisplayForm(rawCode: string): boolean {
   return ICD10CM_DISPLAY_RE.test(rawCode.trim());
@@ -90,6 +125,9 @@ export function isIcd10cmDisplayForm(rawCode: string): boolean {
  * PCS axis alphabet includes every digit; integers of any other length are
  * RXCUI-shaped alone. No bundled RXCUI collides with a PCS code, so membership
  * settles each of these to one system.
+ *
+ * Every shape is tested on the dot-stripped value except the RXCUI's, which is
+ * {@link isRxcuiForm}: `250.00` fits no shape, and `104.9640` only ICD-10-PCS's.
  */
 export function detectSystems(rawCode: string): SystemId[] {
   const code = storageCode(rawCode);
@@ -99,7 +137,7 @@ export function detectSystems(rawCode: string): SystemId[] {
   if (ICD10CM_RE.test(code)) matches.push('ICD10CM');
   if (ICD10PCS_RE.test(code)) matches.push('ICD10PCS');
   if (HCPCS_RE.test(code)) matches.push('HCPCS');
-  if (RXCUI_RE.test(code)) matches.push('RXNORM');
+  if (isRxcuiForm(rawCode)) matches.push('RXNORM');
   return matches;
 }
 

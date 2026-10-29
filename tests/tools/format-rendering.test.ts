@@ -494,6 +494,45 @@ describe('medcode_get_code format', () => {
     expect(text).toContain('(no description)');
   });
 
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/66
+  it('points a truncated ICD-10-PCS table row at map_codes under its own system', () => {
+    // 61 table rows (B00) are also ICD-10-CM categories, so a walk without the system
+    // would list the ICD-10-CM category's children instead.
+    const out = getCodeTool.output.parse({
+      found: [
+        {
+          system: 'ICD10PCS',
+          code: 'B00',
+          description: 'Imaging, Central Nervous System, Plain Radiography',
+          shortDescription: 'Imaging, Central Nervous System, Plain Radiography',
+          billable: false,
+          header: true,
+          chapter: 'B',
+          parent: null,
+          children: [
+            {
+              system: 'ICD10PCS',
+              code: 'B00B0ZZ',
+              description: 'Plain Radiography of Spinal Cord using High Osmolar Contrast',
+              shortDescription: null,
+              billable: true,
+              header: false,
+              chapter: 'B',
+            },
+          ],
+          childrenTruncated: true,
+        },
+      ],
+      notFound: [],
+    });
+    const text = textOf(getCodeTool.format!(out));
+    expect(text).toContain(
+      '_More children exist beyond those shown — retrieve them with medcode_map_codes (direction children, system ICD10PCS)._',
+    );
+    // browse_hierarchy lists only the PCS sections, never a table row's codes.
+    expect(text).not.toContain('medcode_browse_hierarchy');
+  });
+
   it('renders a description-less, chapter-less code without emitting empty fields', () => {
     // RxNorm has no billing concept, so its `billable` is null — rendered as n/a,
     // never as the literal `null` and never as a "no" verdict (#37).
@@ -519,6 +558,67 @@ describe('medcode_get_code format', () => {
     expect(text).not.toContain('chapter');
     expect(text).not.toContain('undefined');
     expect(text).not.toContain('null');
+  });
+
+  // A batch under the byte budget (#68) answers byte for byte as it always has:
+  // blocks a blank line apart, the Not found section last, and no deferred field.
+  it('composes an under-budget batch exactly, on both surfaces', async () => {
+    const result = await runToolContract(getCodeTool, {
+      codes: ['J0120', '11111-2222-33', 'A0100', 'ZZZ9'],
+      includeHierarchy: true,
+    } as never);
+    expect(textOf(result.content as { text?: string; type: string }[])).toBe(
+      [
+        '## J0120 — HCPCS Level II',
+        '**billable: yes, header: no** · chapter J',
+        'Injection, tetracycline, up to 250 mg',
+        '_Short:_ Tetracycline injection',
+        '**Parent:** J',
+        '**Children (0):**',
+        '_Complete: no further children exist beyond those listed._',
+        '',
+        '## 198440 — RxNorm',
+        '**billable: n/a, header: no** · chapter SCD',
+        'Acetaminophen 500 MG Oral Tablet',
+        '**Resolved via:** NDC',
+        '',
+        '### Not found (2)',
+        '- **A0100**: "A0100" matches multiple systems — re-call with an explicit system to disambiguate. [ICD10CM, HCPCS]',
+        '- **ZZZ9**: "ZZZ9" is not present in any bundled code system, and matches no bundled code shape.',
+      ].join('\n'),
+    );
+    expect(JSON.stringify(result.structuredContent)).toBe(
+      '{"found":[{"system":"HCPCS","code":"J0120","description":"Injection, tetracycline, up to 250 mg","shortDescription":"Tetracycline injection","billable":true,"header":false,"chapter":"J","parent":"J","children":[],"childrenTruncated":false},{"system":"RXNORM","code":"198440","description":"Acetaminophen 500 MG Oral Tablet","shortDescription":null,"billable":null,"header":false,"chapter":"SCD","source":"NDC"}],"notFound":[{"code":"A0100","reason":"\\"A0100\\" matches multiple systems — re-call with an explicit system to disambiguate.","candidateSystems":["ICD10CM","HCPCS"]},{"code":"ZZZ9","reason":"\\"ZZZ9\\" is not present in any bundled code system, and matches no bundled code shape."}]}',
+    );
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/68
+  it('renders deferred codes as written, last, with the re-call instruction', () => {
+    const out = getCodeTool.output.parse({
+      found: [
+        {
+          system: 'HCPCS',
+          code: 'G',
+          description: 'Procedures/professional services (temporary)',
+          shortDescription: null,
+          billable: false,
+          header: true,
+          chapter: 'G',
+        },
+      ],
+      notFound: [{ code: 'ZZZ9', reason: 'absent' }],
+      deferred: ['J', hazard('deferred'), hazard('deferred-hash', '#')],
+    }) as { deferred?: string[] };
+    // The field survives output parsing, so structuredContent carries it.
+    expect(out.deferred).toEqual(['J', hazard('deferred'), hazard('deferred-hash', '#')]);
+    const text = textOf(getCodeTool.format!(out as never));
+    expect(text.indexOf('### Deferred (3)')).toBeGreaterThan(text.indexOf('### Not found (1)'));
+    const section = text.slice(text.indexOf('### Deferred (3)'));
+    expect(section).toContain(
+      'Re-call medcode_get_code with these as `codes` and the same `system` and `includeHierarchy`',
+    );
+    expect(section).toContain('24,000-byte');
+    expectReadsBack(section, out.deferred ?? []);
   });
 });
 
@@ -633,14 +733,6 @@ describe('medcode_map_codes format', () => {
       '## children: A00\n**Resolved system:** ICD10CM\n- **A00.0** (ICD10CM) via ICD10CM: Cholera due to Vibrio cholerae 01, biovar cholerae\n- **A00.1** (ICD10CM) via ICD10CM: Cholera due to Vibrio cholerae 01, biovar eltor',
     ],
     [
-      { from: 'a', direction: 'name_to_rxcui' },
-      '## name_to_rxcui: a\n**Resolved system:** RXNORM\n- **161** (RXNORM) via RXNORM: acetaminophen\n- **1191** (RXNORM) via RXNORM: aspirin\n- **198440** (RXNORM) via RXNORM: Acetaminophen 500 MG Oral Tablet\n- **1049640** (RXNORM) via RXNORM: Aspirin 325 MG Oral Tablet',
-    ],
-    [
-      { from: '11111-2222-33', direction: 'ndc_to_rxcui' },
-      '## ndc_to_rxcui: 11111-2222-33\n**Resolved system:** RXNORM\n- **198440** (RXNORM) via NDC: Acetaminophen 500 MG Oral Tablet',
-    ],
-    [
       { from: '1049640', direction: 'rxcui_to_ndc' },
       '## rxcui_to_ndc: 1049640\n**Resolved system:** RXNORM\n- **00904516140** via NDC\n- **00904516160** via NDC\n- **00904516161** via NDC\n- **00904516180** via NDC\n- **00904516189** via NDC',
     ],
@@ -658,6 +750,36 @@ describe('medcode_map_codes format', () => {
       createMockContext({ errors: mapCodesTool.errors }),
     );
     expect(textOf(mapCodesTool.format!(out))).toBe(expected);
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/67
+  it.each([
+    [
+      { from: 'a', direction: 'name_to_rxcui' },
+      [
+        ['161', 'IN'],
+        ['1191', 'IN'],
+        ['198440', 'SCD'],
+        ['1049640', 'SCD'],
+      ],
+      '## name_to_rxcui: a\n**Resolved system:** RXNORM\n- **161** (RXNORM) via RXNORM [IN]: acetaminophen\n- **1191** (RXNORM) via RXNORM [IN]: aspirin\n- **198440** (RXNORM) via RXNORM [SCD]: Acetaminophen 500 MG Oral Tablet\n- **1049640** (RXNORM) via RXNORM [SCD]: Aspirin 325 MG Oral Tablet',
+    ],
+    [
+      { from: 'tylenol', direction: 'name_to_rxcui' },
+      [['202433', 'BN']],
+      '## name_to_rxcui: tylenol\n**Resolved system:** RXNORM\n- **202433** (RXNORM) via RXNORM [BN]: Tylenol',
+    ],
+    [
+      { from: '11111-2222-33', direction: 'ndc_to_rxcui' },
+      [['198440', 'SCD']],
+      '## ndc_to_rxcui: 11111-2222-33\n**Resolved system:** RXNORM\n- **198440** (RXNORM) via NDC [SCD]: Acetaminophen 500 MG Oral Tablet',
+    ],
+  ])('tags each %j hit with its term type, on both surfaces', async (args, types, expected) => {
+    const result = await runToolContract(mapCodesTool, args as never);
+    const out = result.structuredContent as { hits: { conceptType?: string; value: string }[] };
+    expect(out.hits.map((hit) => [hit.value, hit.conceptType])).toEqual(types);
+    // The paginated name_to_rxcui also closes with its truncation trailer.
+    expect(textOf(result.content as { text?: string; type: string }[])).toContain(expected);
   });
 
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/34

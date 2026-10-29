@@ -67,6 +67,14 @@ interface CmSpec {
  * with the ICD-10-PCS imaging table row of the same name below — the OTHER kind of
  * collision, where only one member matches a code shape, so the resolution stays
  * single and the excluded member is disclosed rather than reported as ambiguous.
+ *
+ * Three placeholder-X chains, as the shipped release carries them: `S82.66` →
+ * `S82.66XA` pads one level with an `X` that is not itself a code, `O32.0` →
+ * `O32.0XX0` pads two, and `T36.0` → `T36.0X` → `T36.0X1` → `T36.0X1A` pads with
+ * an `X` level that IS a code. `O32.01` and `O32.0Z` are synthetic: no release
+ * holds a node with both direct children and children reached through a padding
+ * level, but the hierarchy must order such a merged child set as one, and these
+ * two sort on either side of `O32.0XX0`/`O32.0XX1`.
  */
 const ICD10CM: CmSpec[] = [
   {
@@ -141,15 +149,144 @@ const ICD10CM: CmSpec[] = [
     billable: false,
     header: true,
   },
+  {
+    code: 'S82',
+    short: 'Fracture of lower leg, including ankle',
+    long: 'Fracture of lower leg, including ankle',
+    billable: false,
+    header: true,
+  },
+  {
+    code: 'S826',
+    short: 'Fracture of lateral malleolus',
+    long: 'Fracture of lateral malleolus',
+    billable: false,
+    header: true,
+  },
+  {
+    code: 'S8266',
+    short: 'Nondisp fx of lateral malleolus of unspecified fibula',
+    long: 'Nondisplaced fracture of lateral malleolus of unspecified fibula',
+    billable: false,
+    header: true,
+  },
+  {
+    code: 'S8266XA',
+    short: 'Nondisp fx of lateral malleolus of unsp fibula, init',
+    long: 'Nondisplaced fracture of lateral malleolus of unspecified fibula, initial encounter for closed fracture',
+    billable: true,
+    header: false,
+  },
+  {
+    code: 'S8266XB',
+    short: 'Nondisp fx of lateral malleolus of unsp fibula, 7thB',
+    long: 'Nondisplaced fracture of lateral malleolus of unspecified fibula, initial encounter for open fracture type I or II',
+    billable: true,
+    header: false,
+  },
+  {
+    code: 'O32',
+    short: 'Maternal care for malpresentation of fetus',
+    long: 'Maternal care for malpresentation of fetus',
+    billable: false,
+    header: true,
+  },
+  {
+    code: 'O320',
+    short: 'Maternal care for unstable lie',
+    long: 'Maternal care for unstable lie',
+    billable: false,
+    header: true,
+  },
+  {
+    code: 'O3201',
+    short: 'Synthetic direct child of O32.0',
+    long: 'Synthetic direct child of O32.0',
+    billable: true,
+    header: false,
+  },
+  {
+    code: 'O320XX0',
+    short: 'Maternal care for unstable lie, not applicable or unsp',
+    long: 'Maternal care for unstable lie, not applicable or unspecified',
+    billable: true,
+    header: false,
+  },
+  {
+    code: 'O320XX1',
+    short: 'Maternal care for unstable lie, fetus 1',
+    long: 'Maternal care for unstable lie, fetus 1',
+    billable: true,
+    header: false,
+  },
+  {
+    code: 'O320Z',
+    short: 'Synthetic direct child of O32.0',
+    long: 'Synthetic direct child of O32.0, sorting after its padded children',
+    billable: true,
+    header: false,
+  },
+  {
+    code: 'T36',
+    short: 'Systemic antibiotics',
+    long: 'Poisoning by, adverse effect of and underdosing of systemic antibiotics',
+    billable: false,
+    header: true,
+  },
+  {
+    code: 'T360',
+    short: 'Penicillins',
+    long: 'Poisoning by, adverse effect of and underdosing of penicillins',
+    billable: false,
+    header: true,
+  },
+  {
+    code: 'T360X',
+    short: 'Penicillins',
+    long: 'Poisoning by, adverse effect of and underdosing of penicillins',
+    billable: false,
+    header: true,
+  },
+  {
+    code: 'T360X1',
+    short: 'Poisoning by penicillins, accidental (unintentional)',
+    long: 'Poisoning by penicillins, accidental (unintentional)',
+    billable: false,
+    header: true,
+  },
+  {
+    code: 'T360X1A',
+    short: 'Poisoning by penicillins, accidental (unintentional), init',
+    long: 'Poisoning by penicillins, accidental (unintentional), initial encounter',
+    billable: true,
+    header: false,
+  },
 ];
 
 /**
- * ICD-10-PCS rows (parent stays NULL — the hierarchy is axis-based). Only a
- * complete 7-character code is billable, exactly as `parseIcd10pcsOrder` derives
- * it: the shorter entries are the table rows the order file also carries, and
- * `B00` is one of the 60 that share a code string with an ICD-10-CM category.
+ * ICD-10-PCS rows, stored as `parseIcd10pcsOrder` stores them: `parent` NULL and
+ * `header` 0 on every row, and only a complete 7-character code billable. The
+ * 3-character entries are the table rows the order file also carries, one for
+ * every complete code here as in the shipped release, where each complete code
+ * begins with exactly one table row; `B00` is one of the 61 that share a code
+ * string with an ICD-10-CM category.
  */
 const ICD10PCS: { code: string; short: string; long: string }[] = [
+  {
+    code: '0DT',
+    short: 'Gastrointestinal System, Resection',
+    long: 'Gastrointestinal System, Resection',
+  },
+  {
+    code: '027',
+    short: 'Heart and Great Vessels, Dilation',
+    long: 'Heart and Great Vessels, Dilation',
+  },
+  {
+    code: 'B00B0ZZ',
+    short: 'Plain Radiography of Spinal Cord using High Osmolar Contrast',
+    long: 'Plain Radiography of Spinal Cord using High Osmolar Contrast',
+  },
   {
     code: '0DTJ4ZZ',
     short: 'Resection of Appendix, Perc Endo Approach',

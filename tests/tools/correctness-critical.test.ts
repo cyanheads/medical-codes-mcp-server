@@ -170,13 +170,14 @@ describe('billability verdicts', () => {
     expect(parent).toMatchObject({ status: 'valid_header', billable: false });
     expect(parent.whyNot).toMatch(/more specific child code/i);
 
-    // A 3-character ICD-10-PCS table row is a real, non-billable code.
-    const nonBillable = await checkCodeTool.handler(
+    // A 3-character ICD-10-PCS table row is a real, non-billable code with complete
+    // codes below it — a header, as an ICD-10-CM category is (#66).
+    const tableRow = await checkCodeTool.handler(
       checkCodeTool.input.parse({ code: 'B00', system: 'ICD10PCS' }),
       createMockContext({ errors: checkCodeTool.errors }),
     );
-    expect(nonBillable).toMatchObject({ status: 'valid_not_billable', billable: false });
-    expect(nonBillable.whyNot).toBeTruthy();
+    expect(tableRow).toMatchObject({ status: 'valid_header', billable: false });
+    expect(tableRow.whyNot).toMatch(/more specific child code/i);
 
     // https://github.com/cyanheads/medical-codes-mcp-server/issues/37 — RxNorm has
     // no billing concept, so an RXCUI is valid with no billing verdict at all.

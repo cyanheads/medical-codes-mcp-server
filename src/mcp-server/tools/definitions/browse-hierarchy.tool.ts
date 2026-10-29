@@ -5,7 +5,9 @@
  * (chapter → category → code); ICD-10-PCS exposes only its top-level Section
  * axis (position 1) — positions 2–7 are context-dependent on the preceding axis
  * path and are not enumerable from a flat partial code, so a PCS node that really
- * does prefix a bundled code returns no axes plus a notice. One that does not —
+ * does prefix a bundled code returns no axes plus a notice, which sends a
+ * three-character table row to `medcode_map_codes` children for its complete
+ * codes. One that does not —
  * an out-of-alphabet character, or a combination no code begins with — is
  * `unknown_node`, never a silent empty traversal.
  * @module mcp-server/tools/definitions/browse-hierarchy.tool
@@ -14,7 +16,11 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCodeIndexService } from '@/services/code-index/code-index-service.js';
-import { storageCode } from '@/services/code-index/schema.js';
+import {
+  ICD10PCS_CODE_LENGTH,
+  ICD10PCS_TABLE_ROW_LENGTH,
+  storageCode,
+} from '@/services/code-index/schema.js';
 import { SYSTEM_IDS } from '@/services/code-index/types.js';
 import { encodeNextCursor, resolvePage } from './_pagination.js';
 import { literal, renderCodeLine, tableRow } from './_render.js';
@@ -51,7 +57,7 @@ const AxisNodeSchema = z
 export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
   title: 'Browse Code Hierarchy',
   description:
-    "Walk a US medical code system's hierarchy for discovery without a search term. With no `node`, returns the top-level entries (ICD-10-CM categories, HCPCS range buckets, or ICD-10-PCS first-axis values). With a `node`, returns its immediate children. ICD-10-CM and HCPCS use a prefix hierarchy (a shorter code is the parent of a longer one); ICD-10-PCS is axis-based — each of its 7 characters is an independent axis (section, body system, root operation, body part, approach, device, qualifier), but only the top-level Section axis is browsable (omit `node`): positions 2–7 are context-dependent on the preceding axis path and are not enumerable from a flat partial code. Lets an agent orient in an unfamiliar system or enumerate a category's specific codes. A large child set paginates: when the response carries a `nextCursor`, pass it back as `cursor` to fetch the next page.",
+    "Walk a US medical code system's hierarchy for discovery without a search term. With no `node`, returns the top-level entries (ICD-10-CM categories, HCPCS range buckets, or ICD-10-PCS first-axis values). With a `node`, returns its immediate children. ICD-10-CM and HCPCS use a prefix hierarchy (a shorter code is the parent of a longer one); ICD-10-PCS is axis-based — each of its 7 characters is an independent axis (section, body system, root operation, body part, approach, device, qualifier), but only the top-level Section axis is browsable (omit `node`): positions 2–7 are context-dependent on the preceding axis path and are not enumerable from a flat partial code, so list the complete codes in a three-character ICD-10-PCS table row with medcode_map_codes (direction children) instead. Lets an agent orient in an unfamiliar system or enumerate a category's specific codes. A large child set paginates: when the response carries a `nextCursor`, pass it back as `cursor` to fetch the next page.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -149,22 +155,19 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
       if (result.axes.length === 0) {
         // A complete 7-char code and a partial code both land here with empty axes;
         // word the notice for each. (browsePcs already returned unknown_node for a
-        // node absent from the index, so a complete node reaching here exists.)
-        const isCompleteCode = input.node ? storageCode(input.node).length >= 7 : false;
+        // node absent from the index, so a complete node reaching here exists, and
+        // a 3-character one prefixes a code, so it is that code's table row.)
+        const partial = input.node ? storageCode(input.node) : '';
+        const tableRow =
+          partial.length === ICD10PCS_TABLE_ROW_LENGTH
+            ? `"${input.node}" is an ICD-10-PCS table row: list the complete codes in it with medcode_map_codes (direction children, system ICD10PCS).`
+            : 'A three-character table row lists its complete codes through medcode_map_codes (direction children, system ICD10PCS) — find one by description with medcode_search_codes — and medcode_get_code decodes a complete code to its title.';
         ctx.enrich.notice(
           !input.node
             ? `No ICD-10-PCS sections are bundled in this release.`
-            : isCompleteCode
-              ? `"${input.node}" is a complete 7-character ICD-10-PCS code — it exists, but its ` +
-                `7 axes (section, body system, root operation, body part, approach, device, ` +
-                `qualifier) are fully specified, so there is nothing deeper to browse. Decode it ` +
-                `with medcode_get_code for its full axis breakdown, or omit node to list the ` +
-                `17 sections.`
-              : `ICD-10-PCS axis values for positions 2–7 are context-dependent (their meaning ` +
-                `varies by the section, body system, and operation that precede them), so they ` +
-                `are not enumerable from a flat partial code. Omit node to list the 17 ` +
-                `sections, or decode a complete 7-character code with medcode_get_code for its ` +
-                `full axis breakdown.`,
+            : partial.length >= ICD10PCS_CODE_LENGTH
+              ? `"${input.node}" is a complete 7-character ICD-10-PCS code — it exists, but its 7 axes (section, body system, root operation, body part, approach, device, qualifier) are fully specified, so there is nothing deeper to browse. Decode it with medcode_get_code for its title, or map its parents with medcode_map_codes for the table row it belongs to; omit node to list the 17 sections.`
+              : `ICD-10-PCS axis values for positions 2–7 are context-dependent (their meaning varies by the section, body system, and operation that precede them), so they are not enumerable from a flat partial code. ${tableRow} Omit node to list the 17 sections.`,
         );
       }
       ctx.log.info('Browsed PCS axes', { node: input.node ?? null, count: result.axes.length });

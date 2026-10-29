@@ -16,11 +16,12 @@ import {
   CodeIndexService,
   getCodeIndexService,
   heldElsewhere,
+  ICD9CM_NOTE,
   type MapPage,
   noMatch,
   unmappedNdcMessage,
 } from '@/services/code-index/code-index-service.js';
-import { isBareInteger, ndcCandidates } from '@/services/code-index/detect.js';
+import { isBareInteger, isIcd9cmForm, ndcCandidates } from '@/services/code-index/detect.js';
 import {
   CLASS_DIRECTIONS,
   type MapDirection,
@@ -123,9 +124,33 @@ const EXAMPLE_CODE: Record<SystemId, string> = {
   RXNORM: '161',
 };
 
-/** Recovery for a bare integer no bundled system holds — likely a CPT / HCPCS Level I code. */
-const OUT_OF_SCOPE_RECOVERY =
-  'CPT and HCPCS Level I codes are not bundled. Find the procedure by description with medcode_search_codes instead — ICD-10-PCS covers inpatient procedures and HCPCS Level II covers supplies and services.';
+/**
+ * Recovery for a bare integer no bundled system holds — likely a CPT / HCPCS Level
+ * I code, or on an rxcui_to_* direction a mistyped RXCUI, so the hint there also
+ * names where an RXCUI comes from.
+ */
+function outOfScopeRecovery(direction: MapDirection): string {
+  const cpt =
+    'CPT and HCPCS Level I codes are not bundled. Find the procedure by description with medcode_search_codes instead — ICD-10-PCS covers inpatient procedures and HCPCS Level II covers supplies and services.';
+  return HIERARCHY_DIRECTIONS.has(direction)
+    ? cpt
+    : `${cpt} ${direction} takes an RXCUI: find one from a drug name with direction name_to_rxcui.`;
+}
+
+/**
+ * Recovery for a value in ICD-9-CM form no bundled system holds. On an rxcui_to_*
+ * direction the code a description search finds would only miss again, so the
+ * hint there names the RXCUI the direction takes.
+ */
+function icd9cmRecovery(direction: MapDirection): string {
+  return HIERARCHY_DIRECTIONS.has(direction)
+    ? 'ICD-9-CM is not bundled. Find the current ICD-10-CM diagnosis or ICD-10-PCS procedure code by description with medcode_search_codes, then map that code.'
+    : `ICD-9-CM is not bundled, and ${direction} takes an RXCUI: find one from a drug name with direction name_to_rxcui. For the current diagnosis or procedure code, search by description with medcode_search_codes.`;
+}
+
+/** Recovery for an ICD-10-PCS section value sent as a code under system ICD10PCS. */
+const PCS_SECTION_RECOVERY =
+  'List the ICD-10-PCS sections with medcode_browse_hierarchy (system ICD10PCS, no node), and find a three-character table row or a complete 7-character code by description with medcode_search_codes. A table row walks here: its children are the complete codes that begin with it.';
 
 /** Recovery for a hierarchy source an explicit `system` missed while another bundled system holds it. */
 const HELD_ELSEWHERE_RECOVERY =
@@ -222,12 +247,13 @@ function drugInput(direction: MapDirection): string {
  * system named in `from` (letters always) is one, and an `ndc_to_rxcui`
  * source is always read as an NDC. A hierarchy source an explicit `system` missed
  * is named as the code of the bundled system that holds it, as medcode_check_code
- * and medcode_get_code name it. On a direction that reads `from` as a code or an
+ * and medcode_get_code name it, and an ICD-10-PCS section value missed under
+ * ICD10PCS as that section. On a direction that reads `from` as a code or an
  * RXCUI, so are an NDC — one medcode_get_code decodes, or a well-formed one no
  * bundled drug maps to — then, on an rxcui_to_* direction, a code another bundled
- * system holds, and failing those, a bare integer no bundled system holds.
- * Everything else keeps the generic message and the declared recovery (`null`
- * here).
+ * system holds, and failing those, a bare integer or a value in ICD-9-CM form no
+ * bundled system holds. Everything else keeps the generic message and the declared
+ * recovery (`null` here).
  */
 function sourceMiss(
   from: string,
@@ -258,13 +284,23 @@ function sourceMiss(
       recovery: CLASS_ID_AS_RXCUI_RECOVERY,
     };
   }
+  // An ICD-10-PCS section value, as medcode_browse_hierarchy lists it, passed back
+  // as a code under ICD10PCS is named as the section it is, never as a CPT code.
+  const section = system === 'ICD10PCS' ? svc.pcsSectionNote(from) : null;
   // Without a `system` the hierarchy lookup already searched every bundled system,
   // so only a named one can miss a code another system holds.
   const holders = system && HIERARCHY_DIRECTIONS.has(direction) ? svc.systemsHolding(from) : [];
   if (system && holders.length > 0) {
+    const held = `${noMatch(system, from)} — ${heldElsewhere(holders)} to walk it there.`;
     return {
-      message: `${noMatch(system, from)} — ${heldElsewhere(holders)} to walk it there.`,
+      message: section ? `${held} ${section}` : held,
       recovery: HELD_ELSEWHERE_RECOVERY,
+    };
+  }
+  if (section) {
+    return {
+      message: `${noMatch('ICD10PCS', from)} in the bundled release. ${section}`,
+      recovery: PCS_SECTION_RECOVERY,
     };
   }
   // A bare 10/11-digit NDC is also a bare integer, so it is named before the CPT
@@ -287,18 +323,13 @@ function sourceMiss(
   // only RxNorm and missed, so any bundled system holding the value is another one.
   const codeHolders = HIERARCHY_DIRECTIONS.has(direction) ? [] : svc.systemsHolding(from);
   if (codeHolders.length > 0) {
-    const quoted = (systems: SystemId[]) => systems.map((sys) => `"${sys}"`).join(' or ');
-    // The decode names every holder, since a string two systems hold can be
-    // ambiguous without a system (A0100); the walk only those with a prefix
-    // hierarchy — an ICD-10-PCS code has no prefix parent, and a complete one no children.
-    const walkable = codeHolders.filter((sys) => sys !== 'ICD10PCS');
-    const walk =
-      walkable.length > 0
-        ? `, or walk its hierarchy with direction parents or children and system ${quoted(walkable)}`
-        : '';
+    const quoted = codeHolders.map((sys) => `"${sys}"`).join(' or ');
+    // Both steps name every holder: a string two systems hold can be ambiguous
+    // without a system (A0100), and each holder has a code hierarchy to walk —
+    // RxNorm, the one without, never reaches here.
     return {
       message: `"${from}" is a code in ${codeHolders.map((sys) => SYSTEM_LABELS[sys]).join(' and ')}, not an RXCUI — ${direction} reads RxNorm concepts only.`,
-      recovery: `Decode it with medcode_get_code and system ${quoted(codeHolders)}${walk}. To reach a drug's RXCUI, map the drug name with direction name_to_rxcui.`,
+      recovery: `Decode it with medcode_get_code and system ${quoted}, or walk its hierarchy with direction parents or children and system ${quoted}. To reach a drug's RXCUI, map the drug name with direction name_to_rxcui.`,
     };
   }
   // Every bundled system holding the value has been named by now, so a bare
@@ -306,7 +337,15 @@ function sourceMiss(
   if (isBareInteger(from)) {
     return {
       message: `No bundled code matches "${from}". ${svc.outOfScopeNote()}`,
-      recovery: OUT_OF_SCOPE_RECOVERY,
+      recovery: outOfScopeRecovery(direction),
+    };
+  }
+  // No bundled system writes a dotted all-digit code, so one in ICD-9-CM form is
+  // named as that unbundled system's.
+  if (isIcd9cmForm(from)) {
+    return {
+      message: `No bundled code matches "${from}". ${ICD9CM_NOTE}`,
+      recovery: icd9cmRecovery(direction),
     };
   }
   return { message: `No bundled code matches "${from}".`, recovery: null };
@@ -316,9 +355,10 @@ function sourceMiss(
  * The notice for a resolvable source that has no edges in `direction`. Every
  * direction states its own cause and next move, because the causes are not
  * interchangeable facts: an ingredient concept has no ingredients of its own, an
- * ICD-10-PCS code has no prefix parent, an RxNorm concept has no code hierarchy
- * at all, and wording any of them as "a leaf code with no children" would tell
- * the caller something untrue about its input.
+ * ICD-10-PCS table row has no parent because nothing above it is a code (its
+ * recipe names the system, since 61 table rows are also ICD-10-CM categories), an
+ * RxNorm concept has no code hierarchy at all, and wording any of them as "a leaf
+ * code with no children" would tell the caller something untrue about its input.
  */
 function noEdgeNotice(from: string, direction: MapDirection, system: string | null): string {
   const head = `"${from}" resolved in ${system} but has no ${direction}`;
@@ -336,7 +376,7 @@ function noEdgeNotice(from: string, direction: MapDirection, system: string | nu
       return `${head} — no branded form of it is in the bundled RxNorm set. Decode it with medcode_get_code.`;
     default:
       return system === 'ICD10PCS'
-        ? `${head} — ICD-10-PCS codes are axis-based and have no prefix parent. Decode it with medcode_get_code.`
+        ? `${head} — an ICD-10-PCS table row is the top of the code hierarchy, since the section and body-system characters above it are not codes. Map its children (direction children, system ICD10PCS) for the complete codes in the table, or list the sections with medcode_browse_hierarchy (system ICD10PCS, no node).`
         : `${head} — it is a top-level code with no parent. Decode it with medcode_get_code, or map the opposite direction.`;
   }
 }
@@ -412,7 +452,7 @@ function classNotice(
 export const mapCodesTool = tool('medcode_map_codes', {
   title: 'Map Medical Codes',
   description:
-    "Crosswalk a US medical code or drug across systems and within a hierarchy. Hierarchy directions: `parents` and `children` walk a code's prefix hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full ancestor or descendant path (ICD-10-CM/HCPCS; ICD-10-PCS codes have no prefix parent, and RxNorm concepts no code hierarchy). A resolvable source with no edge in the requested direction is a successful empty result with a notice, not an error. A source code string that also exists in another bundled system carries `alsoInSystems` naming it, since only the resolved system's hierarchy was walked. Drug directions (RxNorm): `name_to_rxcui` (drug name → RXCUI), `ndc_to_rxcui` and `rxcui_to_ndc` (NDC ↔ RXCUI; NDCs accepted hyphenated in an FDA segment configuration — 4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2 — or as bare 10/11 digits; `ndc_to_rxcui` names the product it decoded to), `rxcui_to_ingredients` and `rxcui_to_brands` (RXCUI → ingredient/brand RXCUIs, each with the target's RxNorm name and its `conceptType` — read that before counting a combination product's ingredients). Drug-class directions (RxClass): `rxcui_to_classes` (RXCUI → its classes: pharmacologic class, mechanism of action, physiologic effect, pharmacokinetics, therapeutic category, chemical structure, the diseases it may treat, prevent, diagnose, or induce or is contraindicated with, VA class, DEA controlled-substance schedule, CDC vaccine code; a drug product also carries its ingredients' classes, naming the ingredient in `via`, while DEA schedules are recorded only on drug products and VA classes almost only there, so map a product for those) and `class_to_rxcuis` (class ID → its direct member RXCUIs, each with its RxNorm name and `conceptType`). Each class hit carries `classType`, `source` (the RxClass source asserting it), and `relation` — a `ci_` relation is a contraindication, not an indication; narrow either direction with `classType`. Every result carries `source` provenance (which system or edge answered) so a chained call (e.g. into openfda with a resolved NDC) uses the right identifier. The `children`, `name_to_rxcui`, `rxcui_to_ndc`, `rxcui_to_classes`, and `class_to_rxcuis` directions can return large sets and paginate: a `nextCursor` in the response is passed back as `cursor` (with an optional `limit` page size) to walk the full set. A field the direction does not use is rejected with `field_not_applicable`: `limit` and `cursor` on the point directions, `classType` outside the class directions, and a `system` other than RXNORM on the drug and class directions.",
+    "Crosswalk a US medical code or drug across systems and within a hierarchy. Hierarchy directions: `parents` and `children` walk a code's hierarchy one level per call — immediate parent/children only (depth-1); call iteratively for the full ancestor or descendant path. ICD-10-CM and HCPCS walk the prefix hierarchy, stepping past an ICD-10-CM level padded with the placeholder X that is not itself a code (the parent of `S82.66XA` is `S82.66`); an ICD-10-PCS three-character table row's children are the complete codes that begin with it, and a complete code's parent is its table row; RxNorm concepts have no code hierarchy. A resolvable source with no edge in the requested direction is a successful empty result with a notice, not an error. A source code string that also exists in another bundled system carries `alsoInSystems` naming it, since only the resolved system's hierarchy was walked. Drug directions (RxNorm): `name_to_rxcui` (drug name → RXCUI; one name matches ingredients, combinations, and products alike, each hit tagged with its `conceptType`), `ndc_to_rxcui` and `rxcui_to_ndc` (NDC ↔ RXCUI; NDCs accepted hyphenated in an FDA segment configuration — 4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2 — or as bare 10/11 digits; `ndc_to_rxcui` names the product it decoded to and its `conceptType`), `rxcui_to_ingredients` and `rxcui_to_brands` (RXCUI → ingredient/brand RXCUIs, each with the target's RxNorm name and its `conceptType` — read that before counting a combination product's ingredients). Drug-class directions (RxClass): `rxcui_to_classes` (RXCUI → its classes: pharmacologic class, mechanism of action, physiologic effect, pharmacokinetics, therapeutic category, chemical structure, the diseases it may treat, prevent, diagnose, or induce or is contraindicated with, VA class, DEA controlled-substance schedule, CDC vaccine code; a drug product also carries its ingredients' classes, naming the ingredient in `via`, while DEA schedules are recorded only on drug products and VA classes almost only there, so map a product for those) and `class_to_rxcuis` (class ID → its direct member RXCUIs, each with its RxNorm name and `conceptType`). Each class hit carries `classType`, `source` (the RxClass source asserting it), and `relation` — a `ci_` relation is a contraindication, not an indication; narrow either direction with `classType`. Every result carries `source` provenance (which system or edge answered) so a chained call (e.g. into openfda with a resolved NDC) uses the right identifier. The `children`, `name_to_rxcui`, `rxcui_to_ndc`, `rxcui_to_classes`, and `class_to_rxcuis` directions can return large sets and paginate: a `nextCursor` in the response is passed back as `cursor` (with an optional `limit` page size) to walk the full set. A field the direction does not use is rejected with `field_not_applicable`: `limit` and `cursor` on the point directions, `classType` outside the class directions, and a `system` other than RXNORM on the drug and class directions.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -495,7 +535,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
               .string()
               .optional()
               .describe(
-                'The target concept\'s RxNorm type, present on `rxcui_to_ingredients`, `rxcui_to_brands`, and `class_to_rxcuis` hits only. A class member may be any drug concept: an ingredient type below, or a drug product — "SCD"/"SBD" (clinical/branded drug) or "GPCK"/"BPCK" (generic/branded pack). Otherwise "IN" (ingredient), "PIN" (precise ingredient — a specific salt, ester, or isomer of an ingredient), "MIN" (multiple ingredients — a concept naming a combination, never a substance within it), or "BN" (brand name). Ingredient hits mix the first three, so the hit count is not the substance count: a "MIN" hit is the grouping concept and never counts, and a "PIN" names a form of a substance rather than an extra one — usually alongside the "IN" it refines, though two "PIN" esters can share a single "IN". Counting the "IN" hits is the closest reading, and under-counts those shared cases.',
+                'The target concept\'s RxNorm type, present on `name_to_rxcui`, `ndc_to_rxcui`, `rxcui_to_ingredients`, `rxcui_to_brands`, and `class_to_rxcuis` hits only. A drug-name match or a class member may be any drug concept: an ingredient type or brand name below, or a drug product — "SCD"/"SBD" (clinical/branded drug) or "GPCK"/"BPCK" (generic/branded pack), the four an `ndc_to_rxcui` hit always takes. Otherwise "IN" (ingredient), "PIN" (precise ingredient — a specific salt, ester, or isomer of an ingredient), "MIN" (multiple ingredients — a concept naming a combination, never a substance within it), or "BN" (brand name). Ingredient hits mix the first three, so the hit count is not the substance count: a "MIN" hit is the grouping concept and never counts, and a "PIN" names a form of a substance rather than an extra one — usually alongside the "IN" it refines, though two "PIN" esters can share a single "IN". Counting the "IN" hits is the closest reading, and under-counts those shared cases.',
               ),
             classType: z
               .enum(RXCLASS_CLASS_TYPES)
@@ -546,7 +586,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
       .string()
       .optional()
       .describe(
-        'Guidance whenever a resolvable source returns no hits, naming which of the two causes applies: it has no edge in the requested direction (a top-level code has no parent; a leaf has no children; ICD-10-PCS codes have no prefix parent; RxNorm concepts have no code hierarchy; no bundled class, or none of the requested `classType`, covers the RXCUI; a class has no direct member), or the `cursor` starts past the last page of a direction that does have results.',
+        'Guidance whenever a resolvable source returns no hits, naming which of the two causes applies: it has no edge in the requested direction (a top-level code has no parent; a leaf has no children; an ICD-10-PCS table row has no parent; RxNorm concepts have no code hierarchy; no bundled class, or none of the requested `classType`, covers the RXCUI; a class has no direct member), or the `cursor` starts past the last page of a direction that does have results.',
       ),
   },
 

@@ -18,6 +18,13 @@ import { mapCodesTool } from '@/mcp-server/tools/definitions/map-codes.tool.js';
 import { searchCodesTool } from '@/mcp-server/tools/definitions/search-codes.tool.js';
 import type { CodeIndexService } from '@/services/code-index/code-index-service.js';
 import { readCommonMark } from '../helpers/commonmark.ts';
+import {
+  type GetCodePage,
+  getCodePage,
+  REPLY_BUDGET_BYTES,
+  unbudgetedGetCode,
+  walkGetCode,
+} from '../helpers/get-code-pages.ts';
 import { ensureIndex } from '../helpers/index-fixture.ts';
 
 /**
@@ -62,8 +69,8 @@ describe('medcode_list_systems', () => {
         '',
         '| System | Release | Effective | Codes |',
         '|:---|:---|:---|---:|',
-        '| ICD-10-CM (ICD10CM) | ICD-10-CM FY2026 (fixture) | 2025-10-01 → 2026-09-30 | 12 |',
-        '| ICD-10-PCS (ICD10PCS) | ICD-10-PCS FY2026 (fixture) | 2025-10-01 → 2026-09-30 | 4 |',
+        '| ICD-10-CM (ICD10CM) | ICD-10-CM FY2026 (fixture) | 2025-10-01 → 2026-09-30 | 28 |',
+        '| ICD-10-PCS (ICD10PCS) | ICD-10-PCS FY2026 (fixture) | 2025-10-01 → 2026-09-30 | 7 |',
         '| HCPCS Level II (HCPCS) | HCPCS 2026 (fixture) | 2026-01-01 → 2026-12-31 | 9 |',
         '| RxNorm (RXNORM) | RxNorm (current normalized set) (fixture) | — | 5 |',
       ].join('\n'),
@@ -411,15 +418,37 @@ describe('medcode_map_codes', () => {
     expect(notice).toContain('top-level');
   });
 
-  it('returns ok-empty with a PCS-specific notice for an ICD-10-PCS code with no parent', async () => {
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/66
+  it('returns ok-empty with a PCS-specific notice for an ICD-10-PCS table row', async () => {
     const ctx = createMockContext({ errors: mapCodesTool.errors });
     const out = await mapCodesTool.handler(
-      mapCodesTool.input.parse({ from: '0DTJ4ZZ', direction: 'parents' }),
+      mapCodesTool.input.parse({ from: '0DT', direction: 'parents' }),
       ctx,
     );
     expect(out.hits).toEqual([]);
     expect(out.resolvedSystem).toBe('ICD10PCS');
-    expect(getEnrichment(ctx)?.notice).toMatch(/axis-based and have no prefix parent/i);
+    expect(getEnrichment(ctx)?.notice).toBe(
+      '"0DT" resolved in ICD10PCS but has no parents — an ICD-10-PCS table row is the top of the code hierarchy, since the section and body-system characters above it are not codes. Map its children (direction children, system ICD10PCS) for the complete codes in the table, or list the sections with medcode_browse_hierarchy (system ICD10PCS, no node).',
+    );
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/66
+  it('names the system in the table-row recipe, which a collision row needs to walk', async () => {
+    // B00 is also an ICD-10-CM category: the recipe, followed as printed, must walk
+    // the PCS table row rather than resolve the bare string to ICD-10-CM.
+    const ctx = createMockContext({ errors: mapCodesTool.errors });
+    await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: 'B00', direction: 'parents', system: 'ICD10PCS' }),
+      ctx,
+    );
+    const notice = getEnrichment(ctx)?.notice as string;
+    expect(notice).toContain('(direction children, system ICD10PCS)');
+    const walked = await mapCodesTool.handler(
+      mapCodesTool.input.parse({ from: 'B00', direction: 'children', system: 'ICD10PCS' }),
+      createMockContext({ errors: mapCodesTool.errors }),
+    );
+    expect(walked.hits.map((h) => [h.system, h.value])).toEqual([['ICD10PCS', 'B00B0ZZ']]);
+    expect(notice).toContain('medcode_browse_hierarchy (system ICD10PCS, no node)');
   });
 
   it('returns ok-empty with a notice for a leaf with no children (not the parents wording)', async () => {
@@ -754,6 +783,226 @@ describe('medcode_get_code — childrenTruncated (#16)', () => {
     const ctx = createMockContext({ errors: getCodeTool.errors });
     const out = await getCodeTool.handler(getCodeTool.input.parse({ codes: ['E11'] }), ctx);
     expect(out.found[0]?.childrenTruncated).toBeUndefined();
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/68
+describe('medcode_get_code — reply byte budget (#68)', () => {
+  // The heaviest fixture decode under includeHierarchy: ~0.8 KB on each surface.
+  const HEAVY = 'S8266';
+  const within = (page: GetCodePage) =>
+    page.contentBytes <= REPLY_BUDGET_BYTES && page.structuredBytes <= REPLY_BUDGET_BYTES;
+
+  it('holds a batch past the budget to it on both surfaces and defers the rest as sent', async () => {
+    const codes = Array.from({ length: 50 }, (_, i) => (i % 2 ? ` ${HEAVY} ` : HEAVY));
+    const page = await getCodePage({ codes, includeHierarchy: true });
+    expect(within(page)).toBe(true);
+    // The rest come back unprocessed, exactly as sent — whitespace included.
+    expect(page.deferred?.length).toBeGreaterThan(0);
+    expect(page.deferred).toEqual(codes.slice(codes.length - (page.deferred?.length ?? 0)));
+    expect(page.found).toHaveLength(codes.length - (page.deferred?.length ?? 0));
+    expect(page.notFound).toEqual([]);
+    // The text surface lists them, last, as sent, with the re-call instruction.
+    const heading = `### Deferred (${page.deferred?.length})`;
+    expect(page.text.lastIndexOf('\n## ')).toBeLessThan(page.text.indexOf(heading));
+    const section = page.text.slice(page.text.indexOf(heading)).split('\n');
+    expect(section[1]).toContain('the same `system` and `includeHierarchy`');
+    // One bullet per deferred code, each reading back exactly as sent.
+    const items = readCommonMark(section.slice(2).join('\n'))
+      .split('\n')
+      .filter((line) => line.startsWith('⟨strong⟩'));
+    expect(items).toEqual(page.deferred?.map((code) => `⟨strong⟩${code}⟨/strong⟩`));
+  });
+
+  it('walks a mixed batch with duplicates, misses, and NDCs to the unbudgeted reply, in order', async () => {
+    const cycle = [
+      HEAVY,
+      '0DT',
+      HEAVY,
+      'ZZZ9',
+      HEAVY,
+      '11111-2222-33',
+      HEAVY,
+      'A0100',
+      HEAVY,
+      'A00',
+      '99999-8888-77',
+      HEAVY,
+      'T36',
+    ];
+    const args = {
+      codes: Array.from({ length: 50 }, (_, i) => cycle[i % cycle.length]!),
+      includeHierarchy: true,
+    };
+    const walk = await walkGetCode(args);
+    const reference = await unbudgetedGetCode(args, 'E11.9');
+    expect(walk.pages.length).toBeGreaterThan(1);
+    for (const page of walk.pages) expect(within(page)).toBe(true);
+    expect(walk.found).toEqual(reference.found);
+    expect(walk.notFound).toEqual(reference.notFound);
+    // A miss counts against the budget like any entry: once it is reached, misses
+    // past the cut are deferred, never decoded into notFound on that page.
+    const misses = new Set(reference.notFound.map((n) => n.code));
+    expect(walk.pages[0]?.deferred?.some((code) => misses.has(code))).toBe(true);
+    expect(walk.pages[0]?.notFound.length).toBeLessThan(reference.notFound.length);
+  });
+
+  it('cuts exactly at the budget: a reply of 24,000 B is whole, one more byte defers', async () => {
+    // A miss's code is echoed in its `code` and its reason on both surfaces, so each
+    // character of an unshaped miss adds exactly 2 B to each. Pad one behind a
+    // prefix of heavy codes until the larger surface lands on the budget, with a code
+    // that resolves after it deferred, so the Deferred section is measured too.
+    const miss = (length: number) => 'O'.repeat(length);
+    const tail = HEAVY;
+    let found: { length: number; prefix: string[] } | undefined;
+    for (let count = 28; count > 20 && !found; count--) {
+      const prefix = Array.from({ length: count }, () => HEAVY);
+      const probe = await getCodePage({
+        codes: [...prefix, miss(1), tail],
+        includeHierarchy: true,
+      });
+      if (JSON.stringify(probe.deferred) !== JSON.stringify([tail])) continue;
+      const gap = REPLY_BUDGET_BYTES - Math.max(probe.contentBytes, probe.structuredBytes);
+      if (gap >= 0 && gap % 2 === 0) found = { prefix, length: 1 + gap / 2 };
+    }
+    expect(found).toBeDefined();
+    const { prefix, length } = found!;
+
+    const atBudget = await getCodePage({
+      codes: [...prefix, miss(length), tail],
+      includeHierarchy: true,
+    });
+    expect(atBudget.deferred).toEqual([tail]);
+    expect(Math.max(atBudget.contentBytes, atBudget.structuredBytes)).toBe(REPLY_BUDGET_BYTES);
+    expect(atBudget.notFound.map((n) => n.code)).toEqual([miss(length)]);
+
+    const over = await getCodePage({
+      codes: [...prefix, miss(length + 1), tail],
+      includeHierarchy: true,
+    });
+    expect(over.deferred).toEqual([miss(length + 1), tail]);
+    expect(over.found).toEqual(atBudget.found);
+    expect(over.notFound).toEqual([]);
+    expect(within(over)).toBe(true);
+  });
+
+  it('defers an NDC that decodes to several products as one input', async () => {
+    const twoProducts = '22222-3333-44';
+    const first = svc.getByNdc('11111-2222-33');
+    const second = svc.getByNdc('0904-5161-60');
+    if (first.kind !== 'found' || second.kind !== 'found') throw new Error('fixture NDCs missing');
+    // The bundled index maps no NDC to more than one product, so the lookup is
+    // stubbed at the service seam; the handler's budget loop runs unmodified.
+    const real = svc.getByNdc.bind(svc);
+    const spy = vi
+      .spyOn(svc, 'getByNdc')
+      .mockImplementation((raw) =>
+        raw === twoProducts
+          ? { kind: 'found', ndc: '22222333344', rows: [...first.rows, ...second.rows] }
+          : real(raw),
+      );
+    try {
+      // Heavy codes, then a miss whose length tunes the room left, then the NDC.
+      const page = (count: number, length: number) =>
+        getCodePage({
+          codes: [...Array.from({ length: count }, () => HEAVY), 'O'.repeat(length), twoProducts],
+          includeHierarchy: true,
+        });
+      let count = 28;
+      while ((await page(count, 1)).deferred) count--;
+      // Lengthen the miss until the NDC no longer fits: `lo` keeps it, `hi` cuts it.
+      let lo = 1;
+      let hi = 2;
+      // The heavy prefix leaves under 1 KB of room, so the cut comes well before 4 KB.
+      while (hi < 4096 && !(await page(count, hi)).deferred) [lo, hi] = [hi, hi * 2];
+      expect((await page(count, hi)).deferred).toBeDefined();
+      while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1;
+        if ((await page(count, mid)).deferred) hi = mid;
+        else lo = mid;
+      }
+      const kept = await page(count, lo);
+      const cut = await page(count, hi);
+      expect(kept.found.slice(-2).map((f) => f.code)).toEqual(['198440', '1049640']);
+      // Two bytes more and both products move to deferred together, as the one NDC.
+      expect(cut.deferred).toEqual([twoProducts]);
+      expect(cut.found.filter((f) => f.system === 'RXNORM')).toEqual([]);
+      expect(cut.notFound.map((n) => n.code)).toEqual(['O'.repeat(hi)]);
+      expect(within(kept) && within(cut)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('never defers before a code resolves, so the error paths see every input', async () => {
+    // Forty-nine long misses alone outweigh the budget; deferral starts only once
+    // a code resolves, so they all come back in notFound beside the one that does.
+    const misses = Array.from({ length: 49 }, (_, i) => `${'O'.repeat(400)}${i}`);
+    const page = await getCodePage({ codes: [...misses, 'E11.9'] });
+    expect(page.structuredBytes).toBeGreaterThan(REPLY_BUDGET_BYTES);
+    expect(page.deferred).toBeUndefined();
+    expect(page.notFound.map((n) => n.code)).toEqual(misses);
+    expect(page.found.map((f) => f.code)).toEqual(['E11.9']);
+
+    const err = await caught(() =>
+      getCodeTool.handler(
+        getCodeTool.input.parse({ codes: [...misses, 'O'.repeat(401)] }),
+        createMockContext({ errors: getCodeTool.errors }),
+      ),
+    );
+    expect(err.data?.reason).toBe('no_codes_found');
+    expect(err.message).toContain('None of the 50 requested code(s)');
+  });
+
+  it('never defers a remainder that holds no code that resolves, so no re-call fails', async () => {
+    // Heavy codes fill the reply to near the budget, then misses follow. Deferring
+    // the misses past the cut would hand the caller a re-call where nothing resolves,
+    // which fails with no_codes_found instead of returning their notFound entries.
+    const misses = Array.from({ length: 26 }, (_, i) => `${'O'.repeat(40)}${i}`);
+    const heavy = Array.from({ length: 24 }, () => HEAVY);
+    expect(within(await getCodePage({ codes: heavy, includeHierarchy: true }))).toBe(true);
+    const trailing = await getCodePage({ codes: [...heavy, ...misses], includeHierarchy: true });
+    expect(trailing.deferred).toBeUndefined();
+    expect(trailing.found).toHaveLength(heavy.length);
+    expect(trailing.notFound.map((n) => n.code)).toEqual(misses);
+    // The misses after the last code that resolves carry the reply past the budget.
+    expect(trailing.structuredBytes).toBeGreaterThan(REPLY_BUDGET_BYTES);
+
+    // An ambiguous remainder alone would fail with ambiguous_system the same way.
+    const ambiguous = await getCodePage({
+      codes: [...heavy, ...Array.from({ length: 26 }, () => 'A0100')],
+      includeHierarchy: true,
+    });
+    expect(ambiguous.deferred).toBeUndefined();
+    expect(ambiguous.notFound).toHaveLength(26);
+    expect(ambiguous.notFound.every((n) => n.reason.includes('matches multiple systems'))).toBe(
+      true,
+    );
+
+    // With a code that resolves after the misses, the cut still falls among them,
+    // and the walk returns what one unbudgeted pass would.
+    const args = {
+      codes: [...heavy, ...misses.slice(0, 16), HEAVY, ...misses.slice(16, 25)],
+      includeHierarchy: true,
+    };
+    const walk = await walkGetCode(args);
+    expect(walk.pages.length).toBeGreaterThan(1);
+    expect(walk.pages[0]?.deferred?.[0]).toMatch(/^OOO/);
+    expect(within(walk.pages[0]!)).toBe(true);
+    const reference = await unbudgetedGetCode(args, 'E11.9');
+    expect(walk.found).toEqual(reference.found);
+    expect(walk.notFound).toEqual(reference.notFound);
+  });
+
+  it('answers a batch under the budget with no deferred field', async () => {
+    const page = await getCodePage({
+      codes: Array.from({ length: 20 }, () => HEAVY),
+      includeHierarchy: true,
+    });
+    expect(within(page)).toBe(true);
+    expect(page.found).toHaveLength(20);
+    expect('deferred' in page.structured).toBe(false);
+    expect(page.text).not.toContain('### Deferred');
   });
 });
 
@@ -1206,7 +1455,8 @@ describe('medcode_map_codes — a bare integer that resolves nowhere', () => {
   });
 
   it('keeps the generic miss for a value that is not a bare integer', async () => {
-    for (const from of ['ZZZZZZ9', '432.39', '43239A']) {
+    // A dotted value in ICD-9-CM form (432.39) gets that system's sentence instead (#69).
+    for (const from of ['ZZZZZZ9', '4323.9', '43239A']) {
       const err = await mapEnvelope({ from, direction: 'parents' });
       expect(err.message).toBe(`No bundled code matches "${from}".`);
       expect(err.data?.recovery?.hint).toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
@@ -1489,6 +1739,176 @@ describe('medcode_get_code — a bare integer that resolves nowhere', () => {
       ),
     );
     expect(err.message).toBe(`No RxNorm concept matches "99213". ${CPT_SENTENCE}`);
+  });
+});
+
+const ICD9_SENTENCE =
+  'ICD-9-CM codes (diagnoses written NNN.NN, procedures NN.NN) are not bundled — find the current ICD-10-CM or ICD-10-PCS code by description with medcode_search_codes.';
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/69 — the sentence itself
+// is tabled in the service suite; these prove each tool carries it, and only there.
+describe('a value in ICD-9-CM form that resolves nowhere', () => {
+  it.each(['parents', 'rxcui_to_classes'])(
+    'carries the ICD-9-CM sentence on map_codes %s, on both surfaces',
+    async (direction) => {
+      // 119.1 is the fixture's aspirin RXCUI 1191 with a dot between its digits.
+      const result = await runToolContract(mapCodesTool, { from: '119.1', direction } as never);
+      const error = envelopeOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.data?.reason).toBe('no_mapping');
+      expect(error.message).toBe(`No bundled code matches "119.1". ${ICD9_SENTENCE}`);
+      const hint = error.data?.recovery?.hint ?? '';
+      expect(hint).not.toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
+      expect(hint).toContain('medcode_search_codes');
+      expect(hint).not.toMatch(/RxNorm|CPT/);
+
+      const text = renderedText(result);
+      expect(text).toContain(error.message);
+      expect(text).toContain(hint);
+    },
+  );
+
+  // An ICD-10 code found by description would only miss again on an rxcui_to_*
+  // direction, so the hint there names the RXCUI the direction takes.
+  it.each(['rxcui_to_classes', 'rxcui_to_ndc', 'rxcui_to_ingredients', 'rxcui_to_brands'])(
+    'points %s at the RXCUI it takes, not at mapping a searched code',
+    async (direction) => {
+      const hint = (await mapEnvelope({ from: '250.00', direction })).data?.recovery?.hint ?? '';
+      expect(hint).toContain(`${direction} takes an RXCUI`);
+      expect(hint).toContain('direction name_to_rxcui');
+      expect(hint).not.toContain('then map that code');
+    },
+  );
+
+  // A bare integer no bundled system holds is a CPT code or a mistyped RXCUI; on a
+  // direction that takes an RXCUI, the hint names where one comes from too.
+  it.each(['rxcui_to_classes', 'rxcui_to_ndc', 'rxcui_to_ingredients', 'rxcui_to_brands'])(
+    'points %s at name_to_rxcui beside the CPT hint for an unbundled bare integer',
+    async (direction) => {
+      const err = await mapEnvelope({ from: '99213', direction });
+      const hint = err.data?.recovery?.hint ?? '';
+      expect(err.message).toContain('CPT');
+      expect(hint).toContain('CPT and HCPCS Level I codes are not bundled');
+      expect(hint).toContain(`${direction} takes an RXCUI`);
+      expect(hint).toContain('direction name_to_rxcui');
+    },
+  );
+
+  it('keeps the CPT hint alone for an unbundled bare integer on parents', async () => {
+    const hint = (await mapEnvelope({ from: '99213', direction: 'parents' })).data?.recovery?.hint;
+    expect(hint).toContain('CPT and HCPCS Level I codes are not bundled');
+    expect(hint).not.toContain('name_to_rxcui');
+  });
+
+  it('keeps name_to_rxcui reading the value as a drug name', async () => {
+    const err = await mapEnvelope({ from: '119.1', direction: 'name_to_rxcui' });
+    expect(err.message).toBe('No bundled code matches "119.1".');
+    expect(err.data?.recovery?.hint).toBe(declaredRecovery(mapCodesTool, 'no_mapping'));
+  });
+
+  it('carries it on the get_code notFound entry, on both surfaces', async () => {
+    const result = await runToolContract(getCodeTool, { codes: ['119.1', 'E11.9'] } as never);
+    const out = result.structuredContent as { notFound: { code: string; reason: string }[] };
+    const reason = `"119.1" is not present in any bundled code system, and matches no bundled code shape. ${ICD9_SENTENCE}`;
+    expect(out.notFound).toEqual([{ code: '119.1', reason }]);
+    expect(renderedText(result)).toContain(reason);
+  });
+
+  it('names the ICD-9-CM inputs when nothing resolves, and only those', async () => {
+    const result = await runToolContract(getCodeTool, {
+      codes: ['119.1', '2500.0', ' 250.00 '],
+    } as never);
+    const error = envelopeOf(result);
+    expect(error.data?.reason).toBe('no_codes_found');
+    expect(error.message).toBe(
+      `None of the 3 requested code(s) resolved in any bundled system. Values in ICD-9-CM form with no match: "119.1", "250.00". ${ICD9_SENTENCE}`,
+    );
+    expect(error.data?.recovery?.hint).toBe(declaredRecovery(getCodeTool, 'no_codes_found'));
+    expect(renderedText(result)).toContain(error.message);
+
+    const none = await caught(() =>
+      getCodeTool.handler(
+        getCodeTool.input.parse({ codes: ['2500.0'] }),
+        createMockContext({ errors: getCodeTool.errors }),
+      ),
+    );
+    expect(none.message).toBe('None of the 1 requested code(s) resolved in any bundled system.');
+  });
+});
+
+const PCS_SECTION_ZERO =
+  '"0" is the ICD-10-PCS section "Medical and Surgical", not a code. medcode_browse_hierarchy lists the sections (system ICD10PCS, no node); find a complete 7-character ICD-10-PCS code by description with medcode_search_codes.';
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/73 — the section reading is
+// tabled in the service suite; these prove the get_code and map_codes wiring.
+describe('an ICD-10-PCS section value passed back as a code under system ICD10PCS', () => {
+  it('names it as a section on the get_code notFound entry, with no CPT sentence', async () => {
+    const result = await runToolContract(getCodeTool, {
+      codes: ['0', '0DTJ4ZZ'],
+      system: 'ICD10PCS',
+    } as never);
+    const out = result.structuredContent as { notFound: { code: string; reason: string }[] };
+    const reason = `No ICD-10-PCS code matches "0" in the bundled release. ${PCS_SECTION_ZERO}`;
+    expect(out.notFound).toEqual([{ code: '0', reason }]);
+    expect(renderedText(result)).toContain(reason);
+    expect(renderedText(result)).not.toMatch(/CPT/);
+  });
+
+  it('names the section inputs when nothing resolves, with no CPT sentence', async () => {
+    const result = await runToolContract(getCodeTool, {
+      codes: ['0', ' 2 '],
+      system: 'ICD10PCS',
+    } as never);
+    const error = envelopeOf(result);
+    expect(error.data?.reason).toBe('no_codes_found');
+    expect(error.message).toBe(
+      'None of the 2 requested code(s) resolved in ICD-10-PCS, the system this call named. ICD-10-PCS sections, not codes: "0" (Medical and Surgical), "2" (Placement). medcode_browse_hierarchy lists the sections (system ICD10PCS, no node); find a complete 7-character ICD-10-PCS code by description with medcode_search_codes.',
+    );
+    expect(renderedText(result)).toContain(error.message);
+
+    // A one-digit value the axis table does not hold keeps the CPT sentence.
+    const other = await caught(() =>
+      getCodeTool.handler(
+        getCodeTool.input.parse({ codes: ['3'], system: 'ICD10PCS' }),
+        createMockContext({ errors: getCodeTool.errors }),
+      ),
+    );
+    expect(other.message).toContain(`Bare integers with no match: "3". ${CPT_SENTENCE}`);
+    expect(other.message).not.toContain('section');
+  });
+
+  it.each(['parents', 'children'])(
+    'names it as a section on map_codes %s, on both surfaces',
+    async (direction) => {
+      const result = await runToolContract(mapCodesTool, {
+        from: '0',
+        direction,
+        system: 'ICD10PCS',
+      } as never);
+      const error = envelopeOf(result);
+      expect(error.data?.reason).toBe('no_mapping');
+      expect(error.message).toBe(
+        `No ICD-10-PCS code matches "0" in the bundled release. ${PCS_SECTION_ZERO}`,
+      );
+      const hint = error.data?.recovery?.hint ?? '';
+      expect(hint).toContain('medcode_browse_hierarchy');
+      expect(hint).not.toMatch(/CPT/);
+      // A table row walks on this tool (#66), so the hint never says ICD-10-PCS has nothing to walk.
+      expect(hint).toContain('its children are the complete codes that begin with it');
+      expect(hint).not.toMatch(/no prefix parent/);
+      const text = renderedText(result);
+      expect(text).toContain(error.message);
+      expect(text).toContain(hint);
+      expect(text).not.toMatch(/CPT/);
+    },
+  );
+
+  it('keeps the CPT sentence on map_codes for a value that is no section', async () => {
+    const err = await mapEnvelope({ from: '3', direction: 'parents', system: 'ICD10PCS' });
+    expect(err.message).toBe(`No bundled code matches "3". ${CPT_SENTENCE}`);
+    // Without a system the value is read as an RXCUI, so the section reading stays out.
+    const auto = await mapEnvelope({ from: '0', direction: 'parents' });
+    expect(auto.message).toBe(`No bundled code matches "0". ${CPT_SENTENCE}`);
   });
 });
 
@@ -1934,7 +2354,7 @@ describe('medcode_map_codes — an rxcui_to_* source another bundled system hold
   ] as const;
 
   const DRUG_TAIL = "To reach a drug's RXCUI, map the drug name with direction name_to_rxcui.";
-  /** The decode step names every holder; the walk names only holders with a prefix hierarchy. */
+  /** The decode step and the walk both name every holder. */
   const HOLDER_CASES = [
     [
       'E11.9',
@@ -1946,16 +2366,17 @@ describe('medcode_map_codes — an rxcui_to_* source another bundled system hold
       'ICD-10-CM and HCPCS Level II',
       `Decode it with medcode_get_code and system "ICD10CM" or "HCPCS", or walk its hierarchy with direction parents or children and system "ICD10CM" or "HCPCS". ${DRUG_TAIL}`,
     ],
-    // ICD-10-PCS codes have no prefix parent, and a complete one no children: no walk for that holder.
+    // An ICD-10-PCS table row has its complete codes as children, and a complete
+    // code its table row as parent, so the walk offers that holder too.
     [
       'B00',
       'ICD-10-CM and ICD-10-PCS',
-      `Decode it with medcode_get_code and system "ICD10CM" or "ICD10PCS", or walk its hierarchy with direction parents or children and system "ICD10CM". ${DRUG_TAIL}`,
+      `Decode it with medcode_get_code and system "ICD10CM" or "ICD10PCS", or walk its hierarchy with direction parents or children and system "ICD10CM" or "ICD10PCS". ${DRUG_TAIL}`,
     ],
     [
       '0DTJ4ZZ',
       'ICD-10-PCS',
-      `Decode it with medcode_get_code and system "ICD10PCS". ${DRUG_TAIL}`,
+      `Decode it with medcode_get_code and system "ICD10PCS", or walk its hierarchy with direction parents or children and system "ICD10PCS". ${DRUG_TAIL}`,
     ],
   ] as const;
 

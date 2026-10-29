@@ -16,6 +16,7 @@ import {
 } from '@/services/code-index/code-index-service.js';
 import {
   ICD10PCS_PARTIAL_RE,
+  isIcd9cmForm,
   isIcd10cmDisplayForm,
   ndcCandidates,
 } from '@/services/code-index/detect.js';
@@ -228,8 +229,8 @@ describe('checkCode', () => {
   });
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/32
   it('carries the excluded member onto the verdict, whichever verdict it is', () => {
-    // The verdict is system-specific: B00 is a non-billable CM header and a
-    // non-billable PCS table row, and neither reading is the other's answer.
+    // The verdict is system-specific: B00 is a CM category and a PCS table row,
+    // both headers, and neither reading is the other's answer.
     const cm = svc.checkCode('B00');
     expect(cm.kind === 'resolved' && cm.result).toMatchObject({
       system: 'ICD10CM',
@@ -240,7 +241,7 @@ describe('checkCode', () => {
     const pcs = svc.checkCode('B00', 'ICD10PCS');
     expect(pcs.kind === 'resolved' && pcs.result).toMatchObject({
       system: 'ICD10PCS',
-      status: 'valid_not_billable',
+      status: 'valid_header',
       alsoIn: ['ICD10CM'],
     });
 
@@ -589,6 +590,105 @@ describe('pagination (fetchPage-backed paths)', () => {
       const full = svc.getByCodeWithHierarchy(r.row, 50);
       expect(full.children.map((c) => c.code)).toEqual(['A00.0', 'A00.1']);
       expect(full.childrenTruncated).toBe(false);
+    });
+  });
+
+  /** The hierarchy page for `from`, asserting it resolved. */
+  function hierarchyPage(
+    from: string,
+    direction: 'parents' | 'children',
+    page = { offset: 0, limit: 50 },
+    system?: 'ICD10CM' | 'ICD10PCS',
+  ) {
+    const result = svc.mapCode(from, direction, system, page);
+    if (result.kind !== 'ok') throw new Error(`expected ${from} to resolve, got ${result.kind}`);
+    return result;
+  }
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/66
+  describe('an ICD-10-PCS table row and the complete codes beginning with it', () => {
+    it('lists a table row’s codes, caps them, and pages past the end', () => {
+      expect(hierarchyPage('0DT', 'children').hits.map((h) => h.value)).toEqual([
+        '0DTJ0ZZ',
+        '0DTJ4ZZ',
+      ]);
+      const r = svc.getByCode('0DT');
+      if (r.kind !== 'found') throw new Error('expected found');
+      const capped = svc.getByCodeWithHierarchy(r.row, 1);
+      expect(capped).toMatchObject({ header: true, parent: null, childrenTruncated: true });
+      expect(capped.children.map((c) => c.code)).toEqual(['0DTJ0ZZ']);
+
+      const past = hierarchyPage('0DT', 'children', { offset: 2, limit: 1 });
+      expect(past).toMatchObject({ hits: [], pastEnd: true });
+      // A complete code has no children, which is not a page past the end.
+      expect(hierarchyPage('0DTJ4ZZ', 'children', { offset: 2, limit: 1 })).toMatchObject({
+        hits: [],
+        pastEnd: false,
+      });
+    });
+
+    it('gives a complete code its table row as parent, and a table row none', () => {
+      expect(hierarchyPage('0DTJ4ZZ', 'parents').hits).toEqual([
+        {
+          source: 'ICD10PCS',
+          system: 'ICD10PCS',
+          value: '0DT',
+          description: 'Gastrointestinal System, Resection',
+        },
+      ]);
+      expect(hierarchyPage('0DT', 'parents').hits).toEqual([]);
+      const r = svc.getByCode('02703DZ');
+      if (r.kind !== 'found') throw new Error('expected found');
+      expect(svc.getByCodeWithHierarchy(r.row)).toMatchObject({ parent: '027', children: [] });
+    });
+
+    it('decodes and checks a table row as a header, a complete code as neither', () => {
+      expect(svc.searchFts('Gastrointestinal Resection', { limit: 5 }).codes).toEqual([
+        expect.objectContaining({ code: '0DT', header: true, billable: false }),
+      ]);
+      expect(svc.checkCode('0DT')).toMatchObject({
+        result: { system: 'ICD10PCS', status: 'valid_header' },
+      });
+      expect(svc.checkCode('0DTJ4ZZ')).toMatchObject({ result: { status: 'valid_billable' } });
+    });
+  });
+
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/72
+  describe('an ICD-10-CM level padded with the placeholder X', () => {
+    it('names the nearest bundled ancestor as parent, one or two padding levels up', () => {
+      for (const [code, parent] of [
+        ['S82.66XA', 'S82.66'],
+        ['O32.0XX0', 'O32.0'],
+        ['T36.0X1A', 'T36.0X1'],
+      ] as const) {
+        expect(hierarchyPage(code, 'parents').hits.map((h) => h.value)).toEqual([parent]);
+        const r = svc.getByCode(code);
+        if (r.kind !== 'found') throw new Error('expected found');
+        expect(svc.getByCodeWithHierarchy(r.row).parent).toBe(parent);
+      }
+    });
+
+    it('lists the codes below a padding level among the ancestor’s children, in one order', () => {
+      const merged = ['O32.01', 'O32.0XX0', 'O32.0XX1', 'O32.0Z'];
+      expect(hierarchyPage('O32.0', 'children').hits.map((h) => h.value)).toEqual(merged);
+      const walked: string[] = [];
+      for (let offset = 0; ; offset += 3) {
+        const page = hierarchyPage('O32.0', 'children', { offset, limit: 3 });
+        walked.push(...page.hits.map((h) => h.value));
+        if (!page.hasMore) break;
+      }
+      expect(walked).toEqual(merged);
+      expect(hierarchyPage('O32.0', 'children', { offset: 4, limit: 3 })).toMatchObject({
+        hits: [],
+        pastEnd: true,
+      });
+      const browsed = svc.browse('ICD10CM', 'S82.66', { offset: 0, limit: 50 });
+      expect(browsed.kind === 'codes' && browsed.codes.map((c) => c.code)).toEqual([
+        'S82.66XA',
+        'S82.66XB',
+      ]);
+      // A padding level that is a code keeps its own children.
+      expect(hierarchyPage('T36.0', 'children').hits.map((h) => h.value)).toEqual(['T36.0X']);
     });
   });
 });
@@ -1412,15 +1512,15 @@ describe('search outside RxNorm keeps its matching and ranking', () => {
   it.each([
     [
       'a',
-      'ICD10PCS:0DTJ0ZZ ICD10PCS:0DTJ4ZZ ICD10CM:A01 HCPCS:A HCPCS:J ICD10PCS:02703DZ HCPCS:E0110 HCPCS:K0552 HCPCS:A0100 HCPCS:A4206 HCPCS:E HCPCS:J0120 HCPCS:K ICD10CM:A00 ICD10CM:A00.0 ICD10CM:A00.1 ICD10CM:B00 ICD10CM:E11 ICD10CM:E11.40 ICD10CM:E11.42 ICD10CM:E11.9 ICD10CM:I10 ICD10PCS:B00',
+      'ICD10PCS:0DTJ0ZZ ICD10CM:T36 ICD10PCS:0DTJ4ZZ ICD10CM:A01 ICD10CM:T36.0 ICD10CM:T36.0X ICD10CM:T36.0X1 ICD10PCS:027 HCPCS:A HCPCS:J ICD10CM:S82 ICD10PCS:02703DZ ICD10CM:T36.0X1A ICD10CM:O32.0XX0 HCPCS:E0110 ICD10CM:O32.0Z HCPCS:K0552 HCPCS:A0100 HCPCS:A4206 HCPCS:E HCPCS:J0120 HCPCS:K ICD10CM:A00 ICD10CM:A00.0 ICD10CM:A00.1 ICD10CM:B00 ICD10CM:E11 ICD10CM:E11.40 ICD10CM:E11.42 ICD10CM:E11.9 ICD10CM:I10 ICD10CM:O32 ICD10CM:O32.0 ICD10CM:O32.0XX1 ICD10CM:S82.6 ICD10CM:S82.66 ICD10CM:S82.66XA ICD10CM:S82.66XB ICD10PCS:0DT ICD10PCS:B00 ICD10PCS:B00B0ZZ',
     ],
     [
       's',
-      'HCPCS:A HCPCS:A4206 HCPCS:K0552 ICD10CM:B00 ICD10PCS:B00 ICD10PCS:02703DZ HCPCS:A0100 HCPCS:E0110 HCPCS:J ICD10CM:A01 ICD10CM:A01.00 ICD10CM:E11 ICD10CM:E11.40 ICD10CM:E11.42 ICD10CM:E11.9 ICD10CM:I10 ICD10PCS:0DTJ0ZZ ICD10PCS:0DTJ4ZZ',
+      'HCPCS:A HCPCS:A4206 ICD10PCS:0DT HCPCS:K0552 ICD10CM:B00 ICD10CM:O32.0Z ICD10CM:O32.01 ICD10CM:T36 ICD10PCS:B00 ICD10PCS:B00B0ZZ ICD10PCS:02703DZ HCPCS:A0100 HCPCS:E0110 HCPCS:J ICD10CM:A01 ICD10CM:A01.00 ICD10CM:E11 ICD10CM:E11.40 ICD10CM:E11.42 ICD10CM:E11.9 ICD10CM:I10 ICD10CM:O32 ICD10CM:O32.0 ICD10CM:O32.0XX0 ICD10CM:O32.0XX1 ICD10CM:S82.6 ICD10CM:S82.66 ICD10CM:S82.66XA ICD10CM:S82.66XB ICD10CM:T36.0 ICD10CM:T36.0X ICD10CM:T36.0X1 ICD10CM:T36.0X1A ICD10PCS:027 ICD10PCS:0DTJ0ZZ ICD10PCS:0DTJ4ZZ',
     ],
     [
       'in',
-      'HCPCS:J0120 ICD10CM:B00 HCPCS:K0552 ICD10PCS:02703DZ HCPCS:E0110 HCPCS:A4206 HCPCS:J ICD10PCS:B00',
+      'HCPCS:J0120 ICD10CM:B00 HCPCS:K0552 ICD10CM:S82 ICD10CM:T36.0X1A ICD10PCS:02703DZ ICD10CM:S82.66XA HCPCS:E0110 ICD10CM:S82.66XB HCPCS:A4206 HCPCS:J ICD10CM:O32.0Z ICD10CM:T36 ICD10CM:T36.0 ICD10CM:T36.0X ICD10CM:T36.0X1 ICD10PCS:0DT ICD10PCS:B00 ICD10PCS:B00B0ZZ',
     ],
   ])('ranks the non-RxNorm rows of an all-systems "%s" search unchanged', (query, expected) => {
     expect(nonRxNormRanking(query)).toEqual(expected.split(' '));
@@ -1432,6 +1532,7 @@ describe('search outside RxNorm keeps its matching and ranking', () => {
       'ICD10CM:E11.9',
       'ICD10CM:E11.42',
       'ICD10CM:E11.40',
+      'ICD10CM:S82.66XB',
     ]);
   });
 
@@ -1500,5 +1601,198 @@ describe('RxNorm matching reads only the drug name', () => {
       '198440',
       '1049640',
     ]);
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/67
+describe('the name_to_rxcui and ndc_to_rxcui targets carry their term type', () => {
+  it('tags every name_to_rxcui hit, past the first page too', () => {
+    const typed = (r: ReturnType<CodeIndexService['mapCode']>) =>
+      r.kind === 'ok' ? r.hits.map((h) => [h.value, h.conceptType]) : [];
+    expect(typed(svc.mapCode('a', 'name_to_rxcui'))).toEqual([
+      ['161', 'IN'],
+      ['1191', 'IN'],
+      ['198440', 'SCD'],
+      ['1049640', 'SCD'],
+    ]);
+    expect(typed(svc.mapCode('a', 'name_to_rxcui', undefined, { offset: 2, limit: 1 }))).toEqual([
+      ['198440', 'SCD'],
+    ]);
+    expect(typed(svc.mapCode('tylenol', 'name_to_rxcui'))).toEqual([['202433', 'BN']]);
+  });
+
+  it('tags the product an NDC decodes to', () => {
+    for (const [ndc, rxcui] of [
+      ['11111-2222-33', '198440'],
+      ['0904-5161-60', '1049640'],
+    ] as const) {
+      const r = svc.mapCode(ndc, 'ndc_to_rxcui');
+      expect(r.kind === 'ok' && r.hits, ndc).toEqual([
+        expect.objectContaining({ value: rxcui, conceptType: 'SCD' }),
+      ]);
+    }
+  });
+});
+
+const ICD9_SENTENCE =
+  'ICD-9-CM codes (diagnoses written NNN.NN, procedures NN.NN) are not bundled — find the current ICD-10-CM or ICD-10-PCS code by description with medcode_search_codes.';
+const NO_SHAPE = (code: string) =>
+  `"${code}" is not present in any bundled code system (ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm), and matches no bundled code shape.`;
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/69
+describe('a dot between two digits rules a value out as an RXCUI', () => {
+  it.each([
+    ['161', ['RXNORM']],
+    [' 161 ', ['RXNORM']],
+    ['.161', ['RXNORM']],
+    ['161.', ['RXNORM']],
+    [' ..161.. ', ['RXNORM']],
+    ['16.1', []],
+    ['1.6.1', []],
+    ['16..1', []],
+    ['119.1', []],
+    // Seven digits stay ICD-10-PCS-shaped: every other system keeps its dot-blind shape.
+    ['104.9640', ['ICD10PCS']],
+    ['1049640', ['ICD10PCS', 'RXNORM']],
+    ['E11.9', ['ICD10CM']],
+    ['ZZZ99.99', ['ICD10PCS']],
+  ] as const)('reads the shape of %j as %j', (raw, shapes) => {
+    expect(svc.detectSystem(raw)).toEqual(shapes);
+  });
+
+  it('keeps a dotted RXCUI out of RxNorm membership, on every lookup', () => {
+    // 1191 is aspirin, and 119.1 is how ICD-9-CM writes a diagnosis.
+    expect(svc.systemsHolding('119.1')).toEqual([]);
+    expect(svc.getByCode('119.1')).toEqual({ kind: 'not_found' });
+    expect(svc.getByCode('119.1', 'RXNORM')).toEqual({ kind: 'not_found' });
+    for (const direction of [
+      'parents',
+      'children',
+      'rxcui_to_ndc',
+      'rxcui_to_ingredients',
+      'rxcui_to_brands',
+      'rxcui_to_classes',
+    ] as const) {
+      expect(svc.mapCode('119.1', direction).kind, direction).toBe('source_not_found');
+      expect(svc.mapCode('1980.440', direction).kind, direction).toBe('source_not_found');
+    }
+  });
+
+  it('still resolves an RXCUI with a dot before or after it, to the same answer', () => {
+    for (const raw of ['.1191', '1191.', ' 1191. ']) {
+      expect(svc.systemsHolding(raw), raw).toEqual(['RXNORM']);
+      const got = svc.getByCode(raw);
+      expect(got.kind === 'found' && got.row.code, raw).toBe('1191');
+      const checked = svc.checkCode(raw);
+      expect(checked.kind === 'resolved' && checked.result, raw).toMatchObject({
+        system: 'RXNORM',
+        code: '1191',
+        status: 'valid',
+      });
+    }
+    // The drug directions read the same RXCUI, so the hits match the undotted call's.
+    for (const [raw, bare, direction] of [
+      ['1191.', '1191', 'rxcui_to_classes'],
+      ['.198440', '198440', 'rxcui_to_classes'],
+      ['198440.', '198440', 'rxcui_to_ndc'],
+      ['.198440', '198440', 'rxcui_to_ingredients'],
+      ['198440.', '198440', 'rxcui_to_brands'],
+    ] as const) {
+      const dotted = svc.mapCode(raw, direction, undefined, { offset: 0, limit: 200 });
+      const plain = svc.mapCode(bare, direction, undefined, { offset: 0, limit: 200 });
+      expect(dotted.kind === 'ok' && dotted.hits.length, `${direction} ${raw}`).toBeGreaterThan(0);
+      expect(dotted, `${direction} ${raw}`).toEqual(plain);
+    }
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/69
+describe('the ICD-9-CM sentence', () => {
+  it.each(['250.00', '250.0', '401.9', '36.06', ' 250.00 ', '724.2', '119.1', '432.39'])(
+    'reads %j as ICD-9-CM form',
+    (raw) => {
+      expect(isIcd9cmForm(raw)).toBe(true);
+    },
+  );
+  it.each([
+    '2500.0',
+    '25000',
+    '250',
+    '250.',
+    '.25',
+    '250.000',
+    '2.5',
+    '250..00',
+    'V70.0',
+    'E849.0',
+    'E11.9',
+    '',
+  ])('does not read %j as ICD-9-CM form', (raw) => {
+    expect(isIcd9cmForm(raw)).toBe(false);
+  });
+
+  it('closes an auto-detected miss on an ICD-9-CM form, after the no-shape lead', () => {
+    expect(missReason('250.00')).toBe(`${NO_SHAPE('250.00')} ${ICD9_SENTENCE}`);
+    expect(missReason(' 36.06 ')).toBe(`${NO_SHAPE('36.06')} ${ICD9_SENTENCE}`);
+    // 119.1 used to resolve as aspirin (RXCUI 1191).
+    expect(missReason('119.1')).toBe(`${NO_SHAPE('119.1')} ${ICD9_SENTENCE}`);
+    // A build without RxNorm words it the same: no RxNorm wording either way.
+    expect(withoutRxNorm(() => missReason('250.00'))).toBe(missReason('250.00'));
+  });
+
+  it('closes an explicit-system miss on one, with no CPT sentence', () => {
+    expect(missReason('119.1', 'RXNORM')).toBe(
+      `No RxNorm concept matches "119.1" in the bundled release. ${ICD9_SENTENCE}`,
+    );
+    expect(missReason('250.00', 'ICD10CM')).toBe(
+      `No ICD-10-CM code matches "250.00" in the bundled release. ${ICD9_SENTENCE}`,
+    );
+  });
+
+  it('leaves every other miss without it', () => {
+    expect(missReason('2500.0')).toBe(NO_SHAPE('2500.0'));
+    expect(missReason('ZZ9Q')).toBe(NO_SHAPE('ZZ9Q'));
+    expect(missReason('99213')).toBe(`No RxNorm concept matches "99213". ${CPT_SENTENCE}`);
+    expect(missReason('E11.99')).toBe('No ICD-10-CM code matches "E11.99" in the bundled release.');
+  });
+});
+
+const PCS_GUIDANCE =
+  'medcode_browse_hierarchy lists the sections (system ICD10PCS, no node); find a complete 7-character ICD-10-PCS code by description with medcode_search_codes.';
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/73
+describe('an ICD-10-PCS section value missed as a code', () => {
+  it.each([
+    ['0', 'Medical and Surgical'],
+    [' 1 ', 'Obstetrics'],
+    ['2', 'Placement'],
+  ])('reads %j as the section %s', (raw, meaning) => {
+    expect(svc.pcsSection(raw)).toBe(meaning);
+    expect(svc.pcsSectionNote(raw.trim())).toBe(
+      `"${raw.trim()}" is the ICD-10-PCS section "${meaning}", not a code. ${PCS_GUIDANCE}`,
+    );
+  });
+
+  it.each(['3', '00', '0D', '0DT', 'Z', '.', ''])('reads %j as no section', (raw) => {
+    expect(svc.pcsSection(raw)).toBeNull();
+    expect(svc.pcsSectionNote(raw)).toBeNull();
+  });
+
+  it('words an ICD10PCS miss on a section value as one, with no CPT sentence', () => {
+    expect(missReason('0', 'ICD10PCS')).toBe(
+      `No ICD-10-PCS code matches "0" in the bundled release. "0" is the ICD-10-PCS section "Medical and Surgical", not a code. ${PCS_GUIDANCE}`,
+    );
+  });
+
+  it('leaves every other miss of the value as it was', () => {
+    // Not a section in the fixture's axis table.
+    expect(missReason('3', 'ICD10PCS')).toBe(
+      `No ICD-10-PCS code matches "3" in the bundled release. ${CPT_SENTENCE}`,
+    );
+    // Only an ICD10PCS lookup reads a section.
+    expect(missReason('0', 'ICD10CM')).toBe(
+      `No ICD-10-CM code matches "0" in the bundled release. ${CPT_SENTENCE}`,
+    );
+    expect(missReason('0')).toBe(`No RxNorm concept matches "0". ${CPT_SENTENCE}`);
   });
 });

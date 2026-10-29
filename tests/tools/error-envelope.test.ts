@@ -311,6 +311,50 @@ describe('handler-thrown failures', () => {
     });
   });
 
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/69
+  // https://github.com/cyanheads/medical-codes-mcp-server/issues/73
+  describe('medcode_check_code missing an ICD-9-CM form or an ICD-10-PCS section value', () => {
+    const declared = checkCodeTool.errors?.find((entry) => entry.reason === 'unknown_code');
+    const CPT = /CPT/;
+    const ICD9 = /ICD-9-CM codes \(diagnoses written NNN\.NN, procedures NN\.NN\) are not bundled/;
+    const SECTION = /"0" is the ICD-10-PCS section "Medical and Surgical", not a code\./;
+
+    it.each([
+      // 119.1 is the fixture's aspirin RXCUI 1191 with a dot between its digits;
+      // only a lookup that named RxNorm says it missed there.
+      [{ code: '119.1' }, ICD9, false],
+      [{ code: '119.1', system: 'RXNORM' }, ICD9, true],
+      [{ code: '0', system: 'ICD10PCS' }, SECTION, false],
+    ])('words %j for what it is on both surfaces, with no CPT sentence', async (args, note, rx) => {
+      const result = await callWithRawArgs(checkCodeTool, args);
+      const envelope = result.structuredContent as ErrorEnvelope;
+      expect(envelope.error.code).toBe(declared?.code);
+      expect(envelope.error.data?.reason).toBe('unknown_code');
+      expect(envelope.error.data?.recovery?.hint).toBe(declared?.recovery);
+      expect(envelope.error.message).toMatch(note);
+      expect(envelope.error.message).not.toMatch(CPT);
+      expect(/RxNorm concept/.test(envelope.error.message)).toBe(rx);
+
+      const text = textOf(result.content);
+      expect(text).toContain(envelope.error.message);
+      expect(text).toContain('(reason unknown_code)');
+    });
+
+    it.each([
+      // A dot elsewhere, a one-digit value the fixture holds no section for, and no system.
+      [{ code: '2500.0' }, false],
+      [{ code: '3', system: 'ICD10PCS' }, true],
+      [{ code: '0' }, true],
+    ])('leaves %j without either note', async (args, cpt) => {
+      const result = await callWithRawArgs(checkCodeTool, args);
+      const envelope = result.structuredContent as ErrorEnvelope;
+      expect(envelope.error.data?.reason).toBe('unknown_code');
+      expect(envelope.error.message).not.toMatch(ICD9);
+      expect(envelope.error.message).not.toMatch(/section/);
+      expect(CPT.test(envelope.error.message)).toBe(cpt);
+    });
+  });
+
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/43
   describe('medcode_check_code on a National Drug Code', () => {
     const declared = checkCodeTool.errors?.find((entry) => entry.reason === 'unknown_code');

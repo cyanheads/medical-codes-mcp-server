@@ -156,10 +156,45 @@ export function storageCode(rawCode: string): string {
 /**
  * Derive the parent of an ICD-10-CM code: strip the last character. `A0101` →
  * `A010` → `A01`. Returns null at the 3-character category root (a category has
- * no parent code). Dots are already absent in storage form.
+ * no parent code). Dots are already absent in storage form. This is the parent
+ * the index stores; it can be a placeholder-X level that is not itself a code
+ * (`S8266X` for `S8266XA`, see {@link ICD10CM_PLACEHOLDER}), so the hierarchy
+ * tools step past such a level to the nearest ancestor the release holds.
  */
 export function icd10cmParent(code: string): string | null {
   return code.length > 3 ? code.slice(0, -1) : null;
+}
+
+/**
+ * The ICD-10-CM placeholder character. It pads a code out to the position a 7th
+ * character occupies (`S82.66` → `S82.66XA`, `O32.0` → `O32.0XX0`), and the padded
+ * level is usually not a code in the release: 3,355 stored parents in the FY2027
+ * index (`S8266X`, `O320XX`) have no row. Some are codes (`T36.0X`).
+ */
+export const ICD10CM_PLACEHOLDER = 'X';
+
+/** The longest ICD-10-CM code: a 3-character category plus up to 4 more characters. */
+export const ICD10CM_MAX_LENGTH = 7;
+
+/** A complete ICD-10-PCS code: 7 characters, one per axis. */
+export const ICD10PCS_CODE_LENGTH = 7;
+
+/**
+ * An ICD-10-PCS table row: the first 3 characters of a complete code (section,
+ * body system, root operation — `0DT`, "Gastrointestinal System, Resection").
+ * The order file carries one row per table, and every complete code begins with
+ * exactly one, so the table row is a complete code's parent and the complete
+ * codes beginning with it are its children. Sections and body systems (1 and 2
+ * characters) are not rows.
+ */
+export const ICD10PCS_TABLE_ROW_LENGTH = 3;
+
+/**
+ * The ICD-10-PCS table row a complete code belongs to (`0DTJ4ZZ` → `0DT`), or
+ * null for a value that is not a complete code — a table row has no parent.
+ */
+export function icd10pcsTableRow(code: string): string | null {
+  return code.length === ICD10PCS_CODE_LENGTH ? code.slice(0, ICD10PCS_TABLE_ROW_LENGTH) : null;
 }
 
 /**

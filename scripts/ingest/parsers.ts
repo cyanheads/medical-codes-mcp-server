@@ -84,8 +84,11 @@ export function parseIcd10cmOrder(text: string): CodeInput[] {
 /**
  * Parse an ICD-10-PCS order file (`icd10pcs_order_<FY>.txt`). Same column layout
  * as ICD-10-CM. Every complete 7-char code is billable; the pos-15 flag marks
- * completeness. PCS has no prefix parent (axis-based hierarchy), so `parent` is
- * null and the chapter is the section character.
+ * completeness, so the 3-character table rows the file also carries are stored
+ * non-billable with `header` false. `parent` is stored null and the chapter is
+ * the section character: the service derives the PCS hierarchy at query time —
+ * a complete code's parent is its table row (`0DTJ4ZZ` → `0DT`), and it decodes
+ * a table row as a header.
  */
 export function parseIcd10pcsOrder(text: string): CodeInput[] {
   const rows: CodeInput[] = [];
@@ -134,8 +137,8 @@ export interface PcsAxisInput {
  * (the 17 Sections) is the one axis whose meaning is globally unambiguous, so it
  * is the only one baked. `medcode_browse_hierarchy` surfaces these Sections at
  * the PCS top level and returns an explicit notice (not wrong/empty data) for
- * deeper positions, where per-table context is required — decode a specific PCS
- * code with `medcode_get_code` for its axis breakdown instead.
+ * deeper positions, where per-table context is required — `medcode_map_codes`
+ * children lists the complete codes in a table row instead.
  */
 export function parseIcd10pcsAxes(xml: string): PcsAxisInput[] {
   const out: PcsAxisInput[] = [];

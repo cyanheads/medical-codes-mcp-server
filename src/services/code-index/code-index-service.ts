@@ -19,10 +19,22 @@ import {
   detectSystems,
   ICD10PCS_PARTIAL_RE,
   isBareInteger,
+  isIcd9cmForm,
   isIcd10cmDisplayForm,
+  isRxcuiForm,
   ndcCandidates,
 } from './detect.js';
-import { displayCode, icd10cmParent, RXCLASS_TABLES, storageCode } from './schema.js';
+import {
+  displayCode,
+  ICD10CM_MAX_LENGTH,
+  ICD10CM_PLACEHOLDER,
+  ICD10PCS_CODE_LENGTH,
+  ICD10PCS_TABLE_ROW_LENGTH,
+  icd10cmParent,
+  icd10pcsTableRow,
+  RXCLASS_TABLES,
+  storageCode,
+} from './schema.js';
 import {
   type BuildMetaRow,
   type CheckStatus,
@@ -144,9 +156,10 @@ export interface MapHit {
   /**
    * The target's RxNorm concept type: `IN` / `PIN` / `MIN` on ingredient hits and
    * `BN` on brand hits (carried straight off the edge's `rxnorm_rel.target_type`),
-   * and the member's term type on `class_to_rxcuis` hits. Absent on every other
-   * direction — hierarchy targets are codes and class targets are classes, neither
-   * of which has an RxNorm concept type.
+   * and the concept's term type (its `codes.chapter`) on `name_to_rxcui`,
+   * `ndc_to_rxcui`, and `class_to_rxcuis` hits. Absent on every other direction —
+   * hierarchy targets are codes, `rxcui_to_ndc` targets are packages, and class
+   * targets are classes, none of which has an RxNorm concept type.
    */
   conceptType?: string;
   description?: string;
@@ -357,9 +370,24 @@ export class CodeIndexService {
       shortDescription,
       description: row.longDesc ?? shortDescription,
       billable: traits.billing ? isBillableNow(row, todayYyyymmdd()) : null,
-      header: row.header === 1,
+      header: CodeIndexService.isHeader(row),
       chapter: row.chapter,
     };
+  }
+
+  /**
+   * Whether a row is a non-billable header. The stored flag marks the ICD-10-CM
+   * categories and the HCPCS range buckets. An ICD-10-PCS table row is stored with
+   * `header` 0, since the order file's flag at that position marks completeness,
+   * yet it is the non-billable node its complete codes sit below, exactly as a
+   * range bucket is, so it reads as a header here: on every decode, and as
+   * `valid_header` on a check.
+   */
+  private static isHeader(row: CodeRow): boolean {
+    return (
+      row.header === 1 ||
+      (row.system === 'ICD10PCS' && row.code.length === ICD10PCS_TABLE_ROW_LENGTH)
+    );
   }
 
   /** Lexically-plausible systems for a raw code (no DB hit). */
@@ -410,7 +438,9 @@ export class CodeIndexService {
    * It applies only to an ambiguous outcome, so it never re-routes a value that
    * resolves to one system or turns a not-found into an answer: the strings the
    * shipped index holds in both ICD-10-CM and HCPCS are the values it moves, in
-   * dotted form only — `A0100` undotted is still ambiguous.
+   * dotted form only — `A0100` undotted is still ambiguous. RxNorm reads the dot
+   * the other way: a dot between two digits keeps a value out of it altogether
+   * ({@link isRxcuiForm}), in both the shape pass and membership.
    *
    * An explicit `system` is authoritative for the choice, but membership is still
    * evaluated across every system so `alsoIn` means the same thing on both paths.
@@ -441,11 +471,15 @@ export class CodeIndexService {
   /**
    * Every bundled system whose index holds this exact code string, by DB
    * membership alone — no shape narrowing, no explicit `system`. What a miss under
-   * an explicit `system` names as the system that does hold the code.
+   * an explicit `system` names as the system that does hold the code. Lookup is
+   * dot-blind, except that RxNorm holds no value with a dot between two digits
+   * ({@link isRxcuiForm}): `724.2` is ICD-9-CM's way of writing a code, not RXCUI 7242.
    */
   systemsHolding(rawCode: string): SystemId[] {
     const code = storageCode(rawCode);
-    return SYSTEM_IDS.filter((sys) => this.getRow(code, sys) !== null);
+    return SYSTEM_IDS.filter(
+      (sys) => (sys !== 'RXNORM' || isRxcuiForm(rawCode)) && this.getRow(code, sys) !== null,
+    );
   }
 
   /**
@@ -602,26 +636,109 @@ export class CodeIndexService {
   }
 
   /**
-   * Immediate children of a code within its system (prefix hierarchy), one page
-   * at a time. `ORDER BY code` is already a full deterministic order — `(system,
-   * code)` is the table's primary key — so no tie-breaker is needed. `hasMore`
-   * reports whether children beyond this page exist, so callers can paginate or
-   * disclose truncation exactly.
+   * Immediate children of a code within its system, one page at a time —
+   * {@link childrenQuery} says which rows those are. `hasMore` reports whether
+   * children beyond this page exist, so callers can paginate or disclose
+   * truncation exactly; `pastEnd` marks an empty page whose offset starts beyond
+   * the last child of a code that has some (see {@link MapPage.pastEnd}).
    */
   childrenOf(
     system: SystemId,
     parentCode: string,
     page: Page,
-  ): { children: DecodedCode[]; hasMore: boolean } {
-    const { rows, hasMore } = this.fetchPage(
-      'SELECT * FROM codes WHERE system = ? AND parent = ? ORDER BY code',
-      [system, parentCode],
-      page,
-    );
+  ): { children: DecodedCode[]; hasMore: boolean; pastEnd: boolean } {
+    const { sql, params } = this.childrenQuery(system, parentCode);
+    const { rows, hasMore } = this.fetchPage(sql, params, page);
     return {
       children: rows.map((r) => CodeIndexService.decode(CodeIndexService.toCodeRow(r))),
       hasMore,
+      pastEnd: rows.length === 0 && page.offset > 0 && this.hasAnyRow(sql, params),
     };
+  }
+
+  /**
+   * The query selecting a code's immediate children, in code order. Derived at
+   * query time from the stored rows, which are read as they are:
+   *
+   *  - ICD-10-PCS: the complete codes that begin with a table row, read as a
+   *    half-open range seek on the primary key. A complete code has none.
+   *  - ICD-10-CM: the codes whose stored parent is this code, together with the
+   *    codes whose stored parent is a placeholder-X level below it that the
+   *    release does not hold as a code ({@link paddingLevels}) — `S82.66XA` is a
+   *    child of `S82.66`, past the absent `S82.66X`.
+   *  - HCPCS and RxNorm: the codes whose stored parent is this code.
+   *
+   * Each is one query under `ORDER BY code`, a total order — `(system, code)` is
+   * the primary key — so offset pages walk a child set merged across several
+   * stored parents without skipping or repeating a code. `INDEXED BY` holds the
+   * parent index in place: without it SQLite reads the system's whole primary-key
+   * partition in code order to spare itself a sort, about 98,000 rows on every
+   * ICD-10-CM children call.
+   */
+  private childrenQuery(system: SystemId, code: string): { sql: string; params: unknown[] } {
+    if (system === 'ICD10PCS') {
+      return {
+        sql: `SELECT * FROM codes WHERE system = 'ICD10PCS' AND code > ? AND code < ? AND length(code) = ${ICD10PCS_CODE_LENGTH} ORDER BY code`,
+        params: [code, prefixUpperBound(code)],
+      };
+    }
+    const parents = system === 'ICD10CM' ? [code, ...this.paddingLevels(code)] : [code];
+    return {
+      sql: `SELECT * FROM codes INDEXED BY idx_codes_parent WHERE system = ? AND parent IN (${parents.map(() => '?').join(', ')}) ORDER BY code`,
+      params: [system, ...parents],
+    };
+  }
+
+  /**
+   * The placeholder-X levels directly below an ICD-10-CM code that the release
+   * does not hold as codes but some code names as its stored parent: `S8266X`
+   * below `S8266`, and `O320XX` below `O320` (past `O320X`, which nothing names).
+   * A level the release does hold (`T360X`) is a code with children of its own,
+   * so the run stops there. Empty for most codes, which keep a single stored
+   * parent to read.
+   */
+  private paddingLevels(code: string): string[] {
+    const levels: string[] = [];
+    for (
+      let level = `${code}${ICD10CM_PLACEHOLDER}`;
+      level.length < ICD10CM_MAX_LENGTH;
+      level += ICD10CM_PLACEHOLDER
+    ) {
+      if (this.getRow(level, 'ICD10CM')) break;
+      if (
+        this.hasAnyRow(
+          "SELECT 1 AS hit FROM codes INDEXED BY idx_codes_parent WHERE system = 'ICD10CM' AND parent = ?",
+          [level],
+        )
+      ) {
+        levels.push(level);
+      }
+    }
+    return levels;
+  }
+
+  /**
+   * The parent a hierarchy tool reports for a row, derived at query time:
+   *
+   *  - ICD-10-CM: the nearest ancestor the release holds as a code — its stored
+   *    parent, or past a placeholder-X level that is not a code (`S82.66XA` →
+   *    `S82.66`, never the absent `S82.66X`).
+   *  - ICD-10-PCS: a complete code's table row (`0DTJ4ZZ` → `0DT`). A table row has
+   *    none, since sections and body systems are not codes.
+   *  - HCPCS: the stored range bucket. RxNorm: none.
+   *
+   * Null when there is none, so no tool reports a parent `getByCode` cannot decode.
+   */
+  private parentOf(row: CodeRow): CodeRow | null {
+    if (row.system === 'ICD10CM') {
+      for (let ancestor = icd10cmParent(row.code); ancestor; ancestor = icd10cmParent(ancestor)) {
+        const parent = this.getRow(ancestor, 'ICD10CM');
+        if (parent) return parent;
+      }
+      return null;
+    }
+    const parentCode = row.system === 'ICD10PCS' ? icd10pcsTableRow(row.code) : row.parent;
+    return parentCode ? this.getRow(parentCode, row.system) : null;
   }
 
   /**
@@ -629,21 +746,22 @@ export class CodeIndexService {
    * capped at `childrenLimit` (the server cap by default); `childrenTruncated`
    * discloses when a code has more children than were attached, so a batched
    * decode never silently hides a large child set — the caller retrieves the rest
-   * via `medcode_browse_hierarchy` / `medcode_map_codes` for that node.
+   * via `medcode_map_codes` children for that node (or `medcode_browse_hierarchy`,
+   * outside ICD-10-PCS).
    */
   getByCodeWithHierarchy(
     row: CodeRow,
     childrenLimit: number = getServerConfig().maxResults,
   ): DecodedCodeWithHierarchy {
     const base = CodeIndexService.decode(row);
-    const parentStorage = row.system === 'ICD10CM' ? icd10cmParent(row.code) : row.parent;
+    const parent = this.parentOf(row);
     const { children, hasMore } = this.childrenOf(row.system, row.code, {
       offset: 0,
       limit: childrenLimit,
     });
     return {
       ...base,
-      parent: parentStorage ? displayCode(row.system, parentStorage) : null,
+      parent: parent ? displayCode(parent.system, parent.code) : null,
       children,
       childrenTruncated: hasMore,
     };
@@ -835,7 +953,7 @@ export class CodeIndexService {
         },
       };
     }
-    if (row.header === 1) {
+    if (CodeIndexService.isHeader(row)) {
       return {
         kind: 'resolved',
         result: {
@@ -885,7 +1003,8 @@ export class CodeIndexService {
    * display form is named against ICD-10-CM alone, as `resolveSystems` prefers it
    * among holders: `E11.99` is no HCPCS code, though `E1199` is HCPCS-shaped. An
    * RXCUI-shaped value is a likely CPT / HCPCS Level I code and gets the
-   * out-of-scope sentence.
+   * out-of-scope sentence. A value in ICD-9-CM form fits no shape (its dot rules
+   * out the RXCUI), so it lands on the no-shape lead, with {@link ICD9CM_NOTE}.
    */
   private autoDetectedMiss(trimmed: string, shapes: SystemId[]): string {
     if (shapes.includes('RXNORM')) return this.bareIntegerMiss(trimmed, shapes);
@@ -893,7 +1012,8 @@ export class CodeIndexService {
       return `${noMatch('ICD10CM', trimmed)} in the bundled release.`;
     }
     if (shapes.length > 0) return `${noMatch(shapes, trimmed)} in the bundled release.`;
-    return `"${trimmed}" is not present in any bundled code system (ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm), and matches no bundled code shape.`;
+    const noShape = `"${trimmed}" is not present in any bundled code system (ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm), and matches no bundled code shape.`;
+    return isIcd9cmForm(trimmed) ? `${noShape} ${ICD9CM_NOTE}` : noShape;
   }
 
   /**
@@ -914,16 +1034,22 @@ export class CodeIndexService {
   /**
    * The miss under an explicit `system`, which is authoritative for the choice but
    * says nothing about the value's shape. A value another bundled system holds is
-   * named as that system's code; only a bare integer no system holds gets the
+   * named as that system's code, and an ICD-10-PCS section value missed under
+   * ICD10PCS as a section ({@link pcsSectionNote}). Of the values no system holds,
+   * one in ICD-9-CM form gets {@link ICD9CM_NOTE}, and only a bare integer the
    * out-of-scope sentence — the rule medcode_map_codes and medcode_get_code apply;
    * any other miss keeps the generic wording.
    */
   private explicitSystemMiss(trimmed: string, system: SystemId): string {
     const holders = this.systemsHolding(trimmed).filter((sys) => sys !== system);
+    const section = system === 'ICD10PCS' ? this.pcsSectionNote(trimmed) : null;
     if (holders.length > 0) {
-      return `${noMatch(system, trimmed)} — ${heldElsewhere(holders)} to check it there.`;
+      const held = `${noMatch(system, trimmed)} — ${heldElsewhere(holders)} to check it there.`;
+      return section ? `${held} ${section}` : held;
     }
     const generic = `${noMatch(system, trimmed)} in the bundled release.`;
+    if (section) return `${generic} ${section}`;
+    if (isIcd9cmForm(trimmed)) return `${generic} ${ICD9CM_NOTE}`;
     if (!isBareInteger(trimmed)) return generic;
     return system === 'RXNORM'
       ? this.bareIntegerMiss(trimmed, ['RXNORM'])
@@ -958,21 +1084,15 @@ export class CodeIndexService {
       const disclosure = alsoIn.length > 0 ? { alsoIn } : {};
 
       if (direction === 'children') {
-        const { children, hasMore } = this.childrenOf(sys, code, page);
+        // An empty page is past-the-end only when the code HAS children the
+        // offset skipped; a leaf's empty page must keep reading as "no children".
+        const { children, hasMore, pastEnd } = this.childrenOf(sys, code, page);
         return {
           kind: 'ok',
           ...disclosure,
           resolvedSystem: sys,
           hasMore,
-          // An empty page is past-the-end only when the code HAS children the
-          // offset skipped; a leaf's empty page must keep reading as "no children".
-          pastEnd:
-            children.length === 0 &&
-            page.offset > 0 &&
-            this.hasAnyRow('SELECT 1 AS hit FROM codes WHERE system = ? AND parent = ?', [
-              sys,
-              code,
-            ]),
+          pastEnd,
           hits: children.map((k) => ({
             source: sys,
             system: sys,
@@ -981,11 +1101,9 @@ export class CodeIndexService {
           })),
         };
       }
-      // parents — single immediate parent for prefix systems; PCS has none. A
-      // missing parent code and a parent code with no row are the same outcome
-      // (this code has no reachable parent), so both fall through to no hits.
-      const parentStorage = sys === 'ICD10CM' ? icd10cmParent(code) : row.parent;
-      const parentRow = parentStorage ? this.getRow(parentStorage, sys) : null;
+      // parents — the single immediate parent parentOf derives, or no hits at a
+      // root (a category, a range bucket, a table row) and for RxNorm.
+      const parentRow = this.parentOf(row);
       const parentDesc = parentRow ? (parentRow.longDesc ?? parentRow.shortDesc) : null;
       return {
         kind: 'ok',
@@ -1027,13 +1145,16 @@ export class CodeIndexService {
    * MED-RT edges, lists each once, via 6809. The dedupe runs in SQL ahead of
    * `ORDER BY (type order, class name, class ID, source, relation)`, which is a
    * total order over the deduped set, so offset pages neither skip nor repeat.
+   * The source is read through {@link rxcuiOf}, so `6809.` lists metformin's
+   * classes and `724.2` is no RXCUI at all.
    */
   private classesOf(
     from: string,
     page: Page,
     classType?: RxClassType,
   ): MapPage | { kind: 'source_not_found' } {
-    const rxcui = from.trim();
+    const rxcui = rxcuiOf(from);
+    if (rxcui === null) return { kind: 'source_not_found' };
     const typeFilter = classType ? ' AND e.class_type = ?' : '';
     const typeParams = classType ? [classType] : [];
     const sql = `WITH candidate AS (
@@ -1065,7 +1186,7 @@ export class CodeIndexService {
     const pastEnd = rows.length === 0 && page.offset > 0 && this.hasAnyRow(sql, params);
     // An empty result is only an unmapped source when the RXCUI is not a bundled
     // concept: a brand name, or a concept no bundled source classifies, resolves.
-    const source = rows.length === 0 && !pastEnd ? this.getRow(storageCode(rxcui), 'RXNORM') : null;
+    const source = rows.length === 0 && !pastEnd ? this.getRow(rxcui, 'RXNORM') : null;
     if (rows.length === 0 && !pastEnd && !source) return { kind: 'source_not_found' };
     return {
       kind: 'ok',
@@ -1207,6 +1328,33 @@ export class CodeIndexService {
       : 'RxNorm is not present in this build, and CPT / HCPCS Level I are out of scope — this build carries ICD-10-CM, ICD-10-PCS, and HCPCS Level II.';
   }
 
+  /**
+   * The meaning of the ICD-10-PCS section a value names (`0` → "Medical and
+   * Surgical"), or null when it names none. Read from the position-1 rows of
+   * `pcs_axes`, the table medcode_browse_hierarchy lists the sections from, so a
+   * value counts as a section exactly when the browse hands it back as one.
+   */
+  pcsSection(value: string): string | null {
+    const row = this.db
+      .query('SELECT meaning FROM pcs_axes WHERE position = 1 AND value = ?')
+      .get(storageCode(value)) as { meaning: string } | undefined;
+    return row?.meaning ?? null;
+  }
+
+  /**
+   * The sentence for an ICD10PCS miss on an ICD-10-PCS section value — one a
+   * caller took from medcode_browse_hierarchy and passed back as a code — or null
+   * for any other value. medcode_check_code, medcode_get_code, and
+   * medcode_map_codes all word that miss with it, in place of the CPT sentence a
+   * one-digit section value would otherwise draw.
+   */
+  pcsSectionNote(trimmed: string): string | null {
+    const meaning = this.pcsSection(trimmed);
+    return meaning
+      ? `"${trimmed}" is the ICD-10-PCS section "${meaning}", not a code. ${PCS_SECTION_GUIDANCE}`
+      : null;
+  }
+
   /** Whether the RxNorm tables carry any rows (i.e. RxNorm is bundled in this build). */
   hasRxNorm(): boolean {
     const row = this.db.query('SELECT COUNT(*) AS n FROM rxnorm_rel').get() as { n: number };
@@ -1221,7 +1369,8 @@ export class CodeIndexService {
    * brand-name concept carries no `has_ingredient` edge and no package NDC, and
    * those are empty results with a notice, exactly as a leaf code's children are.
    * Nor does it mean the requested page came back empty, which the paginated
-   * directions separate out as {@link MapPage.pastEnd}.
+   * directions separate out as {@link MapPage.pastEnd}. The RXCUI-reading
+   * directions read the source through {@link rxcuiOf}, as `classesOf` does.
    */
   private mapDrug(
     from: string,
@@ -1239,11 +1388,13 @@ export class CodeIndexService {
         // unique (many RXCUIs share a string length), so `, code` makes the total
         // order deterministic — offset pages would otherwise skip or repeat rows.
         // The name is `long_desc` alone: an RxNorm row's `short_desc` is its term
-        // type, which a name like "SBD" or "in" would otherwise match wholesale.
+        // type, which a name like "SBD" or "in" would otherwise match wholesale. The
+        // term type rides along from `chapter` as `conceptType`, since one name
+        // matches ingredients, combinations, and products alike.
         const term = `%${escapeLike(value)}%`;
         const match = `system = 'RXNORM' AND long_desc LIKE ? ESCAPE '\\'`;
         const { rows, hasMore } = this.fetchPage(
-          `SELECT code, long_desc FROM codes
+          `SELECT code, long_desc, chapter FROM codes
              WHERE ${match}
              ORDER BY length(code), code`,
           [term],
@@ -1264,6 +1415,7 @@ export class CodeIndexService {
             system: 'RXNORM' as const,
             value: r.code as string,
             description: r.long_desc as string,
+            ...(r.chapter ? { conceptType: r.chapter as string } : {}),
           })),
         };
       }
@@ -1282,28 +1434,32 @@ export class CodeIndexService {
           resolvedSystem: 'RXNORM',
           hasMore: false,
           // Project each mapped RXCUI back through its RXNORM concept row so a
-          // decoded package carries the product's name, not a bare identifier the
-          // caller has to spend a second decode on.
+          // decoded package carries the product's name and term type (generic,
+          // branded, or pack), not a bare identifier the caller has to spend a
+          // second decode on.
           hits: [...rxcuis].map((rxcui) => {
-            // The name only: an RxNorm row's short_desc is its term type.
-            const desc = this.getRow(rxcui, 'RXNORM')?.longDesc;
+            // The name is long_desc alone: an RxNorm row's short_desc is its term type.
+            const row = this.getRow(rxcui, 'RXNORM');
             return {
               source: 'NDC',
               system: 'RXNORM' as const,
               value: rxcui,
-              ...(desc ? { description: desc } : {}),
+              ...(row?.longDesc ? { description: row.longDesc } : {}),
+              ...(row?.chapter ? { conceptType: row.chapter } : {}),
             };
           }),
         };
       }
       case 'rxcui_to_ndc': {
+        const rxcui = rxcuiOf(value);
+        if (rxcui === null) return { kind: 'source_not_found' };
         // A single product can carry thousands of package NDCs (the bundled corpus
         // tops out near 3,500 for one RXCUI), so this direction paginates like the
         // drug-name crosswalk. `ORDER BY ndc` is a total order over the returned
         // column, so offset pages neither skip nor repeat a package.
         const { rows, hasMore } = this.fetchPage(
           'SELECT ndc FROM ndc_map WHERE rxcui = ? ORDER BY ndc',
-          [value],
+          [rxcui],
           page,
         );
         // Three causes reach an empty page and only the last is an unmapped
@@ -1312,8 +1468,8 @@ export class CodeIndexService {
         // and an RXCUI absent from the index.
         const pastEnd =
           rows.length === 0 &&
-          this.hasAnyRow('SELECT 1 AS hit FROM ndc_map WHERE rxcui = ?', [value]);
-        if (rows.length === 0 && !pastEnd && !this.getRow(storageCode(value), 'RXNORM'))
+          this.hasAnyRow('SELECT 1 AS hit FROM ndc_map WHERE rxcui = ?', [rxcui]);
+        if (rows.length === 0 && !pastEnd && !this.getRow(rxcui, 'RXNORM'))
           return { kind: 'source_not_found' };
         return {
           kind: 'ok',
@@ -1331,6 +1487,8 @@ export class CodeIndexService {
         // it cannot stand in for one — it rides alongside as `conceptType`, which is
         // what separates the substances of a combination product from the `MIN`
         // grouping concept that names the combination itself.
+        const rxcui = rxcuiOf(value);
+        if (rxcui === null) return { kind: 'source_not_found' };
         const rel = direction === 'rxcui_to_ingredients' ? 'has_ingredient' : 'has_tradename';
         const rows = this.db
           .query(
@@ -1340,7 +1498,7 @@ export class CodeIndexService {
               WHERE r.rxcui = ? AND r.rel = ?
               ORDER BY r.target`,
           )
-          .all(value, rel) as {
+          .all(rxcui, rel) as {
           long_desc: string | null;
           rel: string;
           target: string;
@@ -1350,7 +1508,7 @@ export class CodeIndexService {
         // is an unmapped source — every IN/PIN/MIN/BN concept legitimately has no
         // ingredients of its own, and a generic product often has no branded form.
         if (rows.length === 0)
-          return this.getRow(storageCode(value), 'RXNORM')
+          return this.getRow(rxcui, 'RXNORM')
             ? { kind: 'ok', resolvedSystem: 'RXNORM', hasMore: false, hits: [] }
             : { kind: 'source_not_found' };
         return {
@@ -1506,18 +1664,15 @@ export class CodeIndexService {
    * Whether any bundled ICD-10-PCS code begins with `prefix`. Expressed as a half-open
    * range rather than `GLOB 'prefix*'` so SQLite seeks the `(system, code)` primary key
    * instead of scanning the system's partition — a bound GLOB pattern does not get the
-   * prefix optimization. `prefix` has already passed {@link ICD10PCS_PARTIAL_RE}, so its
-   * final character is at most `Z` and incrementing that code unit is a valid exclusive
-   * upper bound under SQLite's default BINARY collation.
+   * prefix optimization. `prefix` has already passed {@link ICD10PCS_PARTIAL_RE}, so
+   * {@link prefixUpperBound} applies.
    */
   private pcsPrefixExists(prefix: string): boolean {
-    const upperBound =
-      prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
     return !!this.db
       .query(
         "SELECT 1 AS hit FROM codes WHERE system = 'ICD10PCS' AND code >= ? AND code < ? LIMIT 1",
       )
-      .get(prefix, upperBound);
+      .get(prefix, prefixUpperBound(prefix));
   }
 
   /** Provenance for every bundled system. */
@@ -1544,6 +1699,17 @@ export class CodeIndexService {
   static project(row: CodeRow): DecodedCode {
     return CodeIndexService.decode(row);
   }
+}
+
+/**
+ * The exclusive upper bound of the codes beginning with `prefix`, for a half-open
+ * `code >= prefix AND code < bound` range seek on the primary key: the prefix with
+ * its final code unit incremented. Valid for an ICD-10-PCS prefix, whose final
+ * character is at most `Z` (the axis alphabet, {@link ICD10PCS_PARTIAL_RE}), under
+ * SQLite's default BINARY collation.
+ */
+function prefixUpperBound(prefix: string): string {
+  return prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
 }
 
 /**
@@ -1613,6 +1779,27 @@ export function noMatch(systems: SystemId | readonly SystemId[], trimmed: string
     ...(list.includes('RXNORM') ? [`${SYSTEM_LABELS.RXNORM} concept`] : []),
   ];
   return `No ${nouns.join(' or ')} matches "${trimmed}"`;
+}
+
+/**
+ * The sentence for a miss on a value in ICD-9-CM form ({@link isIcd9cmForm}) that
+ * no bundled system holds. medcode_check_code, medcode_get_code, and
+ * medcode_map_codes all append it, so the value reads the same whichever tool it
+ * was sent to.
+ */
+export const ICD9CM_NOTE =
+  'ICD-9-CM codes (diagnoses written NNN.NN, procedures NN.NN) are not bundled — find the current ICD-10-CM or ICD-10-PCS code by description with medcode_search_codes.';
+
+/** Where an ICD-10-PCS section value goes instead, closing {@link CodeIndexService.pcsSectionNote}. */
+export const PCS_SECTION_GUIDANCE =
+  'medcode_browse_hierarchy lists the sections (system ICD10PCS, no node); find a complete 7-character ICD-10-PCS code by description with medcode_search_codes.';
+
+/**
+ * The RXCUI a drug or class direction's source names — its digits, with any dot
+ * at either end dropped — or null when {@link isRxcuiForm} rules it out.
+ */
+function rxcuiOf(value: string): string | null {
+  return isRxcuiForm(value) ? storageCode(value) : null;
 }
 
 /**

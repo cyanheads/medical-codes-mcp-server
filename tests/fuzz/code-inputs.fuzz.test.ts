@@ -127,12 +127,25 @@ describe('a dot in the input', () => {
 
   it('moves a resolution only from ambiguous to ICD-10-CM, and only in display form', () => {
     let moved = 0;
+    let rxcuiRuledOut = 0;
+    let rxcuiAtAnEnd = 0;
     for (const raw of SPELLINGS) {
       // The same characters undotted are what the dot-blind resolution answers.
       const base = svc.getByCode(storageCode(raw));
       const got = svc.getByCode(raw);
       const checked = svc.checkCode(raw);
       const checkedBase = svc.checkCode(storageCode(raw));
+      // https://github.com/cyanheads/medical-codes-mcp-server/issues/69 — RxNorm is
+      // dot-blind only at the ends: a dot between two digits is no RXCUI's spelling.
+      if (base.kind === 'found' && base.row.system === 'RXNORM') {
+        if (/[0-9]\.[0-9]/.test(raw)) {
+          rxcuiRuledOut += 1;
+          expect(got, raw).toEqual({ kind: 'not_found' });
+          expect(checked.kind === 'resolved' && checked.result.status, raw).toBe('unknown');
+          continue;
+        }
+        rxcuiAtAnEnd += 1;
+      }
       if (
         isIcd10cmDisplayForm(raw) &&
         base.kind === 'ambiguous' &&
@@ -155,6 +168,10 @@ describe('a dot in the input', () => {
     }
     // A01.00 as typed and padded: the fixture's one ICD-10-CM / HCPCS collision.
     expect(moved).toBe(2);
+    // 161, 198440, and 1049640, as typed and padded: 2 + 5 + 6 interior positions,
+    // and a leading and a trailing dot each, which still resolve as the undotted RXCUI.
+    expect(rxcuiRuledOut).toBe(26);
+    expect(rxcuiAtAnEnd).toBe(12);
   });
 });
 

@@ -59,10 +59,19 @@ export interface CodeRow {
   code: string;
   /** Effective date (YYYYMMDD) when known. NULL otherwise. */
   effective: string | null;
-  /** 1 = non-billable header/category row (ICD-10-CM). 0 otherwise. */
+  /**
+   * 1 = non-billable header/category row (ICD-10-CM categories, HCPCS range
+   * buckets). 0 otherwise — ICD-10-PCS table rows included, which the service
+   * decodes as headers all the same.
+   */
   header: number;
   longDesc: string | null;
-  /** Parent code (CM/HCPCS). NULL for ICD-10-PCS (axis-based, not prefix-based). */
+  /**
+   * Stored parent: the ICD-10-CM code minus its last character (which can be a
+   * placeholder-X level that is not a code), the HCPCS range bucket, NULL for
+   * ICD-10-PCS and RxNorm. The hierarchy tools report the parent the service
+   * derives from it at query time, never this value unchecked.
+   */
   parent: string | null;
   shortDesc: string | null;
   system: SystemId;
