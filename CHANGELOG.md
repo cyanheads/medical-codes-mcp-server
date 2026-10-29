@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.1](changelog/0.5.x/0.5.1.md) — 2026-10-29
+
+ICD-10-PCS table rows list their codes and placeholder-X ICD-10-CM codes name a real parent; dotted values like 724.2 are no longer read as RXCUIs; medcode_get_code holds a batch to a 24,000-byte reply with a deferred continuation; name_to_rxcui and ndc_to_rxcui hits carry conceptType.
+
 ## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-10-28
 
 Publishes the medical-codes-guide agent skill over MCP and in the npm package, Docker image, and .mcpb; adopts mcp-ts-core 0.13.18 with the Agent Plugins root plugin.json and mcp.json; picks up 0.13.17's fix for the HTTP per-request memory leak.
