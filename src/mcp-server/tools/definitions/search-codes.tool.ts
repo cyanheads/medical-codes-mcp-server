@@ -7,7 +7,8 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { getCodeIndexService } from '@/services/code-index/code-index-service.js';
+import { getCodeIndexService, MAX_QUERY_TERMS } from '@/services/code-index/code-index-service.js';
+import { ECHO_MAX_CHARS, echoValue, quoteValue } from '@/services/code-index/echo.js';
 import { SYSTEM_IDS, SYSTEM_LABELS, SYSTEM_TRAITS } from '@/services/code-index/types.js';
 import { encodeNextCursor, resolvePage } from './_pagination.js';
 import { literal, renderCodeLine } from './_render.js';
@@ -15,6 +16,8 @@ import { nonBlankString } from './_schema.js';
 
 const SOURCE_URL =
   'https://github.com/cyanheads/medical-codes-mcp-server/blob/main/src/mcp-server/tools/definitions/search-codes.tool.ts';
+
+const MAX_TERMS = MAX_QUERY_TERMS.toLocaleString('en-US');
 
 export const searchCodesTool = tool('medcode_search_codes', {
   title: 'Search Medical Codes',
@@ -25,7 +28,7 @@ export const searchCodesTool = tool('medcode_search_codes', {
 
   input: z.object({
     query: nonBlankString('query').describe(
-      'Clinical description to match, e.g. "type 2 diabetes with neuropathy". Must not be blank or whitespace-only.',
+      `Clinical description to match, e.g. "type 2 diabetes with neuropathy". Must not be blank or whitespace-only. A search applies the first ${MAX_TERMS} distinct terms (a repeated term counts once), and \`notice\` names any past them that were not applied.`,
     ),
     system: z
       .enum(SYSTEM_IDS)
@@ -41,7 +44,7 @@ export const searchCodesTool = tool('medcode_search_codes', {
       .string()
       .optional()
       .describe(
-        "Restrict to a chapter/range bucket (the value from a code's `chapter` field). Case-insensitive: surrounding whitespace is trimmed and the value is upper-cased to match how chapters are stored, and `appliedFilters.chapter` echoes the upper-cased value that actually ran. A blank or whitespace-only value carries no filtering intent and is treated as omitted, which the response discloses as `appliedFilters.chapter: null`.",
+        `Restrict to a chapter/range bucket (the value from a code's \`chapter\` field). Case-insensitive: surrounding whitespace is trimmed and the value is upper-cased to match how chapters are stored, and \`appliedFilters.chapter\` echoes the upper-cased value that actually ran, cut to its first ${ECHO_MAX_CHARS} characters and "…" past that length. A blank or whitespace-only value carries no filtering intent and is treated as omitted, which the response discloses as \`appliedFilters.chapter: null\`.`,
       ),
     limit: z
       .number()
@@ -104,7 +107,12 @@ export const searchCodesTool = tool('medcode_search_codes', {
       .object({
         system: z.string().nullable().describe('System filter applied, or null.'),
         billableOnly: z.boolean().describe('Whether the billable-only filter was applied.'),
-        chapter: z.string().nullable().describe('Chapter filter applied, or null.'),
+        chapter: z
+          .string()
+          .nullable()
+          .describe(
+            `Chapter filter applied, or null — its first ${ECHO_MAX_CHARS} characters and "…" when it is longer than that, though the whole value ran.`,
+          ),
       })
       .describe('Filters the server applied to the search.'),
     truncated: z.boolean().describe('True when more matches exist beyond this page.'),
@@ -120,7 +128,7 @@ export const searchCodesTool = tool('medcode_search_codes', {
       .string()
       .optional()
       .describe(
-        'Guidance when nothing matched — echoes the query and suggests how to broaden, or names `billableOnly` as the cause when the searched system has no billing concept.',
+        `Guidance whenever a page returns no codes, naming which cause applies: nothing matched — it echoes the query and suggests how to broaden, or names \`billableOnly\` as the cause when the searched system has no billing concept — or the \`cursor\` starts past the last page of a query that does match. When the query carried more than ${MAX_TERMS} distinct terms, it leads with that limit and says the terms past it were not applied.`,
       ),
   },
 
@@ -146,10 +154,14 @@ export const searchCodesTool = tool('medcode_search_codes', {
     // build time from an upper-case code character or an RxNorm term type — so a
     // lower-cased chapter matches nothing and zero-hits a valid search in silence.
     const chapter = input.chapter?.trim().toUpperCase() || undefined;
-    const { codes, hasMore } = getCodeIndexService().searchFts(input.query, {
+    const svc = getCodeIndexService();
+    const filters = {
       ...(input.system && { system: input.system }),
       billableOnly: input.billableOnly,
       ...(chapter && { chapter }),
+    };
+    const { codes, hasMore, unappliedTerms } = svc.searchFts(input.query, {
+      ...filters,
       offset: page.offset,
       limit: page.limit,
     });
@@ -159,34 +171,50 @@ export const searchCodesTool = tool('medcode_search_codes', {
       appliedFilters: {
         system: input.system ?? null,
         billableOnly: input.billableOnly,
-        chapter: chapter ?? null,
+        // The whole chapter ran; the echo is bounded like every other caller value.
+        chapter: chapter === undefined ? null : echoValue(chapter),
       },
     });
 
     ctx.enrich({ truncated: hasMore, shown: codes.length, cap: page.limit });
     if (hasMore) ctx.enrich({ nextCursor: encodeNextCursor(page) });
 
+    // The notice is one field, so the term-limit disclosure leads any other notice.
+    const clamped = unappliedTerms
+      ? `A search applies at most ${MAX_TERMS} distinct terms: the first ${MAX_TERMS} of this query’s ${(MAX_QUERY_TERMS + unappliedTerms).toLocaleString('en-US')} were applied, and the rest were not.`
+      : undefined;
+
     if (codes.length === 0) {
+      // An empty page past the first has two causes the notice must not conflate: a
+      // query that matches nothing, or a cursor past the last page of one that does.
+      // The query's first page tells them apart.
+      const pastEnd =
+        page.offset > 0 && svc.searchFts(input.query, { ...filters, limit: 1 }).codes.length > 0;
+      const { system } = input;
+      const inSystem = system ? ` in ${system}` : '';
       // billableOnly against a system with no billing concept empties the search by
       // construction — broader terms cannot help, so name the filter as the cause.
-      const { system } = input;
-      ctx.enrich.notice(
-        input.billableOnly && system && !SYSTEM_TRAITS[system].billing
+      const empty = pastEnd
+        ? `${quoteValue(input.query.trim())} matches codes${inSystem}, but this page starts past the last result. Re-call without a cursor to start from the first page.`
+        : input.billableOnly && system && !SYSTEM_TRAITS[system].billing
           ? `${SYSTEM_LABELS[system]} has no billing concept, so billableOnly excludes every ${SYSTEM_LABELS[system]} concept. Drop billableOnly to search ${system}.`
-          : `No codes matched "${input.query.trim()}"${system ? ` in ${system}` : ''}. ` +
-              'Broaden the terms, drop the filters, or try clinical synonyms.',
-      );
-      ctx.log.info('Search returned no matches', { query: input.query });
+          : `No codes matched ${quoteValue(input.query.trim())}${inSystem}. Broaden the terms, drop the filters, or try clinical synonyms.`;
+      ctx.enrich.notice(clamped ? `${clamped} ${empty}` : empty);
+      ctx.log.info(pastEnd ? 'Search page past the last result' : 'Search returned no matches', {
+        query: echoValue(input.query),
+      });
       return { codes };
     }
+    if (clamped) ctx.enrich.notice(clamped);
 
-    ctx.log.info('Search completed', { query: input.query, count: codes.length });
+    ctx.log.info('Search completed', { query: echoValue(input.query), count: codes.length });
     return { codes };
   },
 
   format: (result) => {
     if (result.codes.length === 0) {
-      return [{ type: 'text', text: 'No matching codes.' }];
+      // True of both empty causes; the notice in the trailer names which one applies.
+      return [{ type: 'text', text: 'No codes on this page.' }];
     }
     const lines: string[] = [`## ${result.codes.length} matching code(s)`, ''];
     for (const c of result.codes) lines.push(renderCodeLine(c));

@@ -17,6 +17,12 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCodeIndexService } from '@/services/code-index/code-index-service.js';
 import {
+  ECHO_MAX_CHARS,
+  echoValue,
+  isOverlong,
+  overlongMessage,
+} from '@/services/code-index/echo.js';
+import {
   ICD10PCS_CODE_LENGTH,
   ICD10PCS_TABLE_ROW_LENGTH,
   storageCode,
@@ -72,7 +78,7 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
       ])
       .optional()
       .describe(
-        'A node to expand — or omit / pass an empty string for the top level. For ICD-10-CM/HCPCS, a code whose children to list; ICD-10-PCS supports only top-level Section browsing. Must not be blank or whitespace-only when provided.',
+        `A node to expand — or omit / pass an empty string for the top level. For ICD-10-CM/HCPCS, a code whose children to list; ICD-10-PCS supports only top-level Section browsing. Must not be blank or whitespace-only when provided. A node longer than ${ECHO_MAX_CHARS} characters once trimmed is longer than any bundled code, so it is not looked up and fails with unknown_node (RxNorm, which has no hierarchy, answers empty for any node); a miss or notice echoes at most its first ${ECHO_MAX_CHARS} trimmed characters and "…", with its length.`,
       ),
     limit: z
       .number()
@@ -132,20 +138,28 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
     {
       reason: 'unknown_node',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The node does not exist in the system — for ICD-10-PCS, also when it uses a character outside the axis alphabet or begins no bundled code.',
+      when: 'The node does not exist in the system, including a node written as an ICD-9-CM code (`E880.9`, `00.1`), which no bundled system holds — for ICD-10-PCS, also when it uses a character outside the axis alphabet or begins no bundled code.',
       recovery: 'Omit node to list top-level entries, or verify the node code.',
     },
   ],
 
   handler(input, ctx) {
     const page = resolvePage(input.cursor, input.limit);
+    // A node longer than any code once trimmed names no node: a miss without a
+    // lookup. RxNorm keeps its empty answer, since it has no hierarchy to look in.
+    if (input.node && input.system !== 'RXNORM' && isOverlong(input.node)) {
+      throw ctx.fail('unknown_node', overlongMessage(input.node));
+    }
     const svc = getCodeIndexService();
     const result = svc.browse(input.system, input.node, page);
+    // The node as the messages, notices, and log records below echo it. Only under
+    // RxNorm, whose notice does not name it, can a node past the bound get here.
+    const node = input.node === undefined ? null : echoValue(input.node);
 
     if (result.kind === 'unknown_node') {
       throw ctx.fail(
         'unknown_node',
-        result.reason ?? `Node "${input.node}" does not exist in ${input.system}.`,
+        result.reason ?? `Node "${node}" does not exist in ${input.system}.`,
       );
     }
 
@@ -160,17 +174,17 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
         const partial = input.node ? storageCode(input.node) : '';
         const tableRow =
           partial.length === ICD10PCS_TABLE_ROW_LENGTH
-            ? `"${input.node}" is an ICD-10-PCS table row: list the complete codes in it with medcode_map_codes (direction children, system ICD10PCS).`
+            ? `"${node}" is an ICD-10-PCS table row: list the complete codes in it with medcode_map_codes (direction children, system ICD10PCS).`
             : 'A three-character table row lists its complete codes through medcode_map_codes (direction children, system ICD10PCS) — find one by description with medcode_search_codes — and medcode_get_code decodes a complete code to its title.';
         ctx.enrich.notice(
           !input.node
             ? `No ICD-10-PCS sections are bundled in this release.`
             : partial.length >= ICD10PCS_CODE_LENGTH
-              ? `"${input.node}" is a complete 7-character ICD-10-PCS code — it exists, but its 7 axes (section, body system, root operation, body part, approach, device, qualifier) are fully specified, so there is nothing deeper to browse. Decode it with medcode_get_code for its title, or map its parents with medcode_map_codes for the table row it belongs to; omit node to list the 17 sections.`
+              ? `"${node}" is a complete 7-character ICD-10-PCS code — it exists, but its 7 axes (section, body system, root operation, body part, approach, device, qualifier) are fully specified, so there is nothing deeper to browse. Decode it with medcode_get_code for its title, or map its parents with medcode_map_codes for the table row it belongs to; omit node to list the 17 sections.`
               : `ICD-10-PCS axis values for positions 2–7 are context-dependent (their meaning varies by the section, body system, and operation that precede them), so they are not enumerable from a flat partial code. ${tableRow} Omit node to list the 17 sections.`,
         );
       }
-      ctx.log.info('Browsed PCS axes', { node: input.node ?? null, count: result.axes.length });
+      ctx.log.info('Browsed PCS axes', { node, count: result.axes.length });
       return { kind: 'axes' as const, codes: [], axes: result.axes };
     }
 
@@ -183,12 +197,12 @@ export const browseHierarchyTool = tool('medcode_browse_hierarchy', {
           : input.system === 'RXNORM'
             ? 'RxNorm is a flat drug vocabulary with no prefix hierarchy to browse — find a drug with medcode_search_codes (by name) or medcode_get_code (by RXCUI/NDC), then crosswalk with medcode_map_codes.'
             : input.node
-              ? `No children under "${input.node}" in ${input.system} — it may be a leaf code. ` +
+              ? `No children under "${node}" in ${input.system} — it may be a leaf code. ` +
                 'Omit node to list the top level, or browse a parent category.'
               : `${input.system} has no top-level entries to browse in this release.`,
       );
     }
-    ctx.log.info('Browsed hierarchy', { node: input.node ?? null, count: result.codes.length });
+    ctx.log.info('Browsed hierarchy', { node, count: result.codes.length });
     return { kind: 'codes' as const, codes: result.codes, axes: [] };
   },
 

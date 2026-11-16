@@ -79,16 +79,22 @@ export function isBareInteger(rawCode: string): boolean {
 }
 
 /**
- * ICD-9-CM as it is written: a diagnosis `NNN.N` / `NNN.NN` or a procedure
- * `NN.N` / `NN.NN`. Anchored with bounded quantifiers, so linear. The `V` and `E`
- * forms are left out on purpose: `V70.0` is also an ICD-10-CM display form.
+ * ICD-9-CM as it is written: a diagnosis `NNN.N` / `NNN.NN`, a procedure `NN.N` /
+ * `NN.NN`, or an external cause `ENNN.N` in its stem ranges, E000–E030 and
+ * E800–E999. Anchored, with a fixed alternation and bounded quantifiers, so linear.
+ * The `V` forms are left out on purpose: `V70.0` is also an ICD-10-CM display form.
+ * An external cause is never one, since its dot follows the fourth character, and
+ * `E116.5` keeps its dot-blind reading as `E11.65`: no ICD-9-CM code has its stem.
  */
-const ICD9CM_RE = /^[0-9]{2,3}\.[0-9]{1,2}$/;
+const ICD9CM_RE = /^(?:[0-9]{2,3}\.[0-9]{1,2}|E(?:0[0-2][0-9]|030|[89][0-9]{2})\.[0-9])$/i;
 
 /**
- * Whether a raw value (trimmed) is written as an ICD-9-CM code. No bundled code is
- * written as a dotted all-digit string, so a miss on one is named as ICD-9-CM,
- * which is not bundled.
+ * Whether a raw value (trimmed) is written as an ICD-9-CM code. No bundled system
+ * writes its codes that way — ICD-10-PCS and HCPCS codes carry no dot, and an
+ * ICD-10-CM code carries it after the third character — so a value in this form
+ * resolves in none of them, and its miss is named as ICD-9-CM, which is not bundled.
+ * Read dot-blind, `E880.9` would decode as ICD-10-CM `E88.09` and `00.1` as the
+ * ICD-10-PCS table row `001`, codes the caller never named.
  */
 export function isIcd9cmForm(rawCode: string): boolean {
   return ICD9CM_RE.test(rawCode.trim());
@@ -127,11 +133,13 @@ export function isIcd10cmDisplayForm(rawCode: string): boolean {
  * settles each of these to one system.
  *
  * Every shape is tested on the dot-stripped value except the RXCUI's, which is
- * {@link isRxcuiForm}: `250.00` fits no shape, and `104.9640` only ICD-10-PCS's.
+ * {@link isRxcuiForm}: `250.00` fits no shape, and `104.9640` only ICD-10-PCS's. A
+ * value in ICD-9-CM form ({@link isIcd9cmForm}) fits none: `E880.9` is no ICD-10-CM
+ * or HCPCS code, though `E8809` is shaped as both.
  */
 export function detectSystems(rawCode: string): SystemId[] {
   const code = storageCode(rawCode);
-  if (code.length === 0) return [];
+  if (code.length === 0 || isIcd9cmForm(rawCode)) return [];
 
   const matches: SystemId[] = [];
   if (ICD10CM_RE.test(code)) matches.push('ICD10CM');

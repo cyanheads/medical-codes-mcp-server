@@ -25,6 +25,13 @@ import {
   unmappedNdcMessage,
 } from '@/services/code-index/code-index-service.js';
 import { isBareInteger, isIcd9cmForm } from '@/services/code-index/detect.js';
+import {
+  ECHO_MAX_CHARS,
+  echoValue,
+  isOverlong,
+  overlongReason,
+  quoteValue,
+} from '@/services/code-index/echo.js';
 import { SYSTEM_IDS, SYSTEM_LABELS, type SystemId } from '@/services/code-index/types.js';
 import { literal, renderCodeBlock, renderCodeLine } from './_render.js';
 import { nonBlankString } from './_schema.js';
@@ -116,11 +123,15 @@ const FoundCodeSchema = DecodedCodeSchema.extend({
 /** A code that did not resolve, with a per-code reason. */
 const NotFoundCodeSchema = z
   .object({
-    code: z.string().describe('The input code that could not be resolved.'),
+    code: z
+      .string()
+      .describe(
+        `The input code that could not be resolved, as sent — trimmed when its padding alone carries it past ${ECHO_MAX_CHARS} characters, and its first ${ECHO_MAX_CHARS} trimmed characters and "…" when it is longer than that once trimmed.`,
+      ),
     reason: z
       .string()
       .describe(
-        'Why it could not be resolved (absent from every bundled system — for a bare integer, with a note that CPT / HCPCS Level I codes are out of scope, and for a dotted all-digit value in ICD-9-CM form such as "250.00", with a note that ICD-9-CM is not bundled — absent from the explicit `system` while another bundled system holds it, which is named, an ICD-10-PCS section value looked up as a code under system ICD10PCS, which is named as that section, a well-formed NDC nothing maps to, hyphenated or as bare 10/11 digits, an NDC looked up under an explicit `system` that skips the NDC decode, or ambiguous across systems).',
+        `Why it could not be resolved (absent from every bundled system — for a bare integer, with a note that CPT / HCPCS Level I codes are out of scope, and for a value in ICD-9-CM form such as "250.00", "00.1", or "E880.9", with a note that ICD-9-CM is not bundled — absent from the explicit \`system\` while another bundled system holds it, which is named, an ICD-10-PCS section value looked up as a code under system ICD10PCS, which is named as that section, a well-formed NDC nothing maps to, hyphenated or as bare 10/11 digits, an NDC looked up under an explicit \`system\` that skips the NDC decode, ambiguous across systems, or longer than any bundled code — over ${ECHO_MAX_CHARS} characters once trimmed — and so not looked up, a reason naming neither the value nor its length).`,
       ),
     candidateSystems: z
       .array(z.string())
@@ -284,17 +295,19 @@ function replyFits(entries: EntryBytes, deferred: DeferredBytes): boolean {
 
 /**
  * Each input code paired with the size of the inputs after it, measured as
- * `deferred` would carry and render them. Built back to front in one pass.
+ * `deferred` would carry and render them — each as {@link echoValue} echoes it.
+ * Built back to front in one pass.
  */
 function withTails(codes: readonly string[]): { code: string; after: DeferredBytes }[] {
   let after = NO_DEFERRED;
   const paired: { code: string; after: DeferredBytes }[] = [];
   for (const code of codes.toReversed()) {
     paired.push({ code, after });
+    const echoed = echoValue(code);
     after = {
       count: after.count + 1,
-      json: after.json + utf8Bytes(JSON.stringify(code)),
-      text: after.text + 1 + utf8Bytes(renderDeferredCode(code)),
+      json: after.json + utf8Bytes(JSON.stringify(echoed)),
+      text: after.text + 1 + utf8Bytes(renderDeferredCode(echoed)),
     };
   }
   return paired.reverse();
@@ -302,7 +315,7 @@ function withTails(codes: readonly string[]): { code: string; after: DeferredByt
 
 export const getCodeTool = tool('medcode_get_code', {
   title: 'Get Medical Code',
-  description: `Decode one or more US medical codes to their official descriptions across ICD-10-CM (diagnoses), ICD-10-PCS (inpatient procedures), HCPCS Level II (supplies/drugs/services), and RxNorm (drugs, by RXCUI). Also decodes a National Drug Code (NDC) directly to its RxNorm product offline, tagged \`source: "NDC"\` — hyphenated in an FDA segment configuration (4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2) or as bare 10/11 digits; any other segment widths are malformed and stay unresolved. Auto-detects the system from each code's shape, and a code written in ICD-10-CM dotted form (\`A01.00\`) resolves to ICD-10-CM; pass an explicit \`system\` only when a value is genuinely ambiguous. Accepts 1–50 codes and returns partial success: resolved codes in \`found\`, unresolved in \`notFound\` with a per-code reason, so one bad code never fails the batch. Each reply holds \`structuredContent\` and the text to ${REPLY_BUDGET_BYTES.toLocaleString('en-US')} bytes apiece: codes are decoded in request order, and once one has resolved, a code that would carry the reply past that budget is returned unprocessed in \`deferred\`, as sent, with every code after it — re-call with \`codes\` set to \`deferred\` and the same \`system\` and \`includeHierarchy\` until no \`deferred\` comes back. Three kinds of code are never deferred and can carry a reply past the budget: the first code that resolves, returned whole; the codes before it; and the unresolved codes after the last one that resolves, so a re-call always holds a code that resolves. Only a batch where nothing resolves fails: with ambiguous_system and \`candidateSystems\` when every code exists in more than one bundled system, otherwise with no_codes_found. Set \`includeHierarchy\` to attach each code's parent and immediate children (with a \`childrenTruncated\` flag when a code has more children than the cap returns — walk the full set via medcode_map_codes, or medcode_browse_hierarchy outside ICD-10-PCS); an ICD-10-PCS table row's children are the complete codes that begin with it. The resolved \`system\` is echoed on every result for chaining into a billability check or a medcode_map_codes parents/children walk; a bare integer that resolves nowhere is named as a possible CPT / HCPCS Level I code, which is out of scope, except a bare 10/11-digit one, which is named as an NDC no bundled drug maps to; a dotted all-digit value in ICD-9-CM form (\`250.00\`) is never read as an RXCUI and is named as ICD-9-CM, which is not bundled; an ICD-10-PCS section value from medcode_browse_hierarchy (\`0\`) looked up under system ICD10PCS is named as a section, not a code; a code string that also exists in another bundled system carries \`alsoInSystems\` naming it, so a single answer to a colliding code is never mistaken for the only one.`,
+  description: `Decode one or more US medical codes to their official descriptions across ICD-10-CM (diagnoses), ICD-10-PCS (inpatient procedures), HCPCS Level II (supplies/drugs/services), and RxNorm (drugs, by RXCUI). Also decodes a National Drug Code (NDC) directly to its RxNorm product offline, tagged \`source: "NDC"\` — hyphenated in an FDA segment configuration (4-4-2, 5-3-2, 5-4-1, or the 11-digit 5-4-2) or as bare 10/11 digits; any other segment widths are malformed and stay unresolved. Auto-detects the system from each code's shape, and a code written in ICD-10-CM dotted form (\`A01.00\`) resolves to ICD-10-CM; pass an explicit \`system\` only when a value is genuinely ambiguous. Accepts 1–50 codes and returns partial success: resolved codes in \`found\`, unresolved in \`notFound\` with a per-code reason, so one bad code never fails the batch. Each reply holds \`structuredContent\` and the text to ${REPLY_BUDGET_BYTES.toLocaleString('en-US')} bytes apiece: codes are decoded in request order, and once one has resolved, a code that would carry the reply past that budget is returned unprocessed in \`deferred\` with every code after it, each as sent — trimmed when its padding alone carries it past ${ECHO_MAX_CHARS} characters, and cut to its first ${ECHO_MAX_CHARS} trimmed characters and \`…\` when it is longer than that once trimmed — re-call with \`codes\` set to \`deferred\` and the same \`system\` and \`includeHierarchy\` until no \`deferred\` comes back. Three kinds of code are never deferred and can carry a reply past the budget: the first code that resolves, returned whole; the codes before it; and the unresolved codes after the last one that resolves, so a re-call always holds a code that resolves. Only a batch where nothing resolves fails: with ambiguous_system and \`candidateSystems\` when every code exists in more than one bundled system, otherwise with no_codes_found. Set \`includeHierarchy\` to attach each code's parent and immediate children (with a \`childrenTruncated\` flag when a code has more children than the cap returns — walk the full set via medcode_map_codes, or medcode_browse_hierarchy outside ICD-10-PCS); an ICD-10-PCS table row's children are the complete codes that begin with it. The resolved \`system\` is echoed on every result for chaining into a billability check or a medcode_map_codes parents/children walk; a bare integer that resolves nowhere is named as a possible CPT / HCPCS Level I code, which is out of scope, except a bare 10/11-digit one, which is named as an NDC no bundled drug maps to; a value in ICD-9-CM form — a dotted all-digit code (\`250.00\`, \`00.1\`) or an external-cause code (\`E880.9\`) — resolves in no bundled system and is named as ICD-9-CM, which is not bundled; an ICD-10-PCS section value from medcode_browse_hierarchy (\`0\`) looked up under system ICD10PCS is named as a section, not a code; a code string that also exists in another bundled system carries \`alsoInSystems\` naming it, so a single answer to a colliding code is never mistaken for the only one.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
@@ -310,7 +323,7 @@ export const getCodeTool = tool('medcode_get_code', {
     codes: z
       .array(
         nonBlankString('Each code').describe(
-          'A single code to decode (with or without dots), an RXCUI, or an NDC. Must not be blank or whitespace-only.',
+          `A single code to decode (with or without dots), an RXCUI, or an NDC. Must not be blank or whitespace-only. A value longer than ${ECHO_MAX_CHARS} characters once trimmed is longer than any bundled code, so it is not looked up and lands in notFound.`,
         ),
       )
       .min(1)
@@ -339,7 +352,7 @@ export const getCodeTool = tool('medcode_get_code', {
       .array(z.string())
       .optional()
       .describe(
-        'Input codes not processed because the reply reached its byte budget, in request order and as sent. Re-call with these as codes and the same system and includeHierarchy, until no deferred comes back. Absent when every code was processed.',
+        `Input codes not processed because the reply reached its byte budget, in request order, each as sent — trimmed when its padding alone carries it past ${ECHO_MAX_CHARS} characters, and its first ${ECHO_MAX_CHARS} trimmed characters and "…" when it is longer than that once trimmed, which a re-call misses with the notFound entry this call would have given it. Re-call with these as codes and the same system and includeHierarchy, until no deferred comes back. Absent when every code was processed.`,
       ),
   }),
 
@@ -347,7 +360,7 @@ export const getCodeTool = tool('medcode_get_code', {
     {
       reason: 'no_codes_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'None of the requested codes resolved — in any bundled system, or in the explicit `system` when one is given. The message names each code another bundled system holds and each code present in more than one system, with those systems, and each ICD-10-PCS section value, bare integer, value in ICD-9-CM form, and NDC among the misses.',
+      when: 'None of the requested codes resolved — in any bundled system, or in the explicit `system` when one is given. The message names each code another bundled system holds and each code present in more than one system, with those systems, and each ICD-10-PCS section value, bare integer, value in ICD-9-CM form, NDC, and value too long to be any code among the misses.',
       recovery:
         'Verify code formatting, or call medcode_search_codes with a description to find the right code.',
     },
@@ -377,9 +390,18 @@ export const getCodeTool = tool('medcode_get_code', {
     const icd9: string[] = [];
     // Codes present in more than one bundled system, with those systems.
     const ambiguous: { code: string; systems: SystemId[] }[] = [];
+    // Values too long to be any code once trimmed, never looked up.
+    const overlong: string[] = [];
 
     /** Decode one input, adding its entries to `found` or `notFound`. */
     const decodeInto = (raw: string, found: FoundCode[], notFound: NotFoundCode[]): void => {
+      // Longer than any code, RXCUI, or NDC once trimmed: not looked up at all, and
+      // echoed cut, with no second copy in the reason.
+      if (isOverlong(raw)) {
+        overlong.push(raw);
+        notFound.push({ code: echoValue(raw), reason: overlongReason() });
+        return;
+      }
       // First-class offline NDC decode: an NDC (hyphenated, or bare 10/11-digit)
       // resolves to its RxNorm product via the NDC↔RxNorm map. Only when no
       // explicit `system` is forced — an explicit system means a direct lookup.
@@ -392,7 +414,7 @@ export const getCodeTool = tool('medcode_get_code', {
         }
         if (ndc.kind === 'no_match') {
           unmappedNdcs.push(raw.trim());
-          notFound.push({ code: raw, reason: unmappedNdcMessage(raw, ndc.ndc) });
+          notFound.push({ code: echoValue(raw), reason: unmappedNdcMessage(raw, ndc.ndc) });
           return;
         }
         // 'not_ndc' → fall through to the normal system-detection path below.
@@ -404,23 +426,23 @@ export const getCodeTool = tool('medcode_get_code', {
         // back as a code under ICD10PCS is named as the section it is.
         const section = input.system === 'ICD10PCS' ? svc.pcsSection(raw) : null;
         const sectionNote = section ? ` ${svc.pcsSectionNote(raw.trim())}` : '';
-        if (section) pcsSections.push(`"${raw.trim()}" (${section})`);
+        if (section) pcsSections.push(`${quoteValue(raw.trim())} (${section})`);
         // A forced `system` can miss a code another bundled system holds — a real
         // code there, not an absent one — so that system is named, as check_code does.
         const holders = input.system ? svc.systemsHolding(raw) : [];
         if (input.system && holders.length > 0) {
           heldCodes.push(
-            `"${raw.trim()}" (${holders.map((sys) => SYSTEM_LABELS[sys]).join(' and ')})`,
+            `${quoteValue(raw.trim())} (${holders.map((sys) => SYSTEM_LABELS[sys]).join(' and ')})`,
           );
           notFound.push({
-            code: raw,
+            code: echoValue(raw),
             reason: `${noMatch(input.system, raw.trim())} — ${heldElsewhere(holders)} to decode it there.${sectionNote}`,
           });
           return;
         }
         if (section) {
           notFound.push({
-            code: raw,
+            code: echoValue(raw),
             reason: `${noMatch('ICD10PCS', raw.trim())} in the bundled release.${sectionNote}`,
           });
           return;
@@ -431,7 +453,7 @@ export const getCodeTool = tool('medcode_get_code', {
         const ndc = svc.ndcReading(raw);
         if (ndc?.kind === 'unmapped') {
           unmappedNdcs.push(raw.trim());
-          notFound.push({ code: raw, reason: unmappedNdcMessage(raw, ndc.normalized) });
+          notFound.push({ code: echoValue(raw), reason: unmappedNdcMessage(raw, ndc.normalized) });
           return;
         }
         // DB membership (not the shape) found the code in no bundled system; the
@@ -440,34 +462,34 @@ export const getCodeTool = tool('medcode_get_code', {
         const shapes = svc.detectSystem(raw);
         const reason =
           shapes.length === 0
-            ? `"${raw}" is not present in any bundled code system, and matches no bundled code shape.`
-            : `"${raw}" is not present in the bundled release (matched shape: ${shapes.join(', ')}).`;
+            ? `${quoteValue(raw)} is not present in any bundled code system, and matches no bundled code shape.`
+            : `${quoteValue(raw)} is not present in the bundled release (matched shape: ${shapes.join(', ')}).`;
         // A forced `system` skips the NDC decode, so an NDC it would have decoded is
         // named as one rather than as a possible CPT code.
         if (ndc?.kind === 'mapped') {
           forcedNdcs.push(raw.trim());
-          notFound.push({ code: raw, reason: `${reason} ${FORCED_NDC_NOTE}` });
+          notFound.push({ code: echoValue(raw), reason: `${reason} ${FORCED_NDC_NOTE}` });
           return;
         }
-        // No bundled system writes a dotted all-digit code, so one in ICD-9-CM form
-        // is named as that unbundled system's.
+        // No bundled system writes a code in ICD-9-CM form, so one is named as that
+        // unbundled system's.
         if (isIcd9cmForm(raw)) {
           icd9.push(raw.trim());
-          notFound.push({ code: raw, reason: `${reason} ${ICD9CM_NOTE}` });
+          notFound.push({ code: echoValue(raw), reason: `${reason} ${ICD9CM_NOTE}` });
           return;
         }
         // No bundled system holds it, so a bare integer is a likely CPT code.
         if (!isBareInteger(raw)) {
-          notFound.push({ code: raw, reason });
+          notFound.push({ code: echoValue(raw), reason });
           return;
         }
         outOfScope.push(raw.trim());
-        notFound.push({ code: raw, reason: `${reason} ${svc.outOfScopeNote()}` });
+        notFound.push({ code: echoValue(raw), reason: `${reason} ${svc.outOfScopeNote()}` });
       } else if (result.kind === 'ambiguous') {
         ambiguous.push({ code: raw.trim(), systems: result.systems });
         notFound.push({
-          code: raw,
-          reason: `"${raw}" matches multiple systems — re-call with an explicit system to disambiguate.`,
+          code: echoValue(raw),
+          reason: `${quoteValue(raw)} matches multiple systems — re-call with an explicit system to disambiguate.`,
           candidateSystems: result.systems,
         });
       } else {
@@ -514,7 +536,9 @@ export const getCodeTool = tool('medcode_get_code', {
         // The input's entries go, all of them together (an NDC's several products
         // included). Anything decodeInto() noted for the error messages stays
         // unread: those fire only when nothing resolved, and here something has.
-        deferred = input.codes.slice(i);
+        // Each is handed back as echoed: a cut value, re-sent, misses with the
+        // same entry it would have here, so the pages add up to the single answer.
+        deferred = input.codes.slice(i).map(echoValue);
         break;
       }
       found.push(...entry.found);
@@ -531,7 +555,7 @@ export const getCodeTool = tool('medcode_get_code', {
 
     if (found.length === 0) {
       const ambiguousList = ambiguous
-        .map(({ code, systems }) => `"${code}" (${systems.join(', ')})`)
+        .map(({ code, systems }) => `${quoteValue(code)} (${systems.join(', ')})`)
         .join(', ');
       // Every code failed on ambiguity alone, so one re-call with a `system` from
       // the union — which applies to every code — resolves the batch, as the sibling
@@ -551,7 +575,7 @@ export const getCodeTool = tool('medcode_get_code', {
       // ambiguity, section, out-of-scope, ICD-9-CM, and NDC notes do — naming their
       // inputs, since a batch can fail for mixed causes. Under a named `system`, only
       // that system was searched.
-      const quoted = (codes: string[]) => codes.map((code) => `"${code}"`).join(', ');
+      const quoted = (codes: string[]) => codes.map(quoteValue).join(', ');
       const scope = input.system
         ? `${SYSTEM_LABELS[input.system]}, the system this call named`
         : 'any bundled system';
@@ -576,6 +600,9 @@ export const getCodeTool = tool('medcode_get_code', {
           : '',
         forcedNdcs.length > 0
           ? ` National Drug Codes (NDC) looked up under an explicit system: ${quoted(forcedNdcs)}. Omit system to decode an NDC to its RxNorm product.`
+          : '',
+        overlong.length > 0
+          ? ` Values longer than ${ECHO_MAX_CHARS} characters once trimmed, not looked up: ${quoted(overlong)}. No bundled code, RXCUI, or NDC is that long.`
           : '',
       ].join('');
       throw ctx.fail(

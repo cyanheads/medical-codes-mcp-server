@@ -637,12 +637,12 @@ describe('medcode_search_codes format', () => {
     expect(text).toContain('(ICD-10-CM;');
   });
 
-  it('says nothing matched instead of rendering an empty list', async () => {
+  it('says the page holds no codes instead of rendering an empty list', async () => {
     const out = await searchCodesTool.handler(
       searchCodesTool.input.parse({ query: 'zzzznotarealterm' }),
       createMockContext(),
     );
-    expect(textOf(searchCodesTool.format!(out))).toBe('No matching codes.');
+    expect(textOf(searchCodesTool.format!(out))).toBe('No codes on this page.');
   });
 
   it('renders the applied filters through the enrichment trailer', () => {

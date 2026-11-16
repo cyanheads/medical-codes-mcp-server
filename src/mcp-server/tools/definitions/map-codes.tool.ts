@@ -23,6 +23,13 @@ import {
 } from '@/services/code-index/code-index-service.js';
 import { isBareInteger, isIcd9cmForm, ndcCandidates } from '@/services/code-index/detect.js';
 import {
+  ECHO_MAX_CHARS,
+  echoValue,
+  isOverlong,
+  overlongMessage,
+  quoteValue,
+} from '@/services/code-index/echo.js';
+import {
   CLASS_DIRECTIONS,
   type MapDirection,
   RXCLASS_CLASS_TYPES,
@@ -186,21 +193,27 @@ const CLASS_ID_AS_RXCUI_RECOVERY =
 function classMiss(from: string, svc: CodeIndexService): { message: string; recovery: string } {
   const named = SYSTEM_TOKENS.get(normalizeSystemToken(from));
   if (named)
-    return { message: `"${from}" is a code system, not a class ID.`, recovery: CLASS_ID_RECOVERY };
+    return {
+      message: `${quoteValue(from)} is a code system, not a class ID.`,
+      recovery: CLASS_ID_RECOVERY,
+    };
   const type = RXCLASS_CLASS_TYPES.find((t) => t === from.toUpperCase());
   if (type) {
     return {
-      message: `"${from}" is a class type, not a class ID — pass it as classType alongside a class ID of that type.`,
+      message: `${quoteValue(from)} is a class type, not a class ID — pass it as classType alongside a class ID of that type.`,
       recovery: CLASS_ID_RECOVERY,
     };
   }
   if (svc.systemsHolding(from).includes('RXNORM')) {
     return {
-      message: `"${from}" is an RxNorm concept (RXCUI), not a class ID.`,
+      message: `${quoteValue(from)} is an RxNorm concept (RXCUI), not a class ID.`,
       recovery: 'Map an RXCUI to its classes with direction rxcui_to_classes.',
     };
   }
-  return { message: `No bundled RxClass class has the ID "${from}".`, recovery: CLASS_ID_RECOVERY };
+  return {
+    message: `No bundled RxClass class has the ID ${quoteValue(from)}.`,
+    recovery: CLASS_ID_RECOVERY,
+  };
 }
 
 /**
@@ -214,7 +227,7 @@ function ndcMiss(from: string): { message: string; recovery: string } {
   const { candidates } = ndcCandidates(from);
   if (candidates.length === 0) {
     return {
-      message: `"${from}" is not an NDC spelling this server reads: an NDC is hyphenated in an FDA segment configuration (4-4-2, 5-3-2, 5-4-1, or 5-4-2) or written as bare 10 or 11 digits.`,
+      message: `${quoteValue(from)} is not an NDC spelling this server reads: an NDC is hyphenated in an FDA segment configuration (4-4-2, 5-3-2, 5-4-1, or 5-4-2) or written as bare 10 or 11 digits.`,
       recovery: NDC_MALFORMED_RECOVERY,
     };
   }
@@ -265,7 +278,7 @@ function sourceMiss(
   const named = SYSTEM_TOKENS.get(normalizeSystemToken(from));
   if (named) {
     return {
-      message: `"${from}" is a code system, not a code.`,
+      message: `${quoteValue(from)} is a code system, not a code.`,
       recovery: HIERARCHY_DIRECTIONS.has(direction)
         ? `Put the code itself in from (e.g. ${EXAMPLE_CODE[named]}) and the system in system ("${named}"). To list a system's top-level codes, call medcode_browse_hierarchy with system and no node.`
         : `The from field takes ${drugInput(direction)}; the drug directions resolve in RxNorm without a system.`,
@@ -274,13 +287,13 @@ function sourceMiss(
   if (direction === 'ndc_to_rxcui') return ndcMiss(from);
   // name_to_rxcui reads the value as a drug name, not a code.
   if (direction === 'name_to_rxcui') {
-    return { message: `No bundled code matches "${from}".`, recovery: null };
+    return { message: `No bundled code matches ${quoteValue(from)}.`, recovery: null };
   }
   // A class ID sent the wrong way — ahead of the bare-integer test, since a CVX
   // class ID is a bare integer that is no CPT code.
   if (direction === 'rxcui_to_classes' && svc.classNodes(from).length > 0) {
     return {
-      message: `"${from}" is an RxClass class ID, not an RXCUI.`,
+      message: `${quoteValue(from)} is an RxClass class ID, not an RXCUI.`,
       recovery: CLASS_ID_AS_RXCUI_RECOVERY,
     };
   }
@@ -309,7 +322,7 @@ function sourceMiss(
   const ndc = svc.ndcReading(from);
   if (ndc?.kind === 'mapped') {
     return {
-      message: `"${from}" is a National Drug Code (NDC), not ${HIERARCHY_DIRECTIONS.has(direction) ? 'a code' : 'an RXCUI'}.`,
+      message: `${quoteValue(from)} is a National Drug Code (NDC), not ${HIERARCHY_DIRECTIONS.has(direction) ? 'a code' : 'an RXCUI'}.`,
       recovery: NDC_RECOVERY,
     };
   }
@@ -328,7 +341,7 @@ function sourceMiss(
     // without a system (A0100), and each holder has a code hierarchy to walk —
     // RxNorm, the one without, never reaches here.
     return {
-      message: `"${from}" is a code in ${codeHolders.map((sys) => SYSTEM_LABELS[sys]).join(' and ')}, not an RXCUI — ${direction} reads RxNorm concepts only.`,
+      message: `${quoteValue(from)} is a code in ${codeHolders.map((sys) => SYSTEM_LABELS[sys]).join(' and ')}, not an RXCUI — ${direction} reads RxNorm concepts only.`,
       recovery: `Decode it with medcode_get_code and system ${quoted}, or walk its hierarchy with direction parents or children and system ${quoted}. To reach a drug's RXCUI, map the drug name with direction name_to_rxcui.`,
     };
   }
@@ -336,19 +349,19 @@ function sourceMiss(
   // integer reaching here is held by none — a likely CPT / HCPCS Level I code.
   if (isBareInteger(from)) {
     return {
-      message: `No bundled code matches "${from}". ${svc.outOfScopeNote()}`,
+      message: `No bundled code matches ${quoteValue(from)}. ${svc.outOfScopeNote()}`,
       recovery: outOfScopeRecovery(direction),
     };
   }
-  // No bundled system writes a dotted all-digit code, so one in ICD-9-CM form is
-  // named as that unbundled system's.
+  // No bundled system writes a code in ICD-9-CM form, so one is named as that
+  // unbundled system's.
   if (isIcd9cmForm(from)) {
     return {
-      message: `No bundled code matches "${from}". ${ICD9CM_NOTE}`,
+      message: `No bundled code matches ${quoteValue(from)}. ${ICD9CM_NOTE}`,
       recovery: icd9cmRecovery(direction),
     };
   }
-  return { message: `No bundled code matches "${from}".`, recovery: null };
+  return { message: `No bundled code matches ${quoteValue(from)}.`, recovery: null };
 }
 
 /**
@@ -361,7 +374,7 @@ function sourceMiss(
  * code with no children" would tell the caller something untrue about its input.
  */
 function noEdgeNotice(from: string, direction: MapDirection, system: string | null): string {
-  const head = `"${from}" resolved in ${system} but has no ${direction}`;
+  const head = `${quoteValue(from)} resolved in ${system} but has no ${direction}`;
   if (system === 'RXNORM' && HIERARCHY_DIRECTIONS.has(direction)) {
     return `${head} — RxNorm concepts have no code hierarchy in this index. Map its drug relationships with the rxcui_to_ingredients, rxcui_to_brands, or rxcui_to_ndc direction instead.`;
   }
@@ -428,25 +441,25 @@ function classNotice(
 ): string {
   if (direction === 'rxcui_to_classes') {
     if (page.sourceConceptType === 'BN') {
-      return `"${from}" resolved in RXNORM but has no rxcui_to_classes — no bundled RxClass source classifies it or its ingredients. Brand-name concepts carry no classes: find the brand's products with direction name_to_rxcui and map one of those, or map an ingredient's RXCUI.`;
+      return `${quoteValue(from)} resolved in RXNORM but has no rxcui_to_classes — no bundled RxClass source classifies it or its ingredients. Brand-name concepts carry no classes: find the brand's products with direction name_to_rxcui and map one of those, or map an ingredient's RXCUI.`;
     }
     const ingredient = INGREDIENT_CONCEPTS[page.sourceConceptType ?? ''];
     const productLevel = classType ? PRODUCT_CLASS_TYPES[classType] : undefined;
     if (ingredient && productLevel) {
-      return `"${from}" resolved in RXNORM as ${ingredient}, and RxClass records ${productLevel.recorded} — its ${productLevel.absence}. Find its products with direction name_to_rxcui and map one of those with classType "${classType}".`;
+      return `${quoteValue(from)} resolved in RXNORM as ${ingredient}, and RxClass records ${productLevel.recorded} — its ${productLevel.absence}. Find its products with direction name_to_rxcui and map one of those with classType "${classType}".`;
     }
     return classType
-      ? `"${from}" resolved in RXNORM but has no ${classType} class in the bundled RxClass sources, on itself or its ingredients. Omit classType to list its classes of every type.`
-      : `"${from}" resolved in RXNORM but has no rxcui_to_classes — no bundled RxClass source classifies it or its ingredients.`;
+      ? `${quoteValue(from)} resolved in RXNORM but has no ${classType} class in the bundled RxClass sources, on itself or its ingredients. Omit classType to list its classes of every type.`
+      : `${quoteValue(from)} resolved in RXNORM but has no rxcui_to_classes — no bundled RxClass source classifies it or its ingredients.`;
   }
   const nodes = page.sourceClasses ?? [];
   if (classType && !nodes.some((n) => n.classType === classType)) {
-    return `"${from}" is ${nameClasses(nodes)}, not a class of type ${classType}. Re-call with classType "${nodes[0]?.classType}", or omit classType.`;
+    return `${quoteValue(from)} is ${nameClasses(nodes)}, not a class of type ${classType}. Re-call with classType "${nodes[0]?.classType}", or omit classType.`;
   }
   const named = classType ? nodes.filter((n) => n.classType === classType) : nodes;
   // Only MeSH IDs are shared, by the CHEM and DISEASE types — two classes at most.
   const which = named.length > 1 ? 'neither of which has a' : 'which has no';
-  return `"${from}" resolved to ${nameClasses(named)}, ${which} direct member — its drugs attach to its subclasses, and this index lists direct members only, without walking the class hierarchy. Map a drug to its more specific classes with direction rxcui_to_classes.`;
+  return `${quoteValue(from)} resolved to ${nameClasses(named)}, ${which} direct member — its drugs attach to its subclasses, and this index lists direct members only, without walking the class hierarchy. Map a drug to its more specific classes with direction rxcui_to_classes.`;
 }
 
 export const mapCodesTool = tool('medcode_map_codes', {
@@ -458,7 +471,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
 
   input: z.object({
     from: nonBlankString('from').describe(
-      'The source value: a code (for parents/children), a drug name, an NDC, an RXCUI, or an RxClass class ID (for class_to_rxcuis). Must not be blank or whitespace-only.',
+      `The source value: a code (for parents/children), a drug name, an NDC, an RXCUI, or an RxClass class ID (for class_to_rxcuis). Must not be blank or whitespace-only. A drug name is looked up whole at any length; on every other direction a value longer than ${ECHO_MAX_CHARS} characters once trimmed is longer than any bundled code, so it is not looked up and fails with no_mapping. A miss or notice echoes at most its first ${ECHO_MAX_CHARS} trimmed characters and "…", with its length.`,
     ),
     direction: z
       .enum(DIRECTIONS)
@@ -663,12 +676,17 @@ export const mapCodesTool = tool('medcode_map_codes', {
     }
 
     const page = resolvePage(input.cursor, input.limit);
+    // A code, NDC, RXCUI, or class ID longer than any bundled one once trimmed is a
+    // miss without a lookup. A drug name is matched as a substring, at any length.
+    if (input.direction !== 'name_to_rxcui' && isOverlong(input.from)) {
+      throw ctx.fail('no_mapping', overlongMessage(input.from));
+    }
     const result = svc.mapCode(input.from, input.direction, input.system, page, input.classType);
 
     if (result.kind === 'ambiguous') {
       throw ctx.fail(
         'ambiguous_system',
-        `"${input.from.trim()}" exists in multiple systems: ${result.systems.join(', ')}.`,
+        `${quoteValue(input.from.trim())} exists in multiple systems: ${result.systems.join(', ')}.`,
         { candidateSystems: result.systems },
       );
     }
@@ -710,13 +728,13 @@ export const mapCodesTool = tool('medcode_map_codes', {
         : `resolved in ${result.resolvedSystem}`;
       ctx.enrich.notice(
         pastEnd
-          ? `"${from}" ${resolved}, but this page starts past the last ${input.direction} result. Re-call without a cursor to start from the first page.`
+          ? `${quoteValue(from)} ${resolved}, but this page starts past the last ${input.direction} result. Re-call without a cursor to start from the first page.`
           : CLASS_DIRECTION_SET.has(input.direction)
             ? classNotice(from, input.direction, input.classType, result)
             : noEdgeNotice(from, input.direction, result.resolvedSystem),
       );
       ctx.log.info('Mapped code (no edge)', {
-        from: input.from,
+        from: echoValue(input.from),
         direction: input.direction,
         resolvedSystem: result.resolvedSystem,
         pastEnd,
@@ -731,7 +749,7 @@ export const mapCodesTool = tool('medcode_map_codes', {
     }
 
     ctx.log.info('Mapped code', {
-      from: input.from,
+      from: echoValue(input.from),
       direction: input.direction,
       hits: result.hits.length,
     });

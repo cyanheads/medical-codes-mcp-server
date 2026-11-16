@@ -16,8 +16,12 @@ import { getCodeTool } from '@/mcp-server/tools/definitions/get-code.tool.js';
 import { listSystemsTool } from '@/mcp-server/tools/definitions/list-systems.tool.js';
 import { mapCodesTool } from '@/mcp-server/tools/definitions/map-codes.tool.js';
 import { searchCodesTool } from '@/mcp-server/tools/definitions/search-codes.tool.js';
+import { isIcd9cmForm } from '@/services/code-index/detect.js';
 import { displayCode } from '@/services/code-index/schema.js';
+import type { MapDirection, SystemId } from '@/services/code-index/types.js';
 import { bundledRows, ensureBundledIndex } from '../helpers/bundled-index.ts';
+import { readCommonMark } from '../helpers/commonmark.ts';
+import { carriesPast64, echoSurfaces } from '../helpers/echo-bound.ts';
 import {
   type GetCodeArgs,
   type GetCodePage,
@@ -1267,6 +1271,32 @@ describe('RxNorm name matching against the shipped corpus', () => {
   });
 });
 
+/**
+ * medcode_search_codes and name_to_rxcui answer a term whose substring pattern SQLite
+ * refuses as a term that matches nothing, without running the LIKE. Two facts make that
+ * exact: the driver takes a pattern of 50,000 bytes, and no stored text reaches 25,000
+ * bytes, the shortest a term can be once its escaped `%…%` pattern passes 50,000.
+ */
+describe('text matching against SQLite’s LIKE pattern limit', () => {
+  const pattern = (bytes: number) => `%${'a'.repeat(bytes - 2)}%`;
+
+  it('takes a LIKE pattern of 50,000 bytes and refuses one byte more', async () => {
+    const like = "SELECT 'a' LIKE ? ESCAPE '\\' AS hit";
+    expect(await bundledRows(like, pattern(50_000))).toEqual([{ hit: 0 }]);
+    await expect(bundledRows(like, pattern(50_001))).rejects.toThrow(
+      /LIKE or GLOB pattern too complex/,
+    );
+  });
+
+  it('stores no description 25,000 bytes long', async () => {
+    const [longest] = await bundledRows<{ longDesc: number; shortDesc: number }>(
+      'SELECT max(length(CAST(long_desc AS BLOB))) AS longDesc, max(length(CAST(short_desc AS BLOB))) AS shortDesc FROM codes',
+    );
+    expect(longest?.longDesc).toBeLessThan(25_000);
+    expect(longest?.shortDesc).toBeLessThan(25_000);
+  });
+});
+
 // https://github.com/cyanheads/medical-codes-mcp-server/issues/38
 // https://github.com/cyanheads/medical-codes-mcp-server/issues/39
 describe('map_codes misses against the shipped corpus', () => {
@@ -1659,13 +1689,17 @@ describe('name_to_rxcui and ndc_to_rxcui term types in the shipped corpus', () =
 });
 
 const ICD9_SENTENCE =
-  'ICD-9-CM codes (diagnoses written NNN.NN, procedures NN.NN) are not bundled — find the current ICD-10-CM or ICD-10-PCS code by description with medcode_search_codes.';
+  'ICD-9-CM codes (diagnoses written NNN.NN, external causes ENNN.N, procedures NN.NN) are not bundled — find the current ICD-10-CM or ICD-10-PCS code by description with medcode_search_codes.';
 const NO_SHAPE = (code: string) =>
   `"${code}" is not present in any bundled code system (ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm), and matches no bundled code shape.`;
 
 /** A tool call's error envelope, or undefined when it succeeded. */
 async function errorOf(
-  tool: typeof checkCodeTool | typeof getCodeTool | typeof mapCodesTool,
+  tool:
+    | typeof checkCodeTool
+    | typeof getCodeTool
+    | typeof mapCodesTool
+    | typeof browseHierarchyTool,
   args: Record<string, unknown>,
 ) {
   const result = await runToolContract(tool as typeof checkCodeTool, args as never);
@@ -1675,7 +1709,7 @@ async function errorOf(
 
 // https://github.com/cyanheads/medical-codes-mcp-server/issues/69
 describe('a dotted numeric value against the shipped corpus', () => {
-  it.each(['250.00', '250.0', '401.9', '36.06', ' 250.00 ', '724.2'])(
+  it.each(['250.00', '250.0', '401.9', '36.06', ' 250.00 ', '724.2', 'E849.0'])(
     'check_code misses %j with the no-shape lead and the ICD-9-CM sentence alone',
     async (code) => {
       const error = await errorOf(checkCodeTool, { code });
@@ -1762,7 +1796,6 @@ describe('a dotted numeric value against the shipped corpus', () => {
     ['E119', 'ICD10CM'],
     ['V70.0', 'ICD10CM'],
     ['V58.61', 'unknown'],
-    ['E849.0', 'unknown'],
     ['0123T', 'unknown'],
     ['zzzz9', 'unknown'],
   ])('keeps check_code on %j as it was, with no ICD-9-CM sentence', async (code, outcome) => {
@@ -1782,6 +1815,243 @@ describe('a dotted numeric value against the shipped corpus', () => {
     if (outcome === 'ndc') expect(message).toContain('National Drug Code (NDC)');
     // The bare integers no system holds keep the CPT sentence; nothing else gains it.
     expect(message.includes('CPT'), code).toBe(outcome === 'unknown' && /^\d+$/.test(code));
+  });
+});
+
+/** A getByCode outcome as one comparable string: `SYSTEM:code[+alsoIn]`, ambiguous, or none. */
+function outcomeOf(r: ReturnType<Awaited<ReturnType<typeof ensureBundledIndex>>['getByCode']>) {
+  if (r.kind === 'found')
+    return `${r.row.system}:${r.row.code}${r.alsoIn.length > 0 ? `+${r.alsoIn.join('/')}` : ''}`;
+  return r.kind === 'ambiguous' ? `ambiguous:${r.systems.join('/')}` : 'not_found';
+}
+
+/** The lead of a miss under a named system. */
+const SYSTEM_LEAD: Record<SystemId, (code: string) => string> = {
+  ICD10CM: (code) => `No ICD-10-CM code matches "${code}"`,
+  ICD10PCS: (code) => `No ICD-10-PCS code matches "${code}"`,
+  HCPCS: (code) => `No HCPCS Level II code matches "${code}"`,
+  RXNORM: (code) => `No RxNorm concept matches "${code}"`,
+};
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/71
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/74
+describe('values in ICD-9-CM form against the shipped corpus', () => {
+  const SYSTEMS = [undefined, 'ICD10CM', 'ICD10PCS', 'HCPCS', 'RXNORM'] as const;
+
+  it.each([
+    ['E88.09', 'ICD10CM:E8809'],
+    ['E8809', 'ICD10CM:E8809'],
+    ['E116.5', 'ICD10CM:E1165'],
+    ['E031.0', 'HCPCS:E0310'],
+    ['A0.100', 'ambiguous:ICD10CM/HCPCS'],
+    ['A01.00', 'ICD10CM:A0100+HCPCS'],
+    ['V70.0', 'ICD10CM:V700'],
+    ['V01.0', 'ICD10CM:V010'],
+    ['V20.20', 'HCPCS:V2020'],
+    ['6809.', 'RXNORM:6809'],
+    ['001.', 'ICD10PCS:001'],
+    ['001', 'ICD10PCS:001'],
+    ['012', 'ICD10PCS:012'],
+    ['0.01', 'ICD10PCS:001'],
+    ['.001', 'ICD10PCS:001'],
+    ['0DT', 'ICD10PCS:0DT'],
+    ['0DTJ4ZZ', 'ICD10PCS:0DTJ4ZZ'],
+    ['0DT.J4ZZ', 'ICD10PCS:0DTJ4ZZ'],
+  ])('keeps %j, which is not in ICD-9-CM form, resolving as %s', async (raw, expected) => {
+    const svc = await ensureBundledIndex();
+    expect(outcomeOf(svc.getByCode(raw))).toBe(expected);
+  });
+
+  /** The issues' values: external causes (#71) and procedure categories (#74). */
+  const VALUES = [
+    'E880.9',
+    ' e880.9 ',
+    'E888.9',
+    'E010.0',
+    'E849.0',
+    '00.1',
+    '01.2',
+    '30.2',
+    '01.8',
+  ];
+
+  it.each(VALUES)('misses %j on check_code, with and without system', async (raw) => {
+    const code = raw.trim();
+    for (const system of SYSTEMS) {
+      const args = { code: raw, ...(system && { system }) };
+      const error = await errorOf(checkCodeTool, args);
+      expect(error?.data?.reason, JSON.stringify(args)).toBe('unknown_code');
+      expect(error?.message, JSON.stringify(args)).toBe(
+        system
+          ? `${SYSTEM_LEAD[system](code)} in the bundled release. ${ICD9_SENTENCE}`
+          : `${NO_SHAPE(code)} ${ICD9_SENTENCE}`,
+      );
+    }
+  });
+
+  it.each(VALUES)('misses %j on get_code, alone and beside a code that resolves', async (raw) => {
+    const code = raw.trim();
+    for (const system of SYSTEMS) {
+      const args = { codes: [raw], ...(system && { system }) };
+      const error = await errorOf(getCodeTool, args);
+      expect(error?.data?.reason, JSON.stringify(args)).toBe('no_codes_found');
+      expect(error?.message, JSON.stringify(args)).toContain(
+        `Values in ICD-9-CM form with no match: "${code}". ${ICD9_SENTENCE}`,
+      );
+      expect(error?.message, JSON.stringify(args)).not.toContain('another bundled system');
+    }
+    for (const system of [undefined, 'ICD10CM'] as const) {
+      const out = await getCodeTool.handler(
+        getCodeTool.input.parse({ codes: [raw, 'E11.9'], ...(system && { system }) }),
+        createMockContext({ errors: getCodeTool.errors }),
+      );
+      expect(out.found.map((entry) => entry.code)).toEqual(['E11.9']);
+      expect(out.notFound).toEqual([
+        {
+          code: raw,
+          reason: `"${raw}" is not present in any bundled code system, and matches no bundled code shape. ${ICD9_SENTENCE}`,
+        },
+      ]);
+    }
+  });
+
+  it.each(VALUES)('misses %j on every map_codes direction that reads a code', async (raw) => {
+    const message = `No bundled code matches "${raw.trim()}". ${ICD9_SENTENCE}`;
+    for (const system of SYSTEMS) {
+      for (const direction of ['parents', 'children']) {
+        const args = { from: raw, direction, ...(system && { system }) };
+        const error = await errorOf(mapCodesTool, args);
+        expect(error?.data?.reason, JSON.stringify(args)).toBe('no_mapping');
+        expect(error?.message, JSON.stringify(args)).toBe(message);
+      }
+    }
+    for (const direction of [
+      'rxcui_to_ndc',
+      'rxcui_to_ingredients',
+      'rxcui_to_brands',
+      'rxcui_to_classes',
+    ]) {
+      for (const system of [undefined, 'RXNORM'] as const) {
+        const args = { from: raw, direction, ...(system && { system }) };
+        const error = await errorOf(mapCodesTool, args);
+        expect(error?.data?.reason, JSON.stringify(args)).toBe('no_mapping');
+        expect(error?.message, JSON.stringify(args)).toBe(message);
+      }
+    }
+  });
+
+  it.each([
+    ['ICD10CM', 'E880.9', 'ICD-10-CM'],
+    ['HCPCS', 'E010.0', 'HCPCS Level II'],
+    ['ICD10PCS', '00.1', 'ICD-10-PCS'],
+  ])('fails a %s browse of %j as unknown_node with the sentence', async (system, node, label) => {
+    const error = await errorOf(browseHierarchyTool, { system, node });
+    expect(error?.data?.reason).toBe('unknown_node');
+    expect(error?.message).toBe(
+      `No ${label} code matches "${node}" in the bundled release. ${ICD9_SENTENCE}`,
+    );
+  });
+
+  describe('every single-dot spelling of every bundled code', () => {
+    /**
+     * Where ICD-9-CM writes the dot in a bundled code's characters, stated from the
+     * rule itself rather than read off isIcd9cmForm: after the fourth character of an
+     * E code whose stem is in E000–E030 or E800–E999, after the second of a
+     * three-digit row, and nowhere (-1) in any other code.
+     */
+    const icd9DotAt = (code: string): number => {
+      if (/^\d{3}$/.test(code)) return 2;
+      const stem = /^E(\d{3})\d$/.exec(code)?.[1];
+      return stem !== undefined && (Number(stem) <= 30 || Number(stem) >= 800) ? 4 : -1;
+    };
+    const dotted = (code: string, at: number) => `${code.slice(0, at)}.${code.slice(at)}`;
+
+    /** Each spelling isIcd9cmForm reads as ICD-9-CM, with the bundled row it spells. */
+    const icd9: { code: string; spelling: string; system: SystemId }[] = [];
+    /** The same, derived from {@link icd9DotAt}. */
+    const expected: string[] = [];
+    /** Every five-character E code and three-digit row: the codes those spellings come from. */
+    const neighbours: { code: string; system: SystemId }[] = [];
+    let spellings = 0;
+
+    beforeAll(async () => {
+      const rows = await bundledRows<{ code: string; system: SystemId }>(
+        "SELECT system, code FROM codes WHERE system != 'RXNORM' ORDER BY system, code",
+      );
+      for (const row of rows) {
+        if (/^E\d{4}$|^\d{3}$/.test(row.code)) neighbours.push(row);
+        if (icd9DotAt(row.code) >= 0) expected.push(dotted(row.code, icd9DotAt(row.code)));
+        for (let i = 0; i <= row.code.length; i++) {
+          const spelling = dotted(row.code, i);
+          spellings++;
+          if (isIcd9cmForm(spelling)) icd9.push({ ...row, spelling });
+        }
+      }
+    });
+
+    it('holds 175 external-cause and 52 procedure spellings in ICD-9-CM form, and no other', () => {
+      // RxNorm is left out: no RXCUI is reachable with a dot between its digits (#69).
+      expect(spellings).toBe(1_390_170);
+      expect(icd9.map((e) => e.spelling)).toEqual(expected);
+      const tally = (entries: typeof icd9) =>
+        Object.fromEntries(
+          ['ICD10CM', 'ICD10PCS', 'HCPCS']
+            .map((sys) => [sys, entries.filter((e) => e.system === sys).length])
+            .filter(([, n]) => n !== 0),
+        );
+      expect(tally(icd9.filter((e) => e.spelling.startsWith('E')))).toEqual({
+        ICD10CM: 59,
+        HCPCS: 116,
+      });
+      expect(tally(icd9.filter((e) => !e.spelling.startsWith('E')))).toEqual({ ICD10PCS: 52 });
+      // No spelling names two rows.
+      expect(new Set(icd9.map((e) => e.spelling)).size).toBe(227);
+    });
+
+    it('resolves each one nowhere, with or without system, though its row still resolves', async () => {
+      const svc = await ensureBundledIndex();
+      for (const { code, spelling, system } of icd9) {
+        expect(outcomeOf(svc.getByCode(code, system)), code).toBe(`${system}:${code}`);
+        expect(svc.systemsHolding(spelling), spelling).toEqual([]);
+        expect(svc.getByCode(spelling), spelling).toEqual({ kind: 'not_found' });
+        expect(svc.getByCode(spelling, system), spelling).toEqual({ kind: 'not_found' });
+        const checked = svc.checkCode(spelling);
+        expect(checked.kind === 'resolved' && checked.result.whyNot, spelling).toBe(
+          `${NO_SHAPE(spelling)} ${ICD9_SENTENCE}`,
+        );
+        expect(svc.browse(system, spelling, { offset: 0, limit: 1 }), spelling).toEqual({
+          kind: 'unknown_node',
+          reason: `${SYSTEM_LEAD[system](spelling)} in the bundled release. ${ICD9_SENTENCE}`,
+        });
+      }
+    });
+
+    it('keeps every other spelling of those codes resolving as the code undotted', async () => {
+      const svc = await ensureBundledIndex();
+      let kept = 0;
+      for (const { code } of neighbours) {
+        const undotted = svc.getByCode(code);
+        for (let i = 0; i <= code.length; i++) {
+          if (i === icd9DotAt(code)) continue;
+          const spelling = dotted(code, i);
+          kept++;
+          // The display form names ICD-10-CM among holders (#61); nothing else moves.
+          const display =
+            i === 3 &&
+            code.length > 3 &&
+            undotted.kind === 'ambiguous' &&
+            undotted.systems.includes('ICD10CM');
+          expect(outcomeOf(svc.getByCode(spelling)), spelling).toBe(
+            display
+              ? `ICD10CM:${code}+${undotted.systems.filter((sys) => sys !== 'ICD10CM').join('/')}`
+              : outcomeOf(undotted),
+          );
+        }
+      }
+      // 1,090 codes — the five-character E codes and three-digit rows — at every dot
+      // position, less the 227 above.
+      expect(kept).toBe(6_209);
+    });
   });
 });
 
@@ -1958,5 +2228,265 @@ describe('get_code batch byte budget against the shipped index', () => {
     } finally {
       config.maxResults = cap;
     }
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/75
+describe('the caller-value echo bound against the shipped index', () => {
+  const q = (count: number) => 'q'.repeat(count);
+  const spaces = (count: number) => ' '.repeat(count);
+  /** A value no code could be: 10,000 characters of one letter. */
+  const Q = q(10_000);
+  /** How every reply echoes {@link Q}: its first 64 characters, then `…`. */
+  const CUT = `${q(64)}…`;
+  const DIRECTIONS = [
+    'parents',
+    'children',
+    'name_to_rxcui',
+    'ndc_to_rxcui',
+    'rxcui_to_ndc',
+    'rxcui_to_ingredients',
+    'rxcui_to_brands',
+    'rxcui_to_classes',
+    'class_to_rxcuis',
+  ] satisfies MapDirection[];
+
+  /** What a client receives: the serialized structuredContent and the content[] text. */
+  interface Surfaces {
+    structured: Record<string, unknown>;
+    text: string;
+  }
+  interface Reply extends Surfaces {
+    error: { data?: { reason?: string } } | undefined;
+  }
+
+  /** One call as a client makes it, including values the schema type does not name. */
+  async function reply(tool: unknown, args: Record<string, unknown>): Promise<Reply> {
+    const result = await runToolContract(tool as typeof checkCodeTool, args as never);
+    const structured = (result.structuredContent ?? {}) as Record<string, unknown>;
+    return {
+      structured,
+      text: (result.content as { text?: string }[]).map((block) => block.text ?? '').join(''),
+      error: result.isError ? (structured.error as Reply['error']) : undefined,
+    };
+  }
+
+  /** Neither surface carries more than 64 characters of `value`, content[] as a client reads it. */
+  function expectBounded(r: Surfaces, value: string): void {
+    const { text, json } = echoSurfaces(r.structured, r.text);
+    expect(carriesPast64(text, value), 'content[]').toBe(false);
+    expect(carriesPast64(json, value), 'structuredContent').toBe(false);
+  }
+
+  const within = (page: GetCodePage) =>
+    page.contentBytes <= REPLY_BUDGET_BYTES && page.structuredBytes <= REPLY_BUDGET_BYTES;
+
+  /** Every page of a get_code batch, re-called with `codes: deferred` until none comes back. */
+  async function walk(args: GetCodeArgs): Promise<GetCodePage[]> {
+    const pages: GetCodePage[] = [];
+    for (let codes = args.codes; ; ) {
+      const page = await getCodePage({ ...args, codes });
+      pages.push(page);
+      if (page.deferred === undefined) return pages;
+      expect(page.deferred.length).toBeLessThan(codes.length);
+      codes = page.deferred;
+    }
+  }
+
+  it('answers E11.9 beside 49 values of 10,000 characters within the reply budget, in either order', async () => {
+    const many = Array.from({ length: 49 }, () => Q);
+    for (const codes of [
+      ['E11.9', ...many],
+      [...many, 'E11.9'],
+    ]) {
+      const pages = await walk({ codes });
+      for (const page of pages) {
+        expect(within(page)).toBe(true);
+        expectBounded(page, Q);
+      }
+      expect(pages.flatMap((page) => page.found).map((f) => f.code)).toEqual(['E11.9']);
+      expect(pages.flatMap((page) => page.notFound).map((n) => n.code)).toEqual(
+        many.map(() => CUT),
+      );
+    }
+  });
+
+  it('answers E11.9 beside one overlong value, and three beside one of 30,000 characters, within the budget', async () => {
+    for (const [codes, hits] of [
+      [['E11.9', Q], 1],
+      [['E11.9', 'E11.9', q(30_000), 'E11.9'], 3],
+    ] as const) {
+      const pages = await walk({ codes: [...codes] });
+      for (const page of pages) {
+        expect(within(page)).toBe(true);
+        expectBounded(page, q(30_000));
+      }
+      expect(pages.flatMap((page) => page.found).map((f) => f.code)).toEqual(
+        Array.from({ length: hits }, () => 'E11.9'),
+      );
+      expect(pages.flatMap((page) => page.notFound).map((n) => n.code)).toEqual([CUT]);
+    }
+  });
+
+  it('hands deferred values back cut or trimmed, and the pages add up to the single answers', async () => {
+    const padded = `${spaces(100)}J0120${spaces(100)}`;
+    const args = { codes: ['G', 'J', Q, padded], system: 'HCPCS', includeHierarchy: true };
+    const pages = await walk(args);
+    expect(pages.length).toBeGreaterThan(1);
+    for (const page of pages) {
+      expectBounded(page, Q);
+      expectBounded(page, padded);
+      for (const value of page.deferred ?? []) expect([...value].length).toBeLessThanOrEqual(65);
+    }
+    expect(pages[0]?.deferred?.filter((value) => value.trim() === 'J0120')).toEqual(['J0120']);
+    const reference = await unbudgetedGetCode(args, 'J0120');
+    expect(pages.flatMap((page) => page.found)).toEqual(reference.found);
+    expect(pages.flatMap((page) => page.notFound)).toEqual(reference.notFound);
+  });
+
+  const OVERLONG_CALLS: [string, unknown, Record<string, unknown>][] = [
+    ['medcode_check_code', checkCodeTool, { code: Q }],
+    // A bare integer that resolves nowhere is named in no_codes_found's own message.
+    [
+      'medcode_get_code with nothing resolving',
+      getCodeTool,
+      { codes: [Q, ` ${'7'.repeat(10_000)} `] },
+    ],
+    ...DIRECTIONS.map((direction): [string, unknown, Record<string, unknown>] => [
+      `medcode_map_codes ${direction}`,
+      mapCodesTool,
+      { from: Q, direction },
+    ]),
+    ...['ICD10CM', 'ICD10PCS', 'HCPCS', 'RXNORM'].map(
+      (system): [string, unknown, Record<string, unknown>] => [
+        `medcode_browse_hierarchy ${system}`,
+        browseHierarchyTool,
+        { system, node: Q },
+      ],
+    ),
+    ['medcode_search_codes query', searchCodesTool, { query: Q }],
+    ['medcode_search_codes chapter', searchCodesTool, { query: 'diabetes', chapter: Q }],
+  ];
+
+  it.each(OVERLONG_CALLS)(
+    '%s carries at most 64 characters of a 10,000-character value',
+    async (_name, tool, args) => {
+      const r = await reply(tool, args);
+      const sent = Object.values(args)
+        .flat()
+        .filter((value): value is string => typeof value === 'string');
+      for (const value of sent.filter((value) => value.trim().length > 64)) {
+        expectBounded(r, value);
+        // A chapter is upper-cased before it is echoed.
+        expectBounded(r, value.toUpperCase());
+      }
+    },
+  );
+
+  it('looks a 10,000-character query up whole and cuts a 10,000-character chapter', async () => {
+    const query = await reply(searchCodesTool, { query: Q });
+    expect(query.structured.effectiveQuery).toBe(Q);
+    const chapter = await reply(searchCodesTool, { query: 'diabetes', chapter: Q });
+    expect((chapter.structured.appliedFilters as { chapter: string | null }).chapter).toBe(
+      `${'Q'.repeat(64)}…`,
+    );
+  });
+
+  it('still resolves E11.9 padded with 10,000 spaces on each side', async () => {
+    const r = await reply(checkCodeTool, { code: `${spaces(10_000)}E11.9${spaces(10_000)}` });
+    expect(r.error).toBeUndefined();
+    expect(r.structured).toMatchObject({
+      system: 'ICD10CM',
+      code: 'E11.9',
+      status: 'valid_billable',
+    });
+    expectBounded(r, spaces(10_000));
+  });
+
+  it('still decodes and crosswalks the package NDC 0002-3227-30', async () => {
+    const rxcuis = (
+      await bundledRows<{ rxcui: string }>(
+        'SELECT rxcui FROM ndc_map WHERE ndc = ? ORDER BY rxcui',
+        '00002322730',
+      )
+    ).map((row) => row.rxcui);
+    expect(rxcuis.length).toBeGreaterThan(0);
+    const decoded = await getCodePage({ codes: ['0002-3227-30'] });
+    expect(decoded.found.map((f) => f.code).sort()).toEqual(rxcuis);
+    const mapped = await reply(mapCodesTool, { from: '0002-3227-30', direction: 'ndc_to_rxcui' });
+    expect(mapped.error).toBeUndefined();
+    expect((mapped.structured.hits as { value: string }[]).map((hit) => hit.value).sort()).toEqual(
+      rxcuis,
+    );
+  });
+
+  /** The RxNorm name of 2686978, longer than the bound, read from the shipped index. */
+  async function longName(): Promise<string> {
+    const [row] = await bundledRows<{ name: string }>(
+      `SELECT long_desc AS name FROM codes WHERE system = 'RXNORM' AND code = '2686978'`,
+    );
+    const name = row?.name ?? '';
+    expect([...name].length).toBeGreaterThan(64);
+    return name;
+  }
+
+  it('still maps the whole RxNorm name of 2686978 to it', async () => {
+    const r = await reply(mapCodesTool, {
+      from: await longName(),
+      direction: 'name_to_rxcui',
+      limit: 200,
+    });
+    expect(r.error).toBeUndefined();
+    expect((r.structured.hits as { value: string }[]).map((hit) => hit.value)).toContain('2686978');
+  });
+
+  it('cuts that name in the notice of a page past the end', async () => {
+    const name = await longName();
+    const pastEnd = Buffer.from(JSON.stringify({ offset: 999_999, limit: 2 })).toString(
+      'base64url',
+    );
+    const page = await reply(mapCodesTool, {
+      from: name,
+      direction: 'name_to_rxcui',
+      limit: 2,
+      cursor: pastEnd,
+    });
+    expect(page.error).toBeUndefined();
+    expect(page.structured.hits).toEqual([]);
+    const { notice } = page.structured;
+    expect(typeof notice).toBe('string');
+    expect(carriesPast64(String(notice), name)).toBe(false);
+    const quoted = page.text
+      .split('\n')
+      .filter((line) => line.startsWith('>'))
+      .join('\n');
+    expect(quoted).not.toBe('');
+    expect(carriesPast64(readCommonMark(quoted), name)).toBe(false);
+  });
+
+  it('still finds G0556 by its whole description', async () => {
+    const [row] = await bundledRows<{ description: string }>(
+      `SELECT long_desc AS description FROM codes WHERE system = 'HCPCS' AND code = 'G0556'`,
+    );
+    const description = row?.description ?? '';
+    expect([...description].length).toBeGreaterThan(64);
+    const r = await reply(searchCodesTool, { query: description, limit: 200 });
+    expect(r.error).toBeUndefined();
+    expect((r.structured.codes as { code: string }[]).map((c) => c.code)).toContain('G0556');
+    expect(r.structured.effectiveQuery).toBe(description.trim());
+  });
+
+  it('no longer resolves E11.9 written with 10,000 dots, which is past the bound once trimmed', async () => {
+    const dotted = `E${'.'.repeat(10_000)}11.9`;
+    const checked = await reply(checkCodeTool, { code: dotted });
+    expect(checked.error?.data?.reason).toBe('unknown_code');
+    expectBounded(checked, dotted);
+    const mapped = await reply(mapCodesTool, { from: dotted, direction: 'parents' });
+    expect(mapped.error?.data?.reason).toBe('no_mapping');
+    expectBounded(mapped, dotted);
+    const decoded = await getCodePage({ codes: ['E11.9', dotted] });
+    expect(decoded.found.map((f) => f.code)).toEqual(['E11.9']);
+    expect(decoded.notFound.map((n) => n.code)).toEqual([`E${'.'.repeat(63)}…`]);
+    expectBounded(decoded, dotted);
   });
 });

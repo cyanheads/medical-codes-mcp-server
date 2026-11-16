@@ -67,11 +67,39 @@ export async function getCodePage(args: GetCodeArgs): Promise<GetCodePage> {
   };
 }
 
+/** A value's length in Unicode code points, the unit the tool's 64-character echo bound counts. */
+const chars = (value: string) => [...value].length;
+
+/** Whether a code is past the bound once trimmed, so the tool never looks it up. */
+const tooLong = (code: string) => chars(code.trim()) > 64;
+
+/**
+ * A caller value as the tool echoes it: as sent at 64 characters or fewer, else
+ * trimmed when that fits, else its first 64 trimmed characters and `…`. Written
+ * here from the documented rule, not imported, so the walk checks the tool against
+ * the contract rather than against itself.
+ */
+function echoed(code: string): string {
+  if (chars(code) <= 64) return code;
+  const trimmed = code.trim();
+  return tooLong(trimmed) ? `${[...trimmed].slice(0, 64).join('')}…` : trimmed;
+}
+
+/**
+ * Check one page's `deferred` against the codes it was sent: exactly their tail, in
+ * order, each code as {@link echoed} — as sent, trimmed when its padding alone ran
+ * past the bound, or cut when it is longer than the bound once trimmed.
+ */
+function expectDeferredOf(page: GetCodePage, codes: readonly string[]): void {
+  const deferred = page.deferred ?? [];
+  expect(deferred).toEqual(codes.slice(codes.length - deferred.length).map(echoed));
+}
+
 /**
  * Follow the documented continuation verbatim — re-call with `codes: deferred` and
  * the same `system` and `includeHierarchy` until no `deferred` comes back —
- * asserting on every page that `deferred`, when present, is non-empty and exactly
- * the tail of the codes that page was sent, as sent.
+ * asserting on every page that `deferred`, when present, is non-empty, shorter than
+ * the codes that page was sent, and their tail as {@link expectDeferredOf} reads it.
  */
 export async function walkGetCode(args: GetCodeArgs): Promise<{
   found: Found[];
@@ -87,7 +115,7 @@ export async function walkGetCode(args: GetCodeArgs): Promise<{
     // Every page consumes at least one input, so the walk terminates.
     expect(page.deferred.length).toBeGreaterThan(0);
     expect(page.deferred.length).toBeLessThan(codes.length);
-    expect(page.deferred).toEqual(codes.slice(codes.length - page.deferred.length));
+    expectDeferredOf(page, codes);
     codes = page.deferred;
   }
   return {

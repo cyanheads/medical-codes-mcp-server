@@ -128,6 +128,12 @@ describe('CodeIndexService shutdown', () => {
         .listSystems()
         .map((s) => s.system),
     ).toContain('ICD10CM');
+    // A search reads the connection-private term tables, which each open creates anew.
+    expect(
+      getCodeIndexService()
+        .searchFts('type 2 diabetes mellitus without complications', { limit: 50 })
+        .codes.map((hit) => hit.code),
+    ).toContain('E11.9');
     closeCodeIndexService();
   });
 });

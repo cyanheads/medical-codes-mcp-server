@@ -15,6 +15,12 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 
 import { getCodeIndexService } from '@/services/code-index/code-index-service.js';
+import {
+  ECHO_MAX_CHARS,
+  isOverlong,
+  overlongMessage,
+  quoteValue,
+} from '@/services/code-index/echo.js';
 import { SYSTEM_IDS, SYSTEM_LABELS } from '@/services/code-index/types.js';
 import { literal } from './_render.js';
 import { nonBlankString } from './_schema.js';
@@ -33,13 +39,13 @@ const NDC_RECOVERY =
 export const checkCodeTool = tool('medcode_check_code', {
   title: 'Check Medical Code',
   description:
-    'Validate whether a US medical code exists, is current, and is billable in the active bundled release. Returns a discriminated status — valid_billable, valid_not_billable, valid_header, valid, or terminated — with a `whyNot` explaining non-billable and terminated cases (e.g. "valid ICD-10-CM category but not billable — submit a more specific child code"). A HCPCS code is terminated once its last valid date has passed; before then it checks as billable, with that date in `whyNot`. This is the detail a coder needs before submitting a claim. RxNorm has no billing concept, so a current RxNorm concept is `valid` with `billable: null` and no billing verdict. Auto-detects the system from the code\'s shape, and a code written in ICD-10-CM dotted form (`A01.00`) resolves to ICD-10-CM; pass an explicit `system` to disambiguate. A non-billable or terminated code is a successful result with a whyNot, not an error — only a code absent from the named system, or with no `system` from every bundled system, raises unknown_code, which names the other bundled system that holds the code, or every system the code\'s shape fits. A dotted all-digit value in ICD-9-CM form (`250.00`) is never read as an RXCUI, and its miss says ICD-9-CM is not bundled; an ICD-10-PCS section value from medcode_browse_hierarchy (`0`) checked under system ICD10PCS is named as a section, not a code. A code string that also exists in another bundled system carries `alsoInSystems` naming it, since the verdict applies only to the system that answered.',
+    'Validate whether a US medical code exists, is current, and is billable in the active bundled release. Returns a discriminated status — valid_billable, valid_not_billable, valid_header, valid, or terminated — with a `whyNot` explaining non-billable and terminated cases (e.g. "valid ICD-10-CM category but not billable — submit a more specific child code"). A HCPCS code is terminated once its last valid date has passed; before then it checks as billable, with that date in `whyNot`. This is the detail a coder needs before submitting a claim. RxNorm has no billing concept, so a current RxNorm concept is `valid` with `billable: null` and no billing verdict. Auto-detects the system from the code\'s shape, and a code written in ICD-10-CM dotted form (`A01.00`) resolves to ICD-10-CM; pass an explicit `system` to disambiguate. A non-billable or terminated code is a successful result with a whyNot, not an error — only a code absent from the named system, or with no `system` from every bundled system, raises unknown_code, which names the other bundled system that holds the code, or every system the code\'s shape fits. A value in ICD-9-CM form — a dotted all-digit code (`250.00`, `00.1`) or an external-cause code (`E880.9`) — resolves in no bundled system, with or without `system`, and its miss says ICD-9-CM is not bundled; an ICD-10-PCS section value from medcode_browse_hierarchy (`0`) checked under system ICD10PCS is named as a section, not a code. A code string that also exists in another bundled system carries `alsoInSystems` naming it, since the verdict applies only to the system that answered.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   sourceUrl: SOURCE_URL,
 
   input: z.object({
     code: nonBlankString('code').describe(
-      'The code to validate, with or without dots. Must not be blank or whitespace-only.',
+      `The code to validate, with or without dots. Must not be blank or whitespace-only. A value longer than ${ECHO_MAX_CHARS} characters once trimmed is longer than any bundled code, so it is not looked up and fails with unknown_code, which echoes its first ${ECHO_MAX_CHARS} trimmed characters and "…" with its length.`,
     ),
     system: z
       .enum(SYSTEM_IDS)
@@ -91,12 +97,14 @@ export const checkCodeTool = tool('medcode_check_code', {
   ],
 
   handler(input, ctx) {
+    // Longer than any code, RXCUI, or NDC once trimmed: a miss without a lookup.
+    if (isOverlong(input.code)) throw ctx.fail('unknown_code', overlongMessage(input.code));
     const outcome = getCodeIndexService().checkCode(input.code, input.system);
 
     if (outcome.kind === 'ambiguous') {
       throw ctx.fail(
         'ambiguous_system',
-        `"${input.code.trim()}" exists in multiple systems: ${outcome.systems.join(', ')}.`,
+        `${quoteValue(input.code.trim())} exists in multiple systems: ${outcome.systems.join(', ')}.`,
         { candidateSystems: outcome.systems },
       );
     }
@@ -105,7 +113,7 @@ export const checkCodeTool = tool('medcode_check_code', {
     if (r.status === 'unknown') {
       throw ctx.fail(
         'unknown_code',
-        r.whyNot ?? `Unknown code "${input.code.trim()}".`,
+        r.whyNot ?? `Unknown code ${quoteValue(input.code.trim())}.`,
         r.ndc ? { recovery: { hint: NDC_RECOVERY } } : undefined,
       );
     }

@@ -1,6 +1,6 @@
 # medical-codes-mcp-server - Directory Structure
 
-Generated on: 2026-10-29 17:29:30
+Generated on: 2026-11-16 10:58:48
 
 ```text
 medical-codes-mcp-server/
@@ -173,6 +173,7 @@ medical-codes-mcp-server/
 │   │   └── code-index/
 │   │       ├── code-index-service.ts
 │   │       ├── detect.ts
+│   │       ├── echo.ts
 │   │       ├── schema.ts
 │   │       └── types.ts
 │   └── index.ts
@@ -193,6 +194,7 @@ medical-codes-mcp-server/
 │   ├── helpers/
 │   │   ├── bundled-index.ts
 │   │   ├── commonmark.ts
+│   │   ├── echo-bound.ts
 │   │   ├── get-code-pages.ts
 │   │   └── index-fixture.ts
 │   ├── ingest/
@@ -210,10 +212,12 @@ medical-codes-mcp-server/
 │   │   └── packaging-regex.test.ts
 │   ├── services/
 │   │   ├── code-index-lifecycle.test.ts
-│   │   └── code-index-service.test.ts
+│   │   ├── code-index-service.test.ts
+│   │   └── echo.test.ts
 │   ├── smoke/
 │   │   └── tool-surface.smoke.test.ts
 │   └── tools/
+│       ├── caller-echo.test.ts
 │       ├── class-layer-absent.test.ts
 │       ├── class-layer-empty.test.ts
 │       ├── correctness-critical.test.ts

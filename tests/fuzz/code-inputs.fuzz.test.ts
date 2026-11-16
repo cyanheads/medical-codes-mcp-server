@@ -7,11 +7,15 @@
 
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { browseHierarchyTool } from '@/mcp-server/tools/definitions/browse-hierarchy.tool.js';
+import { checkCodeTool } from '@/mcp-server/tools/definitions/check-code.tool.js';
+import { getCodeTool } from '@/mcp-server/tools/definitions/get-code.tool.js';
 import { mapCodesTool } from '@/mcp-server/tools/definitions/map-codes.tool.js';
 import { searchCodesTool } from '@/mcp-server/tools/definitions/search-codes.tool.js';
 import type { CodeIndexService } from '@/services/code-index/code-index-service.js';
 import {
   detectSystems,
+  isIcd9cmForm,
   isIcd10cmDisplayForm,
   ndcCandidates,
 } from '@/services/code-index/detect.js';
@@ -24,6 +28,7 @@ import {
   parseIcd10pcsOrder,
   parseRxNav,
 } from '../../scripts/ingest/parsers.ts';
+import { carriesPast64, echoSurfaces } from '../helpers/echo-bound.ts';
 import { ensureIndex } from '../helpers/index-fixture.ts';
 
 const NUL_QUERY = '\0';
@@ -117,7 +122,7 @@ describe('a dot in the input', () => {
   /** Fixture codes of every system, header rows included, plus shaped values none holds. */
   const CODES = [
     ...['A00', 'A000', 'A01', 'A010', 'A0100', 'B00', 'E11', 'E119', 'E1140', 'I10'],
-    ...['0DTJ4ZZ', '0DTJ0ZZ', '02703DZ', 'J0120', 'E0110', 'A4206', 'K0552', 'J', 'A'],
+    ...['0DTJ4ZZ', '0DTJ0ZZ', '02703DZ', '027', 'J0120', 'E0110', 'A4206', 'K0552', 'J', 'A'],
     ...['161', '198440', '1049640', 'R9999', 'A019999', '1049631', 'ZZZ9999', 'E1199'],
   ];
   /** Every single-dot spelling of each code, as typed and in lower case with padding. */
@@ -125,10 +130,11 @@ describe('a dot in the input', () => {
     Array.from({ length: code.length + 1 }, (_, i) => `${code.slice(0, i)}.${code.slice(i)}`),
   ).flatMap((dotted) => [dotted, ` ${dotted.toLowerCase()} `]);
 
-  it('moves a resolution only from ambiguous to ICD-10-CM, and only in display form', () => {
+  it('moves a resolution only to ICD-10-CM in display form, or to nothing in ICD-9-CM form', () => {
     let moved = 0;
     let rxcuiRuledOut = 0;
     let rxcuiAtAnEnd = 0;
+    let icd9RuledOut = 0;
     for (const raw of SPELLINGS) {
       // The same characters undotted are what the dot-blind resolution answers.
       const base = svc.getByCode(storageCode(raw));
@@ -145,6 +151,14 @@ describe('a dot in the input', () => {
           continue;
         }
         rxcuiAtAnEnd += 1;
+      }
+      // https://github.com/cyanheads/medical-codes-mcp-server/issues/71 and #74 — a value
+      // in ICD-9-CM form is that system's spelling, which no bundled system holds.
+      if (isIcd9cmForm(raw)) {
+        if (base.kind !== 'not_found') icd9RuledOut += 1;
+        expect(got, raw).toEqual({ kind: 'not_found' });
+        expect(checked.kind === 'resolved' && checked.result.status, raw).toBe('unknown');
+        continue;
       }
       if (
         isIcd10cmDisplayForm(raw) &&
@@ -172,6 +186,9 @@ describe('a dot in the input', () => {
     // and a leading and a trailing dot each, which still resolve as the undotted RXCUI.
     expect(rxcuiRuledOut).toBe(26);
     expect(rxcuiAtAnEnd).toBe(12);
+    // E011.0 over HCPCS E0110 and 02.7 over the ICD-10-PCS table row 027, as typed
+    // and padded; E114.0 and E119.9 sit outside the external-cause stems and stay.
+    expect(icd9RuledOut).toBe(4);
   });
 });
 
@@ -487,5 +504,185 @@ describe('RxNorm row invariants', () => {
     // Nine of the spellings are NDCs: six decode to a product, and three are
     // well-formed (hyphenated, bare 11, bare 10 digits) with no match.
     expect(ndcs).toBe(9);
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/75
+describe('caller-value echo bound', () => {
+  /** Alphabets no fixture code, drug name, or chapter is spelled with, so every value misses. */
+  const ALPHABETS = ['qxzjvwk', '😀🧪💊', '漢字検索', 'qx😀z字'];
+  /** Lengths in code points, across the bound and well past it. */
+  const LENGTHS = [5, 17, 63, 64, 65, 66, 129, 1_000, 4_000];
+
+  /** A seeded stream of picks, so every run fuzzes the same values. */
+  let seed = 75;
+  const pick = (count: number) => {
+    seed = (Math.imul(seed, 1_103_515_245) + 12_345) >>> 0;
+    return (seed >>> 16) % count;
+  };
+  const draw = (alphabet: string, length: number) => {
+    const points = [...alphabet];
+    return Array.from({ length }, () => points[pick(points.length)]).join('');
+  };
+  const pad = ' '.repeat(40);
+  /** A value as sent, and padded past the bound. */
+  const sentAndPadded = (value: string) => [value, `${pad}${value}${pad}`];
+  /**
+   * Code-shaped values no bundled system holds, which reach get_code's shaped misses
+   * rather than its generic one: a bare integer, an NDC in a valid format nothing maps
+   * to (hyphenated, and bare 10 digits), and ICD-9-CM and other dotted forms. Bare 11
+   * digits reach the same miss as bare 10, and its reason names their normalized key,
+   * which spells the value, so they are left out.
+   */
+  const SHAPED = [
+    '99213',
+    '99999-8888-77',
+    '9999988887',
+    '250.00',
+    'E880.9',
+    '00.1',
+    'Z.Z.9',
+    '9.9.9',
+  ];
+  const VALUES = [
+    ...LENGTHS.flatMap((length) => ALPHABETS.map((alphabet) => draw(alphabet, length))),
+    // Words with spaces between them, which search matches term by term.
+    ...LENGTHS.map((length) => 'qxzjv '.repeat(length).slice(0, length).trim()),
+    // Padding past the bound around values at it and just past it.
+    ...[63, 64, 65].flatMap((length) => ALPHABETS.map((a) => `${pad}${draw(a, length)}${pad}`)),
+    ...SHAPED.flatMap(sentAndPadded),
+    // A bare integer and a dotted value at the bound and just past it.
+    ...[63, 64, 65].flatMap((length) => [
+      ...sentAndPadded('7'.repeat(length)),
+      ...sentAndPadded(`Z${'.'.repeat(length - 3)}Z9`),
+    ]),
+  ];
+
+  /**
+   * Each call a caller value reaches, with how a reply spells a value it echoes:
+   * as sent, or upper-cased for a chapter. A call that never echoes it has none.
+   */
+  const CALLS: [
+    string,
+    unknown,
+    (value: string) => Record<string, unknown>,
+    ((v: string) => string)?,
+  ][] = [
+    ['get_code', getCodeTool, (value) => ({ codes: ['A00', value] }), (v) => v],
+    ['check_code', checkCodeTool, (value) => ({ code: value }), (v) => v],
+    ...[
+      'parents',
+      'children',
+      'name_to_rxcui',
+      'ndc_to_rxcui',
+      'rxcui_to_ndc',
+      'rxcui_to_ingredients',
+      'rxcui_to_brands',
+      'rxcui_to_classes',
+      'class_to_rxcuis',
+    ].map((direction): (typeof CALLS)[number] => [
+      `map_codes ${direction}`,
+      mapCodesTool,
+      (value) => ({ from: value, direction }),
+      (v) => v,
+    ]),
+    ...['ICD10CM', 'ICD10PCS', 'HCPCS'].map((system): (typeof CALLS)[number] => [
+      `browse_hierarchy ${system}`,
+      browseHierarchyTool,
+      (value) => ({ system, node: value }),
+      (v) => v,
+    ]),
+    // RxNorm is flat: any node gets the same empty answer, which names no node.
+    [
+      'browse_hierarchy RXNORM',
+      browseHierarchyTool,
+      (value) => ({ system: 'RXNORM', node: value }),
+    ],
+    ['search_codes query', searchCodesTool, (value) => ({ query: value }), (v) => v],
+    [
+      'search_codes chapter',
+      searchCodesTool,
+      (value) => ({ query: 'diabetes', chapter: value }),
+      (v) => v.toUpperCase(),
+    ],
+  ];
+
+  /**
+   * Codes a bundled system holds, each sent to the get_code call where it misses: a
+   * code in two systems with no system named, plain and dotted; a code another system
+   * holds, and an NDC a named system keeps from its decode, under ICD10CM; and an
+   * ICD-10-PCS section value under ICD10PCS, beside a table row whose rendering spells
+   * no section digit.
+   */
+  const COLLIDING: [string, (value: string) => Record<string, unknown>, string[]][] = [
+    ['get_code', (value) => ({ codes: ['A00', value] }), ['A0100', 'A0.100']],
+    [
+      'get_code under ICD10CM',
+      (value) => ({ codes: ['E11.9', value], system: 'ICD10CM' }),
+      ['J0120', '11111-2222-33'],
+    ],
+    ['get_code under ICD10PCS', (value) => ({ codes: ['B00', value], system: 'ICD10PCS' }), ['0']],
+  ];
+
+  const PROBES = [
+    ...VALUES.flatMap((value) =>
+      CALLS.map(([name, tool, args, spell]) => ({ name, tool, args: args(value), spell, value })),
+    ),
+    ...COLLIDING.flatMap(([name, args, codes]) =>
+      codes.flatMap(sentAndPadded).map((value) => ({
+        name,
+        tool: getCodeTool,
+        args: args(value),
+        spell: (v: string) => v,
+        value,
+      })),
+    ),
+  ];
+
+  /** A letter or digit beside a copy of a value: the copy is part of another token, a code that contains it. */
+  const WORD = /[\p{L}\p{N}]/u;
+
+  /**
+   * Whether `surface` echoes a value as exactly `echo`: it holds `echo`, and no copy of
+   * it runs on into a space or a `…` — the padding an untrimmed echo keeps, or the cut
+   * a value inside the bound must not get.
+   */
+  function echoesExactly(surface: string, echo: string): boolean {
+    let echoed = false;
+    for (let at = surface.indexOf(echo); at !== -1; at = surface.indexOf(echo, at + 1)) {
+      const before = surface[at - 1] ?? '';
+      const after = surface[at + echo.length] ?? '';
+      if (WORD.test(before) || WORD.test(after)) continue;
+      if (before === ' ' || after === ' ' || after === '…') return false;
+      echoed = true;
+    }
+    return echoed;
+  }
+
+  it('carries no run of a caller value past 64 characters, and a value of 64 or fewer as the rule echoes it', async () => {
+    const violations: string[] = [];
+    for (const { name, tool, args, spell, value } of PROBES) {
+      const trimmed = value.trim();
+      const result = await callWithRawArgs(tool, args);
+      const { text, json } = echoSurfaces(
+        (result.structuredContent ?? {}) as Record<string, unknown>,
+        (result.content as { text?: string }[]).map((block) => block.text ?? '').join(''),
+      );
+      const surfaces = [text, json];
+      const label = `${name}, ${[...value].length} characters (${[...trimmed].slice(0, 8).join('')}…)`;
+      if ([...trimmed].length > 64) {
+        const spelled = spell?.(value) ?? value;
+        if (surfaces.some((s) => carriesPast64(s, value) || carriesPast64(s, spelled))) {
+          violations.push(`${label}: carries more than 64 characters of the value`);
+        }
+      } else if (spell) {
+        // As sent at 64 characters or fewer, else trimmed.
+        const echo = spell([...value].length <= 64 ? value : trimmed);
+        if (!surfaces.every((s) => echoesExactly(s, echo))) {
+          violations.push(`${label}: does not echo the value as ${JSON.stringify(echo)}`);
+        }
+      }
+    }
+    expect(violations).toEqual([]);
   });
 });

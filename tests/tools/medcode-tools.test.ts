@@ -10,6 +10,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { encodeNextCursor } from '@/mcp-server/tools/definitions/_pagination.js';
 import { browseHierarchyTool } from '@/mcp-server/tools/definitions/browse-hierarchy.tool.js';
 import { checkCodeTool } from '@/mcp-server/tools/definitions/check-code.tool.js';
 import { getCodeTool } from '@/mcp-server/tools/definitions/get-code.tool.js';
@@ -230,6 +231,70 @@ describe('medcode_search_codes', () => {
     const out = await searchCodesTool.handler(input, ctx);
     expect(out.codes).toEqual([]);
     expect(getEnrichment(ctx)?.notice).toMatch(/no codes matched/i);
+  });
+
+  it('answers a term past SQLite’s LIKE pattern limit as no match, on both surfaces', async () => {
+    const result = await runToolContract(searchCodesTool, { query: 'x'.repeat(49_999) } as never);
+    expect(result.isError).toBeFalsy();
+    const notice = `No codes matched "${'x'.repeat(64)}…" (49,999 characters). Broaden the terms, drop the filters, or try clinical synonyms.`;
+    expect(result.structuredContent).toMatchObject({ codes: [], notice });
+    expect(readCommonMark(contentText(result))).toContain(notice);
+  });
+
+  it('answers a query of 1,000 distinct terms, or 2,000 repeated ones, on both surfaces', async () => {
+    const query = Array.from({ length: 1_000 }, (_, i) => `zq${i}`).join(' ');
+    const none = await runToolContract(searchCodesTool, { query } as never);
+    expect(none.isError).toBeFalsy();
+    expect(none.structuredContent).toMatchObject({ codes: [] });
+    expect(contentText(none)).toContain('No codes on this page.');
+
+    const piled = await runToolContract(searchCodesTool, {
+      query: Array(2_000).fill('diabetes').join(' '),
+    } as never);
+    expect(piled.isError).toBeFalsy();
+    const { codes } = piled.structuredContent as { codes: { code: string }[] };
+    expect(codes.map((c) => c.code)).toEqual(['E11', 'E11.9', 'E11.42', 'E11.40']);
+    expect(contentText(piled)).toContain('## 4 matching code(s)');
+  });
+
+  it('discloses the terms past 1,000 it did not apply, on both surfaces', async () => {
+    const CLAMP =
+      'A search applies at most 1,000 distinct terms: the first 1,000 of this query’s 1,001 were applied, and the rest were not.';
+    const query = Array.from({ length: 1_001 }, (_, i) => `zq${i}`).join(' ');
+    const result = await runToolContract(searchCodesTool, { query } as never);
+    expect(result.isError).toBeFalsy();
+    const notice = (result.structuredContent as { notice?: string }).notice;
+    expect(notice?.startsWith(`${CLAMP} No codes matched`)).toBe(true);
+    expect(readCommonMark(contentText(result))).toContain(CLAMP);
+
+    // The total counts every distinct term the query names, however many go unapplied.
+    const total =
+      'A search applies at most 1,000 distinct terms: the first 1,000 of this query’s 20,000 were applied, and the rest were not.';
+    const many = await runToolContract(searchCodesTool, {
+      query: Array.from({ length: 20_000 }, (_, i) => `zq${i}`).join(' '),
+    } as never);
+    expect(many.isError).toBeFalsy();
+    expect(
+      (many.structuredContent as { notice?: string }).notice?.startsWith(
+        `${total} No codes matched`,
+      ),
+    ).toBe(true);
+    expect(readCommonMark(contentText(many))).toContain(total);
+
+    // 1,000 spellings the index reads as one term, then one that matches nothing.
+    const marks = [..."!#$%&'+,./;<=>?@[\\]_`{|}~"];
+    const spellings = marks.flatMap((a) =>
+      marks.flatMap((b) => [`diabetes${a}${b}`, `${a}diabetes${b}`]),
+    );
+    const hits = await runToolContract(searchCodesTool, {
+      query: `diabetes ${spellings.slice(0, 999).join(' ')} zzzznotaterm`,
+    } as never);
+    expect(hits.isError).toBeFalsy();
+    expect(hits.structuredContent).toMatchObject({
+      codes: [{ code: 'E11' }, { code: 'E11.9' }, { code: 'E11.42' }, { code: 'E11.40' }],
+      notice: CLAMP,
+    });
+    expect(readCommonMark(contentText(hits))).toContain(CLAMP);
   });
 
   it('names the system filter in the empty-result notice so the caller can widen it', async () => {
@@ -473,6 +538,20 @@ describe('medcode_map_codes', () => {
     expect(err.message).toContain('No bundled code matches');
   });
 
+  it('answers a drug name past SQLite’s LIKE pattern limit with no_mapping, on both surfaces', async () => {
+    const result = await runToolContract(mapCodesTool, {
+      from: 'x'.repeat(49_999),
+      direction: 'name_to_rxcui',
+    } as never);
+    expect(result.isError).toBe(true);
+    const error = envelopeOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data?.reason).toBe('no_mapping');
+    const message = `No bundled code matches "${'x'.repeat(64)}…" (49,999 characters).`;
+    expect(error.message).toBe(message);
+    expect(renderedText(result)).toContain(message);
+  });
+
   it('maps a HCPCS code to its seeded letter-bucket parent', async () => {
     const ctx = createMockContext({ errors: mapCodesTool.errors });
     const out = await mapCodesTool.handler(
@@ -714,6 +793,37 @@ describe('medcode_search_codes — pagination (#17)', () => {
 
     expect([...p1.codes, ...p2.codes].map((c) => c.code)).toEqual(full.codes.map((c) => c.code));
   });
+
+  it('tells a page past the last result from a query that matches nothing, on both surfaces', async () => {
+    // The page after the last of the four codes "diabetes" matches.
+    const cursor = encodeNextCursor({ offset: 2, limit: 2 });
+    const cases = [
+      [
+        { query: 'diabetes', cursor },
+        '"diabetes" matches codes, but this page starts past the last result. Re-call without a cursor to start from the first page.',
+      ],
+      [
+        { query: 'diabetes', system: 'ICD10CM', cursor },
+        '"diabetes" matches codes in ICD10CM, but this page starts past the last result. Re-call without a cursor to start from the first page.',
+      ],
+      [
+        { query: 'diabetes', system: 'HCPCS', cursor },
+        'No codes matched "diabetes" in HCPCS. Broaden the terms, drop the filters, or try clinical synonyms.',
+      ],
+      [
+        { query: 'zzzznotarealterm', cursor },
+        'No codes matched "zzzznotarealterm". Broaden the terms, drop the filters, or try clinical synonyms.',
+      ],
+    ] as const;
+    for (const [args, notice] of cases) {
+      const result = await runToolContract(searchCodesTool, args as never);
+      expect(result.isError, notice).toBeFalsy();
+      expect(result.structuredContent, notice).toMatchObject({ codes: [], notice });
+      expect(readCommonMark(contentText(result)), notice).toContain(notice);
+      // The text's own line holds for both causes and leaves the cause to the notice.
+      expect(readCommonMark(contentText(result)), notice).toContain('No codes on this page.');
+    }
+  });
 });
 
 describe('medcode_browse_hierarchy — pagination (#16)', () => {
@@ -847,42 +957,110 @@ describe('medcode_get_code — reply byte budget (#68)', () => {
     expect(walk.pages[0]?.notFound.length).toBeLessThan(reference.notFound.length);
   });
 
+  /** A miss of `length` characters, `wide` of them four-byte, the rest `O`. */
+  const miss = (length: number, wide: number) => `${'😀'.repeat(wide)}${'O'.repeat(length - wide)}`;
+  /** The miss that adds `extra` bytes to each surface over a one-`O` miss, if one fits in 63 characters. */
+  const missFor = (extra: number) => {
+    for (let length = 1; length <= 63; length++) {
+      const left = extra - 2 * (length - 1);
+      if (left >= 0 && left % 6 === 0 && left / 6 <= length) return { length, wide: left / 6 };
+    }
+    return;
+  };
+  /** Small codes that resolve, each shifting a reply's size by its own amount. */
+  const FILLERS = [[], ['J0120'], ['I10'], ['E11.9'], ['E0110'], ['161'], ['0DTJ4ZZ']];
+
   it('cuts exactly at the budget: a reply of 24,000 B is whole, one more byte defers', async () => {
     // A miss's code is echoed in its `code` and its reason on both surfaces, so each
-    // character of an unshaped miss adds exactly 2 B to each. Pad one behind a
-    // prefix of heavy codes until the larger surface lands on the budget, with a code
-    // that resolves after it deferred, so the Deferred section is measured too.
-    const miss = (length: number) => 'O'.repeat(length);
+    // character of an unshaped miss of up to 64 characters adds exactly twice its
+    // UTF-8 size to each: 2 B for `O`, 8 B for `😀`. Pad one behind a prefix of heavy
+    // codes until the larger surface lands on the budget, with a code that resolves
+    // after it deferred, so the Deferred section is measured too. A miss is echoed
+    // whole only up to 64 characters, so four-byte characters carry the room a longer
+    // run of `O` once did, a smaller code that resolves takes up the rest, and the
+    // miss stays under 64 for the one character more.
     const tail = HEAVY;
-    let found: { length: number; prefix: string[] } | undefined;
+    let found: { length: number; prefix: string[]; wide: number } | undefined;
     for (let count = 28; count > 20 && !found; count--) {
-      const prefix = Array.from({ length: count }, () => HEAVY);
-      const probe = await getCodePage({
-        codes: [...prefix, miss(1), tail],
-        includeHierarchy: true,
-      });
-      if (JSON.stringify(probe.deferred) !== JSON.stringify([tail])) continue;
-      const gap = REPLY_BUDGET_BYTES - Math.max(probe.contentBytes, probe.structuredBytes);
-      if (gap >= 0 && gap % 2 === 0) found = { prefix, length: 1 + gap / 2 };
+      for (const filler of FILLERS) {
+        const prefix = [...Array.from({ length: count }, () => HEAVY), ...filler];
+        const probe = await getCodePage({ codes: [...prefix, 'O', tail], includeHierarchy: true });
+        if (JSON.stringify(probe.deferred) !== JSON.stringify([tail])) continue;
+        const fit = missFor(
+          REPLY_BUDGET_BYTES - Math.max(probe.contentBytes, probe.structuredBytes),
+        );
+        if (fit) {
+          found = { prefix, ...fit };
+          break;
+        }
+      }
     }
     expect(found).toBeDefined();
-    const { prefix, length } = found!;
+    const { prefix, length, wide } = found!;
 
     const atBudget = await getCodePage({
-      codes: [...prefix, miss(length), tail],
+      codes: [...prefix, miss(length, wide), tail],
       includeHierarchy: true,
     });
     expect(atBudget.deferred).toEqual([tail]);
     expect(Math.max(atBudget.contentBytes, atBudget.structuredBytes)).toBe(REPLY_BUDGET_BYTES);
-    expect(atBudget.notFound.map((n) => n.code)).toEqual([miss(length)]);
+    expect(atBudget.notFound.map((n) => n.code)).toEqual([miss(length, wide)]);
 
     const over = await getCodePage({
-      codes: [...prefix, miss(length + 1), tail],
+      codes: [...prefix, miss(length + 1, wide), tail],
       includeHierarchy: true,
     });
-    expect(over.deferred).toEqual([miss(length + 1), tail]);
+    expect(over.deferred).toEqual([miss(length + 1, wide), tail]);
     expect(over.found).toEqual(atBudget.found);
     expect(over.notFound).toEqual([]);
+    expect(within(over)).toBe(true);
+  });
+
+  it('cuts exactly at the budget where content[] is the larger surface, with each deferred line counted', async () => {
+    // content[] writes a miss's edge spaces as `&#32;`, five bytes to JSON's one, so a
+    // dozen misses padded with them carry the text past structuredContent, and the
+    // text side of the fit decides the cut. The tuned miss is followed by two codes
+    // that resolve, both deferred: each Deferred bullet starts its own line, and those
+    // two line breaks outweigh the two bytes one more `O` adds, so a fit that left
+    // them uncounted would keep that `O` past the budget.
+    const tail = [HEAVY, HEAVY];
+    const spaced = Array.from({ length: 12 }, (_, i) => `${' '.repeat(30)}Z${i}${' '.repeat(30)}`);
+    let found: { length: number; prefix: string[]; wide: number } | undefined;
+    for (let count = 26; count > 10 && !found; count--) {
+      for (const filler of FILLERS) {
+        const prefix = [...Array.from({ length: count }, () => HEAVY), ...spaced, ...filler];
+        const probe = await getCodePage({
+          codes: [...prefix, 'O', ...tail],
+          includeHierarchy: true,
+        });
+        if (JSON.stringify(probe.deferred) !== JSON.stringify(tail)) continue;
+        if (probe.contentBytes <= probe.structuredBytes) continue;
+        const fit = missFor(REPLY_BUDGET_BYTES - probe.contentBytes);
+        if (fit) {
+          found = { prefix, ...fit };
+          break;
+        }
+      }
+    }
+    expect(found).toBeDefined();
+    const { prefix, length, wide } = found!;
+
+    const atBudget = await getCodePage({
+      codes: [...prefix, miss(length, wide), ...tail],
+      includeHierarchy: true,
+    });
+    expect(atBudget.deferred).toEqual(tail);
+    expect(atBudget.contentBytes).toBe(REPLY_BUDGET_BYTES);
+    expect(atBudget.structuredBytes).toBeLessThan(REPLY_BUDGET_BYTES);
+    expect(atBudget.notFound.map((n) => n.code)).toEqual([...spaced, miss(length, wide)]);
+
+    const over = await getCodePage({
+      codes: [...prefix, miss(length + 1, wide), ...tail],
+      includeHierarchy: true,
+    });
+    expect(over.deferred).toEqual([miss(length + 1, wide), ...tail]);
+    expect(over.found).toEqual(atBudget.found);
+    expect(over.notFound.map((n) => n.code)).toEqual(spaced);
     expect(within(over)).toBe(true);
   });
 
@@ -902,19 +1080,26 @@ describe('medcode_get_code — reply byte budget (#68)', () => {
           : real(raw),
       );
     try {
-      // Heavy codes, then a miss whose length tunes the room left, then the NDC.
+      // Heavy codes, then misses whose total length tunes the room left, then the NDC.
+      // A miss is echoed whole only up to 64 characters, so the length is spread over
+      // misses of at most 64 each.
+      const misses = (length: number) =>
+        Array.from({ length: Math.ceil(length / 64) }, (_, i) =>
+          'O'.repeat(Math.min(64, length - i * 64)),
+        );
       const page = (count: number, length: number) =>
         getCodePage({
-          codes: [...Array.from({ length: count }, () => HEAVY), 'O'.repeat(length), twoProducts],
+          codes: [...Array.from({ length: count }, () => HEAVY), ...misses(length), twoProducts],
           includeHierarchy: true,
         });
       let count = 28;
       while ((await page(count, 1)).deferred) count--;
-      // Lengthen the miss until the NDC no longer fits: `lo` keeps it, `hi` cuts it.
+      // Lengthen the misses until the NDC no longer fits: `lo` keeps it, `hi` cuts it.
       let lo = 1;
       let hi = 2;
-      // The heavy prefix leaves under 1 KB of room, so the cut comes well before 4 KB.
-      while (hi < 4096 && !(await page(count, hi)).deferred) [lo, hi] = [hi, hi * 2];
+      // The heavy prefix leaves under 1 KB of room, so the cut comes before 1,024
+      // characters, which 16 misses carry, inside the 50-code batch.
+      while (hi < 1024 && !(await page(count, hi)).deferred) [lo, hi] = [hi, hi * 2];
       expect((await page(count, hi)).deferred).toBeDefined();
       while (hi - lo > 1) {
         const mid = (lo + hi) >> 1;
@@ -924,10 +1109,10 @@ describe('medcode_get_code — reply byte budget (#68)', () => {
       const kept = await page(count, lo);
       const cut = await page(count, hi);
       expect(kept.found.slice(-2).map((f) => f.code)).toEqual(['198440', '1049640']);
-      // Two bytes more and both products move to deferred together, as the one NDC.
+      // One character more and both products move to deferred together, as the one NDC.
       expect(cut.deferred).toEqual([twoProducts]);
       expect(cut.found.filter((f) => f.system === 'RXNORM')).toEqual([]);
-      expect(cut.notFound.map((n) => n.code)).toEqual(['O'.repeat(hi)]);
+      expect(cut.notFound.map((n) => n.code)).toEqual(misses(hi));
       expect(within(kept) && within(cut)).toBe(true);
     } finally {
       spy.mockRestore();
@@ -935,9 +1120,11 @@ describe('medcode_get_code — reply byte budget (#68)', () => {
   });
 
   it('never defers before a code resolves, so the error paths see every input', async () => {
-    // Forty-nine long misses alone outweigh the budget; deferral starts only once
-    // a code resolves, so they all come back in notFound beside the one that does.
-    const misses = Array.from({ length: 49 }, (_, i) => `${'O'.repeat(400)}${i}`);
+    // Forty-nine misses alone outweigh the budget; deferral starts only once a code
+    // resolves, so they all come back in notFound beside the one that does. A miss is
+    // echoed whole only up to 64 characters, so each is 62 four-byte characters and a
+    // digit or two, about 0.6 KB per surface.
+    const misses = Array.from({ length: 49 }, (_, i) => `${'😀'.repeat(62)}${i}`);
     const page = await getCodePage({ codes: [...misses, 'E11.9'] });
     expect(page.structuredBytes).toBeGreaterThan(REPLY_BUDGET_BYTES);
     expect(page.deferred).toBeUndefined();
@@ -946,7 +1133,7 @@ describe('medcode_get_code — reply byte budget (#68)', () => {
 
     const err = await caught(() =>
       getCodeTool.handler(
-        getCodeTool.input.parse({ codes: [...misses, 'O'.repeat(401)] }),
+        getCodeTool.input.parse({ codes: [...misses, `${'😀'.repeat(62)}x`] }),
         createMockContext({ errors: getCodeTool.errors }),
       ),
     );
@@ -1743,7 +1930,7 @@ describe('medcode_get_code — a bare integer that resolves nowhere', () => {
 });
 
 const ICD9_SENTENCE =
-  'ICD-9-CM codes (diagnoses written NNN.NN, procedures NN.NN) are not bundled — find the current ICD-10-CM or ICD-10-PCS code by description with medcode_search_codes.';
+  'ICD-9-CM codes (diagnoses written NNN.NN, external causes ENNN.N, procedures NN.NN) are not bundled — find the current ICD-10-CM or ICD-10-PCS code by description with medcode_search_codes.';
 
 // https://github.com/cyanheads/medical-codes-mcp-server/issues/69 — the sentence itself
 // is tabled in the service suite; these prove each tool carries it, and only there.
@@ -1833,6 +2020,74 @@ describe('a value in ICD-9-CM form that resolves nowhere', () => {
       ),
     );
     expect(none.message).toBe('None of the 1 requested code(s) resolved in any bundled system.');
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/71
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/74 — the rule is tabled in
+// the service suite; these prove each tool misses an ICD-9-CM form whose characters,
+// undotted, a bundled system holds: E011.0 over HCPCS E0110, 02.7 over the PCS row 027.
+describe('a value in ICD-9-CM form spelled over a bundled code', () => {
+  it('fails check_code with the sentence, not the holder, on both surfaces', async () => {
+    for (const [args, message] of [
+      [
+        { code: 'E011.0' },
+        `"E011.0" is not present in any bundled code system (ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm), and matches no bundled code shape. ${ICD9_SENTENCE}`,
+      ],
+      [
+        { code: 'E011.0', system: 'ICD10CM' },
+        `No ICD-10-CM code matches "E011.0" in the bundled release. ${ICD9_SENTENCE}`,
+      ],
+    ] as const) {
+      const result = await runToolContract(checkCodeTool, args as never);
+      const error = envelopeOf(result);
+      expect(error.data?.reason, JSON.stringify(args)).toBe('unknown_code');
+      expect(error.message, JSON.stringify(args)).toBe(message);
+      expect(renderedText(result)).toContain(message);
+    }
+  });
+
+  it('puts it in get_code notFound beside a code that resolves, and fails it alone', async () => {
+    const reason = `"E011.0" is not present in any bundled code system, and matches no bundled code shape. ${ICD9_SENTENCE}`;
+    const mixed = await runToolContract(getCodeTool, { codes: ['E011.0', 'E11.9'] } as never);
+    const out = mixed.structuredContent as { notFound: { code: string; reason: string }[] };
+    expect(out.notFound).toEqual([{ code: 'E011.0', reason }]);
+    expect(renderedText(mixed)).toContain(reason);
+
+    // Under a named system it is no code another system holds.
+    const alone = envelopeOf(
+      await runToolContract(getCodeTool, { codes: ['02.7'], system: 'ICD10CM' } as never),
+    );
+    expect(alone.data?.reason).toBe('no_codes_found');
+    expect(alone.message).toBe(
+      `None of the 1 requested code(s) resolved in ICD-10-CM, the system this call named. Values in ICD-9-CM form with no match: "02.7". ${ICD9_SENTENCE}`,
+    );
+  });
+
+  it.each([
+    [{ from: 'E011.0', direction: 'parents' }],
+    [{ from: '02.7', direction: 'children', system: 'ICD10PCS' }],
+    [{ from: 'E011.0', direction: 'rxcui_to_classes' }],
+  ])('fails map_codes %j with the sentence and its recovery', async (args) => {
+    const result = await runToolContract(mapCodesTool, args as never);
+    const error = envelopeOf(result);
+    expect(error.data?.reason).toBe('no_mapping');
+    expect(error.message).toBe(`No bundled code matches "${args.from}". ${ICD9_SENTENCE}`);
+    expect(error.data?.recovery?.hint).toMatch(/^ICD-9-CM is not bundled/);
+    expect(renderedText(result)).toContain(error.message);
+  });
+
+  it.each([
+    ['HCPCS', 'E011.0', 'HCPCS Level II'],
+    ['ICD10PCS', '02.7', 'ICD-10-PCS'],
+  ])('fails a %s browse of %j as unknown_node with the sentence', async (system, node, label) => {
+    const result = await runToolContract(browseHierarchyTool, { system, node } as never);
+    const error = envelopeOf(result);
+    expect(error.data?.reason).toBe('unknown_node');
+    expect(error.message).toBe(
+      `No ${label} code matches "${node}" in the bundled release. ${ICD9_SENTENCE}`,
+    );
+    expect(renderedText(result)).toContain(error.message);
   });
 });
 

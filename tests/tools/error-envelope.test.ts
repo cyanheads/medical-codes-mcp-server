@@ -316,7 +316,8 @@ describe('handler-thrown failures', () => {
   describe('medcode_check_code missing an ICD-9-CM form or an ICD-10-PCS section value', () => {
     const declared = checkCodeTool.errors?.find((entry) => entry.reason === 'unknown_code');
     const CPT = /CPT/;
-    const ICD9 = /ICD-9-CM codes \(diagnoses written NNN\.NN, procedures NN\.NN\) are not bundled/;
+    const ICD9 =
+      /ICD-9-CM codes \(diagnoses written NNN\.NN, external causes ENNN\.N, procedures NN\.NN\) are not bundled/;
     const SECTION = /"0" is the ICD-10-PCS section "Medical and Surgical", not a code\./;
 
     it.each([
@@ -324,6 +325,9 @@ describe('handler-thrown failures', () => {
       // only a lookup that named RxNorm says it missed there.
       [{ code: '119.1' }, ICD9, false],
       [{ code: '119.1', system: 'RXNORM' }, ICD9, true],
+      // https://github.com/cyanheads/medical-codes-mcp-server/issues/71 — an external-cause
+      // code spelled over the fixture's HCPCS E0110.
+      [{ code: 'E011.0', system: 'HCPCS' }, ICD9, false],
       [{ code: '0', system: 'ICD10PCS' }, SECTION, false],
     ])('words %j for what it is on both surfaces, with no CPT sentence', async (args, note, rx) => {
       const result = await callWithRawArgs(checkCodeTool, args);

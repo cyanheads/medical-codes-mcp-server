@@ -24,6 +24,7 @@ import {
   isRxcuiForm,
   ndcCandidates,
 } from './detect.js';
+import { quoteValue } from './echo.js';
 import {
   displayCode,
   ICD10CM_MAX_LENGTH,
@@ -66,6 +67,7 @@ interface SqliteDb {
 interface SqliteStatement {
   all(...params: unknown[]): unknown[];
   get(...params: unknown[]): unknown;
+  run(...params: unknown[]): unknown;
 }
 
 /** `better-sqlite3` Database surface used here — `.prepare()` prepares a statement. */
@@ -313,6 +315,14 @@ export class CodeIndexService {
       );
     }
 
+    // A connection-private table that tokenizes as codes_fts does, so ftsPhrases reads
+    // each query token's terms from the tokenizer itself (temp writes are allowed on a
+    // read-only connection; the table goes with the connection).
+    db.query("CREATE VIRTUAL TABLE temp.query_terms USING fts5(x, tokenize = 'unicode61')").run();
+    db.query(
+      "CREATE VIRTUAL TABLE temp.query_terms_vocab USING fts5vocab(temp, query_terms, 'instance')",
+    ).run();
+
     logger.info(
       'Code index opened',
       requestContextService.createRequestContext({
@@ -321,6 +331,35 @@ export class CodeIndexService {
       }),
     );
     return new CodeIndexService(db, dbPath);
+  }
+
+  /**
+   * `tokens` less every one whose phrase the full-text index reads the same as an
+   * earlier token's, in order. unicode61 folds case and diacritics and splits on
+   * punctuation, so `fever`, `fever,`, and `FÉVER` are one phrase, `"fever"*`, and one
+   * predicate: the terms each token makes are read from a table tokenized as
+   * `codes_fts` is, never restated in code, so the comparison follows the SQLite
+   * build's own tables.
+   */
+  ftsPhrases(tokens: readonly string[]): string[] {
+    if (tokens.length === 0) return [];
+    this.db.query('DELETE FROM temp.query_terms').run();
+    this.db
+      .query('INSERT INTO temp.query_terms(rowid, x) SELECT key, value FROM json_each(?)')
+      .run(JSON.stringify(tokens));
+    const terms = tokens.map((): string[] => []);
+    for (const row of this.db
+      .query('SELECT doc, term FROM temp.query_terms_vocab ORDER BY doc, "offset"')
+      .all() as { doc: number; term: string }[]) {
+      terms[row.doc]?.push(row.term);
+    }
+    const seen = new Set<string>();
+    return tokens.filter((_, i) => {
+      const phrase = (terms[i] ?? []).join(' ');
+      if (seen.has(phrase)) return false;
+      seen.add(phrase);
+      return true;
+    });
   }
 
   /**
@@ -440,7 +479,9 @@ export class CodeIndexService {
    * shipped index holds in both ICD-10-CM and HCPCS are the values it moves, in
    * dotted form only — `A0100` undotted is still ambiguous. RxNorm reads the dot
    * the other way: a dot between two digits keeps a value out of it altogether
-   * ({@link isRxcuiForm}), in both the shape pass and membership.
+   * ({@link isRxcuiForm}), in both the shape pass and membership. A dot where
+   * ICD-9-CM writes one ({@link isIcd9cmForm}: `E880.9`, `00.1`) keeps a value out of
+   * every system the same way.
    *
    * An explicit `system` is authoritative for the choice, but membership is still
    * evaluated across every system so `alsoIn` means the same thing on both paths.
@@ -474,8 +515,11 @@ export class CodeIndexService {
    * an explicit `system` names as the system that does hold the code. Lookup is
    * dot-blind, except that RxNorm holds no value with a dot between two digits
    * ({@link isRxcuiForm}): `724.2` is ICD-9-CM's way of writing a code, not RXCUI 7242.
+   * And no system holds a value in ICD-9-CM form ({@link isIcd9cmForm}): `E880.9`
+   * and `00.1` are ICD-9-CM codes, not ICD-10-CM `E88.09` or the ICD-10-PCS row `001`.
    */
   systemsHolding(rawCode: string): SystemId[] {
+    if (isIcd9cmForm(rawCode)) return [];
     const code = storageCode(rawCode);
     return SYSTEM_IDS.filter(
       (sys) => (sys !== 'RXNORM' || isRxcuiForm(rawCode)) && this.getRow(code, sys) !== null,
@@ -570,7 +614,7 @@ export class CodeIndexService {
   private ndcWhyNot(value: string): string | null {
     const ndc = this.ndcReading(value);
     if (!ndc) return null;
-    const identity = `"${value}" is a National Drug Code (NDC) — a package identifier, not a code in any bundled code system, so it has no validity or billing verdict.`;
+    const identity = `${quoteValue(value)} is a National Drug Code (NDC) — a package identifier, not a code in any bundled code system, so it has no validity or billing verdict.`;
     if (ndc.kind === 'unmapped') {
       return `${identity} It is well-formed, but no bundled drug maps to it${normalizedNote(ndc.normalized)}.`;
     }
@@ -779,6 +823,10 @@ export class CodeIndexService {
    *    an undercoding trap for a billing tool. Same unindexed-`LIKE` precedent the
    *    RxNorm `name_to_rxcui` crosswalk already runs at comparable scale.
    *
+   * A query past {@link MAX_QUERY_TERMS} distinct terms runs its first that many, and
+   * `unappliedTerms` counts the rest. The FTS tier states each phrase the index reads
+   * once ({@link CodeIndexService.ftsPhrases}); the substring tier tests every token.
+   *
    * The system/billable/chapter filters apply to BOTH tiers so added recall never
    * escapes the requested scope. Both tiers read `long_desc` alone for a
    * {@link LONG_DESC_ONLY_SYSTEMS} row: the FTS tier keeps such a row only when a
@@ -801,10 +849,14 @@ export class CodeIndexService {
       offset?: number;
       limit: number;
     },
-  ): { codes: SearchHit[]; hasMore: boolean } {
-    const match = toFtsMatch(queryText);
-    if (!match) return { codes: [], hasMore: false };
-    const tokens = tokenizeQuery(queryText); // non-empty whenever `match` is non-null
+  ): { codes: SearchHit[]; hasMore: boolean; unappliedTerms?: number } {
+    const distinct = tokenizeQuery(queryText);
+    if (distinct.length === 0) return { codes: [], hasMore: false };
+    const tokens = distinct.slice(0, MAX_QUERY_TERMS);
+    const unapplied = distinct.length - tokens.length;
+    const phrases = this.ftsPhrases(tokens);
+    // `ftsPhrases` keeps the first token, and `tokens` is non-empty, so `phrases` is too.
+    const match = toFtsMatch(phrases) as string;
 
     // Code-level filters, applied identically to both tiers.
     const cFilter: string[] = [];
@@ -832,23 +884,23 @@ export class CodeIndexService {
       ? ` AND (c.system NOT IN (${LONG_DESC_ONLY_SQL}) OR f.rowid IN (SELECT rowid FROM codes_fts WHERE codes_fts MATCH ?))`
       : '';
     const ftsParams = scopeHasLongDescOnly
-      ? [match, ...cParams, toFtsMatch(queryText, 'long_desc')]
+      ? [match, ...cParams, toFtsMatch(phrases, 'long_desc')]
       : [match, ...cParams];
 
     // Substring tier: every token must appear as a LIKE substring (AND semantics,
     // mirroring the FTS tier). LIKE wildcards in the token are escaped so `%`/`_`
-    // match literally — same guard as the RxNorm name crosswalk.
+    // match literally — same guard as the RxNorm name crosswalk. A token with no
+    // pattern (see likeSubstring) is a substring of no row, so the tier adds none and
+    // the FTS tier answers alone, as it does for that token's shorter spellings.
+    const patterns = tokens.map(likeSubstring);
+    const substringTier = !patterns.includes(null);
     const shortDescLike = scopeHasLongDescOnly
       ? `(c.system NOT IN (${LONG_DESC_ONLY_SQL}) AND c.short_desc LIKE ? ESCAPE '\\')`
       : "c.short_desc LIKE ? ESCAPE '\\'";
-    const likeClause = tokens
-      .map(() => `(c.long_desc LIKE ? ESCAPE '\\' OR ${shortDescLike})`)
-      .join(' AND ');
-    const likeParams: unknown[] = [];
-    for (const token of tokens) {
-      const pattern = `%${escapeLike(token)}%`;
-      likeParams.push(pattern, pattern);
-    }
+    const likeClause = substringTier
+      ? balancedAnd(tokens.map(() => `(c.long_desc LIKE ? ESCAPE '\\' OR ${shortDescLike})`))
+      : 'FALSE';
+    const likeParams = substringTier ? patterns.flatMap((pattern) => [pattern, pattern]) : [];
 
     // The FTS tier is materialized once (bm25 is computed where MATCH is in scope),
     // then reused for the tier-1 dedup so the substring arm carries only rows the
@@ -874,6 +926,7 @@ export class CodeIndexService {
     return {
       codes: rows.map((r) => CodeIndexService.decode(CodeIndexService.toCodeRow(r))),
       hasMore,
+      ...(unapplied > 0 ? { unappliedTerms: unapplied } : {}),
     };
   }
 
@@ -1003,8 +1056,8 @@ export class CodeIndexService {
    * display form is named against ICD-10-CM alone, as `resolveSystems` prefers it
    * among holders: `E11.99` is no HCPCS code, though `E1199` is HCPCS-shaped. An
    * RXCUI-shaped value is a likely CPT / HCPCS Level I code and gets the
-   * out-of-scope sentence. A value in ICD-9-CM form fits no shape (its dot rules
-   * out the RXCUI), so it lands on the no-shape lead, with {@link ICD9CM_NOTE}.
+   * out-of-scope sentence. A value in ICD-9-CM form fits no shape
+   * ({@link detectSystems}), so it lands on the no-shape lead, with {@link ICD9CM_NOTE}.
    */
   private autoDetectedMiss(trimmed: string, shapes: SystemId[]): string {
     if (shapes.includes('RXNORM')) return this.bareIntegerMiss(trimmed, shapes);
@@ -1012,7 +1065,7 @@ export class CodeIndexService {
       return `${noMatch('ICD10CM', trimmed)} in the bundled release.`;
     }
     if (shapes.length > 0) return `${noMatch(shapes, trimmed)} in the bundled release.`;
-    const noShape = `"${trimmed}" is not present in any bundled code system (ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm), and matches no bundled code shape.`;
+    const noShape = `${quoteValue(trimmed)} is not present in any bundled code system (ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm), and matches no bundled code shape.`;
     return isIcd9cmForm(trimmed) ? `${noShape} ${ICD9CM_NOTE}` : noShape;
   }
 
@@ -1028,7 +1081,7 @@ export class CodeIndexService {
     const searched = shapes.filter((sys) => sys !== 'RXNORM');
     return searched.length > 0
       ? `${noMatch(searched, trimmed)} in the bundled release. ${this.outOfScopeNote()}`
-      : `"${trimmed}" looks like an RxNorm RXCUI or a CPT / HCPCS Level I code. ${this.outOfScopeNote()}`;
+      : `${quoteValue(trimmed)} looks like an RxNorm RXCUI or a CPT / HCPCS Level I code. ${this.outOfScopeNote()}`;
   }
 
   /**
@@ -1351,7 +1404,7 @@ export class CodeIndexService {
   pcsSectionNote(trimmed: string): string | null {
     const meaning = this.pcsSection(trimmed);
     return meaning
-      ? `"${trimmed}" is the ICD-10-PCS section "${meaning}", not a code. ${PCS_SECTION_GUIDANCE}`
+      ? `${quoteValue(trimmed)} is the ICD-10-PCS section "${meaning}", not a code. ${PCS_SECTION_GUIDANCE}`
       : null;
   }
 
@@ -1383,7 +1436,8 @@ export class CodeIndexService {
         // Escape LIKE wildcards in the user value so `%` / `_` / `\` match
         // literally instead of acting as operators (an unescaped `%` would match
         // every drug name). Bind the escaped term inside `%…%` and declare the
-        // escape char with ESCAPE. A broad substring can match tens of thousands
+        // escape char with ESCAPE; a name too long for that pattern matches no
+        // drug name (see likeSubstring). A broad substring can match tens of thousands
         // of concepts, so this direction paginates. `ORDER BY length(code)` is not
         // unique (many RXCUIs share a string length), so `, code` makes the total
         // order deterministic — offset pages would otherwise skip or repeat rows.
@@ -1391,7 +1445,8 @@ export class CodeIndexService {
         // type, which a name like "SBD" or "in" would otherwise match wholesale. The
         // term type rides along from `chapter` as `conceptType`, since one name
         // matches ingredients, combinations, and products alike.
-        const term = `%${escapeLike(value)}%`;
+        const term = likeSubstring(value);
+        if (term === null) return { kind: 'source_not_found' };
         const match = `system = 'RXNORM' AND long_desc LIKE ? ESCAPE '\\'`;
         const { rows, hasMore } = this.fetchPage(
           `SELECT code, long_desc, chapter FROM codes
@@ -1538,7 +1593,11 @@ export class CodeIndexService {
    * Browse a system's hierarchy. With no `node`: top-level entries (3-char
    * ICD-10-CM categories grouped by chapter letter, HCPCS range buckets, PCS
    * section axis values). With a `node`: that node's children — for ICD-10-PCS,
-   * the valid next-position axis values rather than prefix children.
+   * the valid next-position axis values rather than prefix children. A node in
+   * ICD-9-CM form names no node in any system ({@link systemsHolding}), so it is
+   * `unknown_node`, named as ICD-9-CM's, never walked as the code its characters
+   * spell undotted; RxNorm, which has no hierarchy to look a node up in, keeps its
+   * empty answer.
    */
   browse(
     system: SystemId,
@@ -1548,6 +1607,13 @@ export class CodeIndexService {
     | { kind: 'codes'; codes: DecodedCode[]; hasMore: boolean }
     | { kind: 'axes'; axes: PcsAxisRow[]; hasMore: boolean }
     | { kind: 'unknown_node'; reason?: string } {
+    if (node && system !== 'RXNORM' && isIcd9cmForm(node)) {
+      return {
+        kind: 'unknown_node',
+        reason: `${noMatch(system, node)} in the bundled release. ${ICD9CM_NOTE}`,
+      };
+    }
+
     if (system === 'ICD10PCS') {
       return this.browsePcs(node, page);
     }
@@ -1610,9 +1676,7 @@ export class CodeIndexService {
     if (node && !ICD10PCS_PARTIAL_RE.test(partial)) {
       return {
         kind: 'unknown_node',
-        reason:
-          `"${node}" is not a valid ICD-10-PCS node: every axis value is a digit 0-9 or ` +
-          `a letter A-Z excluding I and O (which would read as 1 and 0).`,
+        reason: `${quoteValue(node)} is not a valid ICD-10-PCS node: every axis value is a digit 0-9 or a letter A-Z excluding I and O (which would read as 1 and 0).`,
       };
     }
     if (partial.length >= 7) {
@@ -1634,13 +1698,10 @@ export class CodeIndexService {
     // half removes. Membership comes from `codes`, the same table (and the same source
     // file) the complete-code branch checks, so the two agree on what the release holds
     // rather than coupling the guard to the separately-sourced `pcs_axes`.
-    if (partial && !this.pcsPrefixExists(partial)) {
+    if (node && partial && !this.pcsPrefixExists(partial)) {
       return {
         kind: 'unknown_node',
-        reason:
-          `No ICD-10-PCS code in this release begins with "${node}" — each axis position is ` +
-          `only valid in the context of the values that precede it, so most character ` +
-          `combinations are not real paths.`,
+        reason: `No ICD-10-PCS code in this release begins with ${quoteValue(node)} — each axis position is only valid in the context of the values that precede it, so most character combinations are not real paths.`,
       };
     }
     const position = partial.length + 1; // next axis position to enumerate
@@ -1725,33 +1786,55 @@ function prefixUpperBound(prefix: string): string {
 const NUL = '\u0000';
 
 /**
+ * The most distinct terms one search applies ({@link tokenizeQuery} counts a repeated
+ * term once): a longer query runs its first this many, and the result counts the rest
+ * as `unappliedTerms`, so the work a single search asks of the index stays bounded.
+ */
+export const MAX_QUERY_TERMS = 1_000;
+
+/**
  * Tokenize free user text the way both search tiers consume it: lowercase, strip
- * FTS5 operator characters and {@link NUL}, split on whitespace, drop empties.
+ * FTS5 operator characters and {@link NUL}, split on whitespace, drop empties, and
+ * keep each distinct token once, where it first appears — a repeated token is the
+ * same predicate in both tiers, so a query ranks as it would with each token once.
  * Shared by {@link toFtsMatch} (the prefix tier) and the substring tier's LIKE
  * patterns so the two tiers tokenize identically and stay in lockstep.
  */
 export function tokenizeQuery(text: string): string[] {
-  return text
+  const tokens = text
     .toLowerCase()
     .replaceAll(NUL, ' ')
     .replace(/["()*:^-]/g, ' ')
     .split(/\s+/)
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
+  return [...new Set(tokens)];
 }
 
 /**
- * Translate free user text into a safe FTS5 MATCH expression. ANDs prefix-matched
- * tokens so "diabetic neuropathy" requires both stems. With `column`, every token
- * is restricted to that `codes_fts` column. Returns null when nothing usable
- * remains (caller treats that as an empty result, not an error).
+ * Translate query tokens ({@link tokenizeQuery}) into a safe FTS5 MATCH expression.
+ * ANDs prefix-matched tokens so "diabetic neuropathy" requires both stems. With
+ * `column`, every token is restricted to that `codes_fts` column. Returns null when
+ * there is no token (caller treats that as an empty result, not an error).
  */
-export function toFtsMatch(text: string, column?: 'long_desc'): string | null {
-  const tokens = tokenizeQuery(text);
+export function toFtsMatch(tokens: readonly string[], column?: 'long_desc'): string | null {
   if (tokens.length === 0) return null;
   // Quote each token (defuses any residual special handling) and prefix-match.
   const filter = column ? `${column} : ` : '';
   return tokens.map((t) => `${filter}"${t}"*`).join(' AND ');
+}
+
+/**
+ * SQL `terms` joined by AND as a balanced tree, so the expression's depth grows with
+ * the log of the term count rather than with the count, as a flat `a AND b AND …`
+ * chain's does — SQLite caps an expression tree's depth. The tree lists the terms
+ * left to right, so their `?` parameters bind in the order a flat join would.
+ * `terms` is non-empty.
+ */
+function balancedAnd(terms: readonly string[]): string {
+  if (terms.length === 1) return terms.join('');
+  const mid = Math.ceil(terms.length / 2);
+  return `(${balancedAnd(terms.slice(0, mid))} AND ${balancedAnd(terms.slice(mid))})`;
 }
 
 /**
@@ -1765,20 +1848,38 @@ export function escapeLike(value: string): string {
 }
 
 /**
+ * The longest `LIKE` pattern SQLite runs, in UTF-8 bytes: its default
+ * `SQLITE_MAX_LIKE_PATTERN_LENGTH`, which the `bun:sqlite` and `better-sqlite3` builds
+ * both keep. A longer pattern fails the statement ("LIKE or GLOB pattern too complex").
+ */
+const LIKE_PATTERN_MAX_BYTES = 50_000;
+
+/**
+ * The `LIKE '%…%'` pattern that matches `value` literally as a substring (pair with
+ * `ESCAPE '\'`), or null when SQLite would refuse it. Null is a definite no-match: the
+ * escapes at most double a value, so a refused pattern holds a value of at least 25,000
+ * bytes, and no stored description or drug name comes near that length.
+ */
+function likeSubstring(value: string): string | null {
+  const pattern = `%${escapeLike(value)}%`;
+  return Buffer.byteLength(pattern, 'utf8') > LIKE_PATTERN_MAX_BYTES ? null : pattern;
+}
+
+/**
  * The lead of a not-found message under a named system, or the systems a value's
  * shape fits, naming each missed system by its label so every miss reads alike:
  * RxNorm misses a concept, the others a code (`No ICD-10-PCS code or RxNorm
  * concept matches …`). Shared by `checkCode`, medcode_get_code, and
- * medcode_map_codes.
+ * medcode_map_codes; the value is quoted as {@link quoteValue} bounds it.
  */
-export function noMatch(systems: SystemId | readonly SystemId[], trimmed: string): string {
+export function noMatch(systems: SystemId | readonly SystemId[], value: string): string {
   const list = typeof systems === 'string' ? [systems] : systems;
   const codeLabels = list.filter((sys) => sys !== 'RXNORM').map((sys) => SYSTEM_LABELS[sys]);
   const nouns = [
     ...(codeLabels.length > 0 ? [`${codeLabels.join(' or ')} code`] : []),
     ...(list.includes('RXNORM') ? [`${SYSTEM_LABELS.RXNORM} concept`] : []),
   ];
-  return `No ${nouns.join(' or ')} matches "${trimmed}"`;
+  return `No ${nouns.join(' or ')} matches ${quoteValue(value)}`;
 }
 
 /**
@@ -1788,7 +1889,7 @@ export function noMatch(systems: SystemId | readonly SystemId[], trimmed: string
  * was sent to.
  */
 export const ICD9CM_NOTE =
-  'ICD-9-CM codes (diagnoses written NNN.NN, procedures NN.NN) are not bundled — find the current ICD-10-CM or ICD-10-PCS code by description with medcode_search_codes.';
+  'ICD-9-CM codes (diagnoses written NNN.NN, external causes ENNN.N, procedures NN.NN) are not bundled — find the current ICD-10-CM or ICD-10-PCS code by description with medcode_search_codes.';
 
 /** Where an ICD-10-PCS section value goes instead, closing {@link CodeIndexService.pcsSectionNote}. */
 export const PCS_SECTION_GUIDANCE =
@@ -1834,7 +1935,7 @@ function normalizedNote(normalized: string | null): string {
  * tool it was sent to.
  */
 export function unmappedNdcMessage(value: string, normalized: string | null): string {
-  return `"${value}" is a valid NDC format but no bundled drug maps to it${normalizedNote(normalized)}.`;
+  return `${quoteValue(value)} is a valid NDC format but no bundled drug maps to it${normalizedNote(normalized)}.`;
 }
 
 /** Today's UTC date as YYYYMMDD — the clock the build's HCPCS cutoff reads too. */

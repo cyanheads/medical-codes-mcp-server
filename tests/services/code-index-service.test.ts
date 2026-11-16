@@ -13,6 +13,7 @@ import {
   escapeLike,
   noMatch,
   toFtsMatch,
+  tokenizeQuery,
 } from '@/services/code-index/code-index-service.js';
 import {
   ICD10PCS_PARTIAL_RE,
@@ -193,6 +194,239 @@ describe('searchFts', () => {
     expect(inA.every((h) => h.chapter === 'A')).toBe(true);
     expect(svc.searchFts('fever', { limit: 50, chapter: 'E' }).codes).toEqual([]);
   });
+
+  /**
+   * SQLite refuses a LIKE pattern longer than 50,000 bytes, counted in UTF-8 after the
+   * wildcard escapes. A term whose pattern runs past that is a substring of no stored
+   * description, so it answers as a term that matches nothing.
+   */
+  it.each([
+    ['letters one byte past the limit', 'x'.repeat(49_999)],
+    ['two-byte characters', 'é'.repeat(25_000)],
+    ['wildcards the pattern escapes', '%'.repeat(25_000)],
+  ])('answers a term whose LIKE pattern passes the limit, %s, as no match', (_shape, term) => {
+    expect(svc.searchFts(term, { limit: 10 })).toEqual({ codes: [], hasMore: false });
+    expect(svc.searchFts(`diabetes ${term}`, { limit: 10 })).toEqual({
+      codes: [],
+      hasMore: false,
+    });
+    expect(svc.searchFts(`diabetes ${term}`, { system: 'ICD10CM', limit: 10 })).toEqual({
+      codes: [],
+      hasMore: false,
+    });
+  });
+
+  it('answers a term past the LIKE limit through the prefix tier, as its short spelling', () => {
+    // unicode61 reads `neuropathy,` as the term `neuropathy` however many commas follow,
+    // so the prefix tier matches it; the substring tier, which adds the polyneuropathy
+    // row for the bare word, reads the commas literally and matches neither spelling.
+    expect(ranking('neuropathy')).toEqual(['ICD10CM:E11.40', 'ICD10CM:E11.42']);
+    expect(ranking('neuropathy,')).toEqual(['ICD10CM:E11.40']);
+    expect(ranking(`neuropathy${','.repeat(50_000)}`)).toEqual(['ICD10CM:E11.40']);
+  });
+});
+
+/** `system:code` for every row of a search, in rank order. */
+function ranking(query: string, filters: { system?: 'ICD10CM' | 'RXNORM' } = {}): string[] {
+  return svc
+    .searchFts(query, { ...filters, limit: 200 })
+    .codes.map((hit) => `${hit.system}:${hit.code}`);
+}
+
+const DIABETES = ['ICD10CM:E11', 'ICD10CM:E11.9', 'ICD10CM:E11.42', 'ICD10CM:E11.40'];
+
+describe('searchFts on a query that repeats a token', () => {
+  it.each([
+    ['diabetes', 'diabetes', DIABETES],
+    ['diabetes diabetes', 'diabetes', DIABETES],
+    ['type 2 diabetes mellitus', 'type 2 diabetes mellitus', DIABETES],
+    ['neuropathy diabetic neuropathy', 'neuropathy diabetic', ['ICD10CM:E11.40', 'ICD10CM:E11.42']],
+    ['Neuropathy NEUROPATHY diabetic', 'neuropathy diabetic', ['ICD10CM:E11.40', 'ICD10CM:E11.42']],
+    ['fever fever typhoid', 'fever typhoid', ['ICD10CM:A01.0', 'ICD10CM:A01.00', 'ICD10CM:A01']],
+    ['tablet acetaminophen tablet', 'tablet acetaminophen', ['RXNORM:198440']],
+    ['infusion pump pump', 'infusion pump', ['HCPCS:K0552']],
+    ['type type', 'type', [...DIABETES, 'HCPCS:K0552', 'ICD10CM:S82.66XB']],
+  ])('ranks %j as %j ranks', (query, once, expected) => {
+    expect(ranking(once)).toEqual(expected);
+    expect(ranking(query)).toEqual(expected);
+  });
+
+  it('ranks a repeated token under a system filter as the token once', () => {
+    expect(ranking('neuropathy diabetic neuropathy', { system: 'ICD10CM' })).toEqual([
+      'ICD10CM:E11.40',
+      'ICD10CM:E11.42',
+    ]);
+    expect(ranking('tablet acetaminophen tablet', { system: 'RXNORM' })).toEqual(['RXNORM:198440']);
+  });
+
+  it.each([
+    [999, ''],
+    [999, 'diabetes'],
+    [1_000, ''],
+  ])('answers %i distinct tokens and %j instead of failing', (count, extra) => {
+    const distinct = Array.from({ length: count }, (_, i) => `zq${i}`).join(' ');
+    // A matching term among them still has to meet every other one.
+    expect(svc.searchFts(`${extra} ${distinct}`, { limit: 7 })).toEqual({
+      codes: [],
+      hasMore: false,
+    });
+    expect(svc.searchFts(`${extra} ${distinct}`, { system: 'ICD10CM', limit: 7 })).toEqual({
+      codes: [],
+      hasMore: false,
+    });
+  });
+
+  describe('past 1,000 distinct tokens', () => {
+    const tokens = (count: number) => Array.from({ length: count }, (_, i) => `zq${i}`);
+    /** 1,000 distinct spellings that unicode61 reads as the one term `diabetes`. */
+    const MARKS = [..."!#$%&'+,./;<=>?@[\\]_`{|}~"];
+    const SPELLINGS = [
+      'diabetes',
+      ...MARKS.flatMap((a) => MARKS.map((b) => `diabetes${a}${b}`)),
+      ...MARKS.flatMap((a) => MARKS.map((b) => `${a}diabetes${b}`)),
+    ].slice(0, 1_000);
+
+    it('applies the first 1,000 and counts the rest as unapplied', () => {
+      expect(new Set(SPELLINGS).size).toBe(1_000);
+      // The 1,001st term would match nothing; left unapplied, the first 1,000 match.
+      expect(ranking(SPELLINGS.join(' '))).toEqual(DIABETES);
+      const clamped = svc.searchFts(`${SPELLINGS.join(' ')} zzzznotaterm`, { limit: 200 });
+      expect(clamped.codes.map((hit) => `${hit.system}:${hit.code}`)).toEqual(DIABETES);
+      expect(clamped).toMatchObject({ hasMore: false, unappliedTerms: 1 });
+
+      // Order decides which terms run: first here, the unmatched term empties it.
+      expect(svc.searchFts(`zzzznotaterm ${SPELLINGS.join(' ')}`, { limit: 200 })).toEqual({
+        codes: [],
+        hasMore: false,
+        unappliedTerms: 1,
+      });
+    });
+
+    it('counts a repeated token once toward the 1,000', () => {
+      const repeated = [...tokens(1_000), ...tokens(500)].join(' ');
+      expect(svc.searchFts(repeated, { limit: 7 })).toEqual({ codes: [], hasMore: false });
+      expect(svc.searchFts(`${tokens(1_000).join(' ')} ZQ0 Zq999`, { limit: 7 })).toEqual({
+        codes: [],
+        hasMore: false,
+      });
+    });
+
+    it.each([1_001, 20_000])('answers %i distinct tokens on either driver', (count) => {
+      for (const system of [undefined, 'ICD10CM', 'RXNORM'] as const) {
+        expect(
+          svc.searchFts(tokens(count).join(' '), { ...(system && { system }), limit: 7 }),
+        ).toEqual({
+          codes: [],
+          hasMore: false,
+          unappliedTerms: count - 1_000,
+        });
+      }
+    });
+
+    it('pages a clamped query as one ranked set', () => {
+      const query = `${SPELLINGS.join(' ')} zzzznotaterm`;
+      const page2 = svc.searchFts(query, { offset: 2, limit: 2 });
+      expect(page2).toMatchObject({ hasMore: false, unappliedTerms: 1 });
+      expect(page2.codes.map((hit) => hit.code)).toEqual(['E11.42', 'E11.40']);
+      expect(svc.searchFts(query, { offset: 9, limit: 2 })).toEqual({
+        codes: [],
+        hasMore: false,
+        unappliedTerms: 1,
+      });
+    });
+  });
+
+  it('keeps one token per phrase the full-text index reads, where it first appears', () => {
+    expect(
+      svc.ftsPhrases(['e', 'e,', ',e', 'é', 'é', 'è', 'e​', 'ex', 'e,x', 'x,e', 'x;e']),
+    ).toEqual(['e', 'ex', 'e,x', 'x,e']);
+    // A character the index keeps inside a term makes a different term.
+    expect(svc.ftsPhrases(['e', 'e₺', "o'brien", 'o,brien', 'obrien'])).toEqual([
+      'e',
+      'e₺',
+      "o'brien",
+      'obrien',
+    ]);
+    // A token the index reads as no term at all is one phrase too.
+    expect(svc.ftsPhrases(['§', ',', 'diabetes', ';'])).toEqual(['§', 'diabetes']);
+    expect(svc.ftsPhrases([])).toEqual([]);
+  });
+
+  it('ranks spellings of one term as the term once', () => {
+    expect(ranking('diabetes diabetes, ,diabetes diabetes.')).toEqual(DIABETES);
+  });
+
+  it('ranks a term spelled several ways beside another term as the term once', () => {
+    const once = ['ICD10CM:S82.66XA', 'ICD10CM:S82.66', 'ICD10CM:S82.66XB'];
+    expect(ranking('fracture fibula')).toEqual(once);
+    expect(ranking('fracture, fracture. fracture; fibula')).toEqual(once);
+    expect(ranking('fracture, fracture. fracture; fibula', { system: 'ICD10CM' })).toEqual(once);
+  });
+
+  it.each([250, 500])('answers %i copies of a four-token query as the query once', (copies) => {
+    const piled = Array(copies).fill('type 2 diabetes mellitus').join(' ');
+    expect(ranking(piled)).toEqual(DIABETES);
+    expect(ranking(piled, { system: 'ICD10CM' })).toEqual(DIABETES);
+  });
+
+  it('pages a query that repeats a token as it pages the token once', () => {
+    const piled = Array(500).fill('diabetes').join(' ');
+    const page2 = svc.searchFts(piled, { offset: 2, limit: 2 });
+    expect(page2.codes.map((hit) => hit.code)).toEqual(['E11.42', 'E11.40']);
+    expect(page2.hasMore).toBe(false);
+    expect(svc.searchFts(piled, { offset: 9, limit: 2 })).toEqual({ codes: [], hasMore: false });
+  });
+
+  /**
+   * The query is caller-sized text, so a search must cost time linear in its length.
+   * Each shape doubles from 5k to 320k characters. Every larger size is timed beside
+   * a fresh timing of the start size, and must meet an absolute thread-CPU bound
+   * before the next size runs; the full span's growth over its start, the least of
+   * three adjacent pairs, stays under 256.
+   */
+  it.each([
+    ['matching terms', (n: number) => 'diabetes '.repeat(Math.ceil(n / 9))],
+    [
+      'distinct terms',
+      (n: number) => Array.from({ length: Math.ceil(n / 9) }, (_, i) => `term${i}`).join(' '),
+    ],
+    ['one long line ending in a break', (n: number) => `${'§1 x'.repeat(n / 4)}\ny`],
+    ['breaks throughout', (n: number) => `${'  \r\n'.repeat(n / 4)}y`],
+  ] as const)(
+    'timing: searchFts stays linear in the query length on %s',
+    { timeout: 0 },
+    (_shape, make) => {
+      const FROM = 5_000;
+      const page = { limit: 50 };
+      /** Thread CPU ms per call over `reps` calls, least of three trials. */
+      const cpuMs = (query: string, reps: number): number => {
+        let best = Number.POSITIVE_INFINITY;
+        for (let trial = 0; trial < 3; trial++) {
+          const before = process.threadCpuUsage();
+          for (let rep = 0; rep < reps; rep++) svc.searchFts(query, page);
+          const spent = process.threadCpuUsage(before);
+          best = Math.min(best, (spent.user + spent.system) / 1000 / reps);
+        }
+        return best;
+      };
+      const start = make(FROM);
+      cpuMs(start, 20); // warm up
+      let growth = Number.POSITIVE_INFINITY;
+      for (let size = FROM * 2; size <= FROM * 64; size *= 2) {
+        const query = make(size);
+        const reps = Math.max(1, (20 * FROM) / size);
+        const last = size === FROM * 64;
+        for (let pair = 0; pair < (last ? 3 : 1); pair++) {
+          const base = cpuMs(start, 20);
+          const spent = cpuMs(query, reps);
+          // 250 ms of thread CPU per call at most, at every size.
+          expect(spent, `${size} characters`).toBeLessThan(250);
+          if (last) growth = Math.min(growth, spent / Math.max(base, 0.01));
+        }
+      }
+      expect(growth).toBeLessThan(256);
+    },
+  );
 });
 
 describe('checkCode', () => {
@@ -711,16 +945,29 @@ describe('listSystems / hasRxNorm', () => {
 
 describe('toFtsMatch', () => {
   it('builds an AND of prefix-matched quoted tokens', () => {
-    expect(toFtsMatch('type 2 diabetes')).toBe('"type"* AND "2"* AND "diabetes"*');
+    expect(toFtsMatch(tokenizeQuery('type 2 diabetes'))).toBe('"type"* AND "2"* AND "diabetes"*');
   });
   it('returns null when nothing usable remains', () => {
-    expect(toFtsMatch('  ()*  ')).toBeNull();
-    expect(toFtsMatch('  ()*  ', 'long_desc')).toBeNull();
+    expect(toFtsMatch(tokenizeQuery('  ()*  '))).toBeNull();
+    expect(toFtsMatch(tokenizeQuery('  ()*  '), 'long_desc')).toBeNull();
   });
   it('restricts every token to one column when asked', () => {
-    expect(toFtsMatch('oral tablet', 'long_desc')).toBe(
+    expect(toFtsMatch(tokenizeQuery('oral tablet'), 'long_desc')).toBe(
       'long_desc : "oral"* AND long_desc : "tablet"*',
     );
+  });
+});
+
+describe('tokenizeQuery', () => {
+  it('states a repeated token once, where it first appears', () => {
+    expect(tokenizeQuery('Neuropathy diabetic NEUROPATHY neuropathy')).toEqual([
+      'neuropathy',
+      'diabetic',
+    ]);
+    // Tokens are compared after normalization, so an operator character that splits
+    // one spelling makes the same token as the other.
+    expect(tokenizeQuery('type-2 type 2')).toEqual(['type', '2']);
+    expect(tokenizeQuery('  ()*  ')).toEqual([]);
   });
 });
 
@@ -831,6 +1078,14 @@ describe('mapCode (RxNorm drug directions)', () => {
   });
   it('source_not_found for an unknown drug name', () => {
     expect(svc.mapCode('zzznotadrug', 'name_to_rxcui').kind).toBe('source_not_found');
+  });
+  it('source_not_found for a drug name whose LIKE pattern passes SQLite’s limit', () => {
+    // A name past the 50,000-byte LIKE pattern limit is the substring of no stored name.
+    const name = 'x'.repeat(49_999);
+    expect(svc.mapCode(name, 'name_to_rxcui')).toEqual({ kind: 'source_not_found' });
+    expect(svc.mapCode(name, 'name_to_rxcui', undefined, { offset: 2, limit: 2 })).toEqual({
+      kind: 'source_not_found',
+    });
   });
   // https://github.com/cyanheads/medical-codes-mcp-server/issues/35
   it('ndc_to_rxcui refuses a spelling get_code refuses, rather than digit-stripping it', () => {
@@ -1635,7 +1890,7 @@ describe('the name_to_rxcui and ndc_to_rxcui targets carry their term type', () 
 });
 
 const ICD9_SENTENCE =
-  'ICD-9-CM codes (diagnoses written NNN.NN, procedures NN.NN) are not bundled — find the current ICD-10-CM or ICD-10-PCS code by description with medcode_search_codes.';
+  'ICD-9-CM codes (diagnoses written NNN.NN, external causes ENNN.N, procedures NN.NN) are not bundled — find the current ICD-10-CM or ICD-10-PCS code by description with medcode_search_codes.';
 const NO_SHAPE = (code: string) =>
   `"${code}" is not present in any bundled code system (ICD-10-CM, ICD-10-PCS, HCPCS Level II, RxNorm), and matches no bundled code shape.`;
 
@@ -1708,12 +1963,34 @@ describe('a dot between two digits rules a value out as an RXCUI', () => {
 
 // https://github.com/cyanheads/medical-codes-mcp-server/issues/69
 describe('the ICD-9-CM sentence', () => {
-  it.each(['250.00', '250.0', '401.9', '36.06', ' 250.00 ', '724.2', '119.1', '432.39'])(
-    'reads %j as ICD-9-CM form',
-    (raw) => {
-      expect(isIcd9cmForm(raw)).toBe(true);
-    },
-  );
+  it.each([
+    '250.00',
+    '250.0',
+    '401.9',
+    '36.06',
+    ' 250.00 ',
+    '724.2',
+    '119.1',
+    '432.39',
+    // https://github.com/cyanheads/medical-codes-mcp-server/issues/74 — procedure categories.
+    '00.1',
+    '01.2',
+    '02.7',
+    // https://github.com/cyanheads/medical-codes-mcp-server/issues/71 — external causes,
+    // E000–E030 and E800–E999, one digit after the dot, in either case.
+    'E880.9',
+    ' e880.9 ',
+    'E888.9',
+    'E010.0',
+    'E011.0',
+    'E849.0',
+    'E000.0',
+    'E030.9',
+    'E800.0',
+    'E999.1',
+  ])('reads %j as ICD-9-CM form', (raw) => {
+    expect(isIcd9cmForm(raw)).toBe(true);
+  });
   it.each([
     '2500.0',
     '25000',
@@ -1724,8 +2001,22 @@ describe('the ICD-9-CM sentence', () => {
     '2.5',
     '250..00',
     'V70.0',
-    'E849.0',
+    'V01.0',
     'E11.9',
+    // Stems outside ICD-9-CM's external-cause ranges stay dot-blind (#61).
+    'E031.0',
+    'E116.5',
+    'E799.9',
+    // Not written as an external-cause code: a dot elsewhere, two decimals, or none.
+    'E88.09',
+    'E8809',
+    'E880',
+    'E880.',
+    'E880.99',
+    'E880.9.',
+    'EE880.9',
+    'F880.9',
+    'E 880.9',
     '',
   ])('does not read %j as ICD-9-CM form', (raw) => {
     expect(isIcd9cmForm(raw)).toBe(false);
@@ -1754,6 +2045,103 @@ describe('the ICD-9-CM sentence', () => {
     expect(missReason('ZZ9Q')).toBe(NO_SHAPE('ZZ9Q'));
     expect(missReason('99213')).toBe(`No RxNorm concept matches "99213". ${CPT_SENTENCE}`);
     expect(missReason('E11.99')).toBe('No ICD-10-CM code matches "E11.99" in the bundled release.');
+  });
+});
+
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/71
+// https://github.com/cyanheads/medical-codes-mcp-server/issues/74
+describe('a value in ICD-9-CM form resolves in no bundled system', () => {
+  /**
+   * Fixture values whose characters, undotted, are a bundled row: E011.0 (ICD-9-CM
+   * external cause, computer keyboarding) over HCPCS E0110 (forearm crutches), and
+   * 02.7 (an ICD-9-CM procedure spelling) over the ICD-10-PCS table row 027.
+   */
+  const SPELLED_OVER = [
+    ['E011.0', 'HCPCS', 'E0110'],
+    [' e011.0 ', 'HCPCS', 'E0110'],
+    ['02.7', 'ICD10PCS', '027'],
+  ] as const;
+  const PAGE = { offset: 0, limit: 7 };
+
+  it.each(SPELLED_OVER)(
+    'misses %j, with and without system, though %s holds %s',
+    (raw, sys, row) => {
+      // The row the dot-blind lookup used to land on is still there, undotted.
+      expect(svc.getByCode(row, sys).kind).toBe('found');
+      expect(svc.systemsHolding(raw)).toEqual([]);
+      expect(svc.detectSystem(raw)).toEqual([]);
+      for (const system of [undefined, 'ICD10CM', 'ICD10PCS', 'HCPCS', 'RXNORM'] as const) {
+        expect(svc.getByCode(raw, system), `${raw} ${system}`).toEqual({ kind: 'not_found' });
+        for (const direction of ['parents', 'children'] as const) {
+          expect(svc.mapCode(raw, direction, system), `${direction} ${raw} ${system}`).toEqual({
+            kind: 'source_not_found',
+          });
+        }
+      }
+    },
+  );
+
+  it('closes every checkCode miss on one with the sentence, never naming a holder', () => {
+    expect(missReason('E011.0')).toBe(`${NO_SHAPE('E011.0')} ${ICD9_SENTENCE}`);
+    expect(missReason(' e011.0 ')).toBe(`${NO_SHAPE('e011.0')} ${ICD9_SENTENCE}`);
+    expect(missReason('02.7')).toBe(`${NO_SHAPE('02.7')} ${ICD9_SENTENCE}`);
+    expect(missReason('E011.0', 'HCPCS')).toBe(
+      `No HCPCS Level II code matches "E011.0" in the bundled release. ${ICD9_SENTENCE}`,
+    );
+    expect(missReason('E011.0', 'ICD10CM')).toBe(
+      `No ICD-10-CM code matches "E011.0" in the bundled release. ${ICD9_SENTENCE}`,
+    );
+    expect(missReason('02.7', 'ICD10PCS')).toBe(
+      `No ICD-10-PCS code matches "02.7" in the bundled release. ${ICD9_SENTENCE}`,
+    );
+    expect(missReason('02.7', 'RXNORM')).toBe(
+      `No RxNorm concept matches "02.7" in the bundled release. ${ICD9_SENTENCE}`,
+    );
+  });
+
+  it.each([
+    ['HCPCS', 'E011.0', 'HCPCS Level II'],
+    ['ICD10CM', 'E011.0', 'ICD-10-CM'],
+    ['ICD10PCS', '02.7', 'ICD-10-PCS'],
+    ['ICD10PCS', 'E011.0', 'ICD-10-PCS'],
+  ] as const)(
+    'fails a %s browse of %j as an unknown node, with the sentence',
+    (system, node, label) => {
+      expect(svc.browse(system, node, PAGE)).toEqual({
+        kind: 'unknown_node',
+        reason: `No ${label} code matches "${node}" in the bundled release. ${ICD9_SENTENCE}`,
+      });
+    },
+  );
+
+  it('leaves the RxNorm browse, which reads no node, as it was', () => {
+    expect(svc.browse('RXNORM', '02.7', PAGE)).toEqual({
+      kind: 'codes',
+      codes: [],
+      hasMore: false,
+    });
+  });
+
+  it('keeps every other spelling of the same rows dot-blind', () => {
+    // A dot anywhere but ICD-9-CM's place still reaches the row (#61), the display
+    // form included — a preference among holders, never an exclusion.
+    for (const raw of ['E0110', 'E.0110', 'E0.110', 'E01.10', 'E0110.', '.E0110']) {
+      const r = svc.getByCode(raw);
+      expect(r.kind === 'found' && r.row, raw).toMatchObject({ system: 'HCPCS', code: 'E0110' });
+    }
+    for (const raw of ['027', '0.27', '027.', '.027']) {
+      const r = svc.getByCode(raw);
+      expect(r.kind === 'found' && r.row, raw).toMatchObject({ system: 'ICD10PCS', code: '027' });
+    }
+    // An external-cause spelling outside E000–E030 / E800–E999 is no ICD-9-CM code.
+    const cm = svc.getByCode('E114.0');
+    expect(cm.kind === 'found' && cm.row).toMatchObject({ system: 'ICD10CM', code: 'E1140' });
+    expect(svc.browse('ICD10PCS', '027', PAGE)).toMatchObject({ kind: 'axes', axes: [] });
+    expect(svc.browse('HCPCS', 'E0110', PAGE)).toEqual({
+      kind: 'codes',
+      codes: [],
+      hasMore: false,
+    });
   });
 });
 

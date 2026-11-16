@@ -2,8 +2,8 @@
 
 **Server:** medical-codes-mcp-server
 **Version:** 0.5.1
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
@@ -25,7 +25,7 @@
 
 ## Patterns
 
-This server is **tool-only** (six `medcode_*` tools, no resources or prompts) and reads a bundled read-only SQLite index — handlers compose synchronous query methods on the `code-index` service.
+This server is **tool-only** (six `medcode_*` tools, no resource or prompt definitions — the one resource it lists is its published `skills/medical-codes-guide` skill, served through `createApp({ skills: 'skills' })`) and reads a bundled read-only SQLite index — handlers compose synchronous query methods on the `code-index` service.
 
 ### Tool
 
@@ -33,6 +33,7 @@ This server is **tool-only** (six `medcode_*` tools, no resources or prompts) an
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCodeIndexService } from '@/services/code-index/code-index-service.js';
+import { echoValue, quoteValue } from '@/services/code-index/echo.js';
 import { SYSTEM_IDS } from '@/services/code-index/types.js';
 
 export const checkCodeTool = tool('medcode_check_code', {
@@ -66,9 +67,9 @@ export const checkCodeTool = tool('medcode_check_code', {
     // … discriminate on outcome.kind; a non-billable/terminated code is a SUCCESS
     // result with a whyNot, NOT an error — only an absent code throws unknown_code.
     if (outcome.kind === 'resolved' && outcome.result.status === 'unknown') {
-      throw ctx.fail('unknown_code', `Unknown code "${input.code}".`);
+      throw ctx.fail('unknown_code', `Unknown code ${quoteValue(input.code)}.`);
     }
-    ctx.log.info('Checked code', { code: input.code });
+    ctx.log.info('Checked code', { code: echoValue(input.code) });
     return { /* … */ } as never;
   },
 
@@ -80,7 +81,7 @@ export const checkCodeTool = tool('medcode_check_code', {
 });
 ```
 
-Output design conventions this server follows: echo the resolved `system` on every result (provenance for chaining); split validity from existence (a non-billable/terminated code is a successful result with a `whyNot`); publish `null` for a field the system's release does not carry (RxNorm `billable` and `shortDescription`, driven by `SYSTEM_TRAITS` in `types.ts`) rather than the placeholder the row stores; partial-success batch shapes (`medcode_get_code` returns `found` / `notFound`); `ctx.enrich` for truncation disclosure on `medcode_search_codes` / `medcode_browse_hierarchy`; and every value a tool did not author (codes, descriptions, RxNorm/RxClass names, release metadata, echoed input) renders through `_render.ts`'s `literal()` / `literalAtHeadingEnd()` / `tableRow()` — in `format()`, and in each notice's `enrichmentTrailer.render`, which escapes the whole line for `content[]` while `structuredContent.notice` carries it as written — so a CommonMark parse of `content[]` reads it back as `structuredContent` carries it. Error messages and recovery hints are plain text — the framework escapes them — so they name fields without backticks.
+Output design conventions this server follows: echo the resolved `system` on every result (provenance for chaining); split validity from existence (a non-billable/terminated code is a successful result with a `whyNot`); publish `null` for a field the system's release does not carry (RxNorm `billable` and `shortDescription`, driven by `SYSTEM_TRAITS` in `types.ts`) rather than the placeholder the row stores; partial-success batch shapes (`medcode_get_code` returns `found` / `notFound`); `ctx.enrich` for truncation disclosure on `medcode_search_codes` / `medcode_browse_hierarchy`; and every value a tool did not author (codes, descriptions, RxNorm/RxClass names, release metadata, echoed input) renders through `_render.ts`'s `literal()` / `literalAtHeadingEnd()` / `tableRow()` — in `format()`, and in each notice's `enrichmentTrailer.render`, which escapes the whole line for `content[]` while `structuredContent.notice` carries it as written — so a CommonMark parse of `content[]` reads it back as `structuredContent` carries it. Error messages and recovery hints are plain text — the framework escapes them — so they name fields without backticks. A caller value never reaches a miss, notice, `notFound` / `deferred` row, or log field raw: it goes through `echoValue` / `quoteValue` (at most its first 64 trimmed characters plus `…`), and a code input longer than 64 characters once trimmed is not looked up.
 
 ### Server config
 
@@ -147,7 +148,7 @@ Handlers receive a unified `ctx` object. The properties this server uses:
 
 | Property | Description |
 |:---------|:------------|
-| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible — log the caller's own arguments, never index internals. |
+| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible — log the caller's own arguments through `echoValue`, never index internals. |
 | `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). `medcode_search_codes` / `medcode_browse_hierarchy` disclose truncation (`{ truncated, shown, cap }`) and call `ctx.enrich.notice(...)` for empty results. |
 | `ctx.fail` | Throw a typed error against the tool's declared `errors[]` reason union; a bare `ctx.fail('reason', msg)` carries the declared `recovery` hint on the wire. |
 | `ctx.requestId` | Request ID — the one every log record of the call carries and its error envelope returns as `data.requestId`. |
@@ -211,6 +212,7 @@ src/
     code-index/
       code-index-service.ts             # Read-only SQLite handle + typed query methods (init/accessor pattern)
       detect.ts                         # Code-shape auto-detection (which system a raw code belongs to)
+      echo.ts                           # The 64-character bound on a caller value echoed in a reply or log, and on the code inputs looked up
       schema.ts                         # Shared DDL + code-shape derivation (imported by service AND build script)
       types.ts                          # Domain types (SystemId, CodeRow, MapDirection, …)
   mcp-server/
@@ -341,7 +343,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/` at a package's root, and any `SKILL.md` — a `skills/` deeper in a package, like the MCP SDK's `dist/ext/skills/`, is runtime code and stays); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs — `framework-skills/`, `skills/`, `.claude/`, `.agents/`, `AGENTS.md`, and `CLAUDE.md` at a package's root, and `SKILL.md` anywhere (a `skills/` deeper in a package is runtime code and stays); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 
