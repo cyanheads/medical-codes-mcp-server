@@ -28,7 +28,7 @@ export const searchCodesTool = tool('medcode_search_codes', {
 
   input: z.object({
     query: nonBlankString('query').describe(
-      `Clinical description to match, e.g. "type 2 diabetes with neuropathy". Must not be blank or whitespace-only. A search applies the first ${MAX_TERMS} distinct terms (a repeated term counts once), and \`notice\` names any past them that were not applied.`,
+      `Clinical description to match, e.g. "type 2 diabetes with neuropathy". Must not be blank or whitespace-only. A search applies at most its first ${MAX_TERMS} distinct terms (a repeated term counts once); past that, \`notice\` says how many distinct terms the query carried and that the rest were not applied.`,
     ),
     system: z
       .enum(SYSTEM_IDS)

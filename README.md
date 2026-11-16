@@ -90,7 +90,8 @@ CPT (AMA copyright) and SNOMED CT / LOINC (UMLS-license-gated) are intentionally
 
 ### `medcode_search_codes` <sub>tool</sub>
 
-- Every search term must appear, and a repeated term counts once; a search applies its first 1,000 distinct terms, and the notice names any past that it did not apply — matched first as a token prefix, then as a substring, so inflected and compound forms are also found; an RxNorm concept matches on its drug name alone, never its term type
+- Every search term must appear — matched first as a token prefix, then as a substring, so inflected and compound forms are also found; an RxNorm concept matches on its drug name alone, never its term type
+- A repeated term counts once, and a search applies at most its first 1,000 distinct terms; past that, the notice says how many distinct terms the query carried and that the rest were not applied
 - Filter by `system`, `billableOnly` (exclude headers/categories, terminated HCPCS codes, and every RxNorm concept — RxNorm has no billing concept), and `chapter` (for RxNorm, the term type)
 - Ranked by full-text relevance; results echo the resolved `system` per row
 - Paginates via `cursor`/`limit` (default `MEDCODE_MAX_RESULTS`, ceiling 200); discloses `truncated`/`nextCursor`, and returns a notice with the query when nothing matches; `effectiveQuery` carries the whole query, while the notice quote and `appliedFilters.chapter` are cut at 64 characters
